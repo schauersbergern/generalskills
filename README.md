@@ -1,25 +1,32 @@
 # nikskills
 
-A collection of custom Claude Code skills. Each skill is packaged as a `.skill` file, which is a ZIP archive.
+A collection of custom Claude Code skills. Each skill lives in its own directory containing a `SKILL.md` and optional support scripts.
 
 ## Skills
 
-| Skill | Description |
-|-------|-------------|
-| `gpt-image-skill` | Generates images via OpenAI `gpt-image-1` API, saves as PNG, presents in chat |
+### `gpt-image-skill`
+
+Generates images via OpenAI `gpt-image-1` API, saves as PNG, and presents them in chat.
+
+| File | Purpose |
+|------|---------|
+| `gpt-image-skill/SKILL.md` | Skill definition — trigger description, workflow, error handling |
+| `gpt-image-skill/generate_image.js` | Node.js script that calls the OpenAI Images API and saves the result as PNG |
+
+**Required env var:** `OPENAI_API_KEY`
 
 ## Usage
 
-Install a skill in Claude Code by uploading the `.skill` file. Ensure any required environment variables (e.g. `OPENAI_API_KEY`) are set in your container.
+Install a skill in Claude Code by referencing the skill directory. Ensure any required environment variables are set in your container.
 
-## Skill File Format
+## Skill Structure
 
-A `.skill` file is a ZIP archive with the following structure:
+Each skill lives in its own directory:
 
 ```
 <skill-name>/
   SKILL.md          # Required: skill definition with YAML frontmatter
-  <support files>   # Optional: scripts, assets, etc. (e.g., generate_image.js)
+  <support files>   # Optional: scripts, assets, etc.
 ```
 
 ### SKILL.md Frontmatter
@@ -33,29 +40,6 @@ description: >
 ```
 
 The `description` field controls when Claude auto-invokes the skill, so it should list all relevant trigger phrases and use-cases.
-
-## Building a Skill
-
-To create a `.skill` file from a directory:
-
-```bash
-zip -r <skill-name>.skill <skill-name>/
-```
-
-To inspect an existing `.skill` file:
-
-```bash
-unzip -l <skill-name>.skill        # list contents
-unzip -p <skill-name>.skill <skill-name>/SKILL.md  # read SKILL.md
-```
-
-To extract and edit:
-
-```bash
-unzip <skill-name>.skill -d extracted/
-# edit files in extracted/<skill-name>/
-cd extracted && zip -r ../<skill-name>.skill <skill-name>/
-```
 
 ## Skill Architecture
 
