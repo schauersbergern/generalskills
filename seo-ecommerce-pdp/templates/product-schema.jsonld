@@ -1,0 +1,133 @@
+{
+  "@context": "https://schema.org",
+  "@graph": [
+
+    {
+      "@type": "Product",
+      "@id": "[PDP-URL]#product",
+      "name": "[Produktname]",
+      "description": "[1-2 Sätze Produktbeschreibung, max ca. 250 Zeichen]",
+      "image": [
+        "[Bild 1, Aspect Ratio 1:1, mindestens 1200x1200]",
+        "[Bild 2, Aspect Ratio 4:3]",
+        "[Bild 3, Aspect Ratio 16:9]"
+      ],
+      "url": "[PDP-URL]",
+      "sku": "[SKU]",
+      "gtin13": "[EAN, optional, weglassen wenn nicht vorhanden]",
+      "mpn": "[Manufacturer Part Number, optional, weglassen wenn nicht vorhanden]",
+      "brand": {
+        "@type": "Brand",
+        "name": "[Markenname]",
+        "url": "[Hersteller-URL, optional]"
+      },
+      "category": "[Hauptkategorie, z.B. 'Klappräder' oder 'Sport > Fahrräder > Klappräder']",
+      "color": "[Farbe, optional]",
+      "material": "[Hauptmaterial, optional]",
+      "weight": {
+        "@type": "QuantitativeValue",
+        "value": "[Wert]",
+        "unitCode": "KGM"
+      },
+      "offers": {
+        "@type": "Offer",
+        "@id": "[PDP-URL]#offer",
+        "url": "[PDP-URL]",
+        "priceCurrency": "EUR",
+        "price": "[Preis als String, kein Währungssymbol]",
+        "priceValidUntil": "[ISO-Datum in der Zukunft, z.B. 2027-12-31]",
+        "availability": "https://schema.org/InStock",
+        "itemCondition": "https://schema.org/NewCondition",
+        "seller": {
+          "@type": "Organization",
+          "name": "[Shop-Name]"
+        },
+        "hasMerchantReturnPolicy": {
+          "@type": "MerchantReturnPolicy",
+          "applicableCountry": "DE",
+          "returnPolicyCategory": "https://schema.org/MerchantReturnFiniteReturnWindow",
+          "merchantReturnDays": 30,
+          "returnMethod": "https://schema.org/ReturnByMail",
+          "returnFees": "https://schema.org/FreeReturn"
+        },
+        "shippingDetails": {
+          "@type": "OfferShippingDetails",
+          "shippingRate": {
+            "@type": "MonetaryAmount",
+            "value": "[Versandkosten als String, '0' für kostenlos]",
+            "currency": "EUR"
+          },
+          "shippingDestination": {
+            "@type": "DefinedRegion",
+            "addressCountry": "DE"
+          },
+          "deliveryTime": {
+            "@type": "ShippingDeliveryTime",
+            "handlingTime": {
+              "@type": "QuantitativeValue",
+              "minValue": 0,
+              "maxValue": 1,
+              "unitCode": "DAY"
+            },
+            "transitTime": {
+              "@type": "QuantitativeValue",
+              "minValue": 1,
+              "maxValue": 3,
+              "unitCode": "DAY"
+            }
+          }
+        }
+      },
+
+      "_aggregateRating_HINWEIS": "Nur einbinden, wenn echte Reviews vorhanden sind. Niemals fälschen.",
+      "aggregateRating": {
+        "@type": "AggregateRating",
+        "ratingValue": "[z.B. 4.7]",
+        "reviewCount": "[Anzahl Reviews]",
+        "bestRating": "5",
+        "worstRating": "1"
+      },
+
+      "review": [
+        {
+          "@type": "Review",
+          "author": { "@type": "Person", "name": "[Vorname N.]" },
+          "datePublished": "[ISO-Datum]",
+          "reviewBody": "[Echter Reviewtext, mind. 30 Wörter]",
+          "reviewRating": {
+            "@type": "Rating",
+            "ratingValue": "5",
+            "bestRating": "5",
+            "worstRating": "1"
+          }
+        }
+      ]
+    },
+
+    {
+      "@type": "BreadcrumbList",
+      "@id": "[PDP-URL]#breadcrumb",
+      "itemListElement": [
+        {
+          "@type": "ListItem",
+          "position": 1,
+          "name": "Home",
+          "item": "[Shop-Homepage-URL]"
+        },
+        {
+          "@type": "ListItem",
+          "position": 2,
+          "name": "[Kategorie]",
+          "item": "[Kategorie-URL]"
+        },
+        {
+          "@type": "ListItem",
+          "position": 3,
+          "name": "[Produktname]",
+          "item": "[PDP-URL]"
+        }
+      ]
+    }
+
+  ]
+}

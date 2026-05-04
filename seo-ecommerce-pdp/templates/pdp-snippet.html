@@ -1,0 +1,160 @@
+<!--
+  PDP HTML-Snippet Template
+  ============================
+  Plattformneutrales HTML, das in Shopify, WooCommerce, Shopware oder Custom Shops
+  einsetzbar ist. Platzhalter sind in [eckigen Klammern] gekennzeichnet und müssen
+  vor dem Einsatz ausgetauscht werden.
+
+  Hinweise:
+  - Auf Shopify: kann mit Liquid-Variablen erweitert werden, z.B. {{ product.price | money }}
+  - Auf WooCommerce: in den Block-Editor als HTML-Block einfügen
+  - Auf Shopware: in das Feld "Produktbeschreibung lang"
+  - Inline-CSS minimal halten, Theme-CSS sollte das Layout übernehmen
+-->
+
+<article class="product-detail" itemscope itemtype="https://schema.org/Product">
+
+  <!-- Hero-Statement: 1-2 Sätze direkt unter H1 (H1 wird vom Theme gerendert) -->
+  <p class="product-hero">
+    <strong>[Produktname]</strong> ist [Kategorie] für [Zielgruppe], [Hauptnutzen/USP].
+    [Optional: Differenzierung zum Wettbewerb in einem Halbsatz].
+  </p>
+
+  <!-- USP-Bullets: 3-5 Bullets, jeweils 8-15 Wörter, faktendicht -->
+  <ul class="product-usps">
+    <li>[USP 1: konkrete Zahl, Maß, Vergleichswert]</li>
+    <li>[USP 2: ...]</li>
+    <li>[USP 3: ...]</li>
+    <li>[USP 4: ...]</li>
+    <li>[USP 5: ...]</li>
+  </ul>
+
+  <!-- Lange Produktbeschreibung in 3-4 H3-Subsektionen -->
+  <section class="product-description">
+
+    <h3>Was ist das [Produktname]?</h3>
+    <p>
+      [80-150 Wörter: Kontext, Zielgruppe, Hauptanwendung. Kernaussage in den ersten 2-3 Sätzen.]
+    </p>
+
+    <h3>Was unterscheidet das [Produktname] vom Wettbewerb?</h3>
+    <p>
+      [80-150 Wörter: Vergleich zu Vorgänger oder Wettbewerb, konkrete Differenzierung mit Zahlen.]
+    </p>
+
+    <h3>Technische Highlights</h3>
+    <p>
+      [80-150 Wörter: Materialien, Konstruktion, besondere Features.]
+    </p>
+
+    <h3>Für wen lohnt sich das [Produktname]?</h3>
+    <p>
+      [80-150 Wörter: Konkrete Use Cases, Anwendungsszenarien.]
+    </p>
+
+  </section>
+
+  <!-- Spezifikationstabelle, mind. 5 Zeilen -->
+  <section class="product-specs">
+    <h3>Spezifikationen</h3>
+    <table class="spec-table">
+      <thead>
+        <tr><th>Eigenschaft</th><th>Wert</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Marke</td><td>[Marke]</td></tr>
+        <tr><td>Modell</td><td>[Modell]</td></tr>
+        <tr><td>Material</td><td>[Material]</td></tr>
+        <tr><td>Maße (B x H x T)</td><td>[Werte] cm</td></tr>
+        <tr><td>Gewicht</td><td>[Wert] kg</td></tr>
+        <tr><td>Farben</td><td>[Liste]</td></tr>
+        <tr><td>Lieferumfang</td><td>[Liste]</td></tr>
+        <tr><td>Garantie</td><td>[Wert] Jahre</td></tr>
+        <tr><td>Herkunftsland</td><td>[Land]</td></tr>
+        <!-- Bei EU-Energielabel-Pflicht: -->
+        <!-- <tr><td>Energieeffizienzklasse</td><td>[A-G]</td></tr> -->
+      </tbody>
+    </table>
+  </section>
+
+  <!-- Variants (nur wenn relevant) -->
+  <section class="product-variants" hidden>
+    <h3>Verfügbare Varianten</h3>
+    <p>
+      Verfügbar in [Anzahl] Farben: [Liste]. Verfügbar in [Anzahl] Größen: [Liste].
+    </p>
+  </section>
+
+  <!-- Versand & Rückgabe -->
+  <section class="product-shipping">
+    <h3>Versand &amp; Rückgabe</h3>
+    <ul>
+      <li><strong>Versand:</strong> [Kosten oder "kostenlos ab X €"], Lieferung in [X-Y Werktagen]</li>
+      <li><strong>Versandländer:</strong> [Liste oder Hinweis]</li>
+      <li><strong>Rückgabe:</strong> [X] Tage Widerruf, [Wer trägt Rückversand]</li>
+      <li><strong>Garantie:</strong> [X] Jahre Herstellergarantie</li>
+    </ul>
+  </section>
+
+  <!-- FAQ-Sektion: 5-7 echte Käufer-Fragen, Antworten 40-60 Wörter -->
+  <section class="product-faq">
+    <h3>Häufige Fragen zum [Produktname]</h3>
+
+    <h4>[Frage 1, konkret und produktspezifisch]?</h4>
+    <p>[Antwort, 40-60 Wörter, faktisch und konkret.]</p>
+
+    <h4>[Frage 2]?</h4>
+    <p>[Antwort, 40-60 Wörter.]</p>
+
+    <h4>[Frage 3]?</h4>
+    <p>[Antwort, 40-60 Wörter.]</p>
+
+    <h4>[Frage 4]?</h4>
+    <p>[Antwort, 40-60 Wörter.]</p>
+
+    <h4>[Frage 5]?</h4>
+    <p>[Antwort, 40-60 Wörter.]</p>
+
+    <h4>[Frage 6]?</h4>
+    <p>[Antwort, 40-60 Wörter.]</p>
+
+    <h4>[Frage 7]?</h4>
+    <p>[Antwort, 40-60 Wörter.]</p>
+
+  </section>
+
+  <!-- Cross-Sell / Komplementär-Hinweis -->
+  <section class="product-cross-sell">
+    <h3>Passendes Zubehör und ähnliche Produkte</h3>
+    <ul>
+      <li><a href="[URL Zubehör 1]" rel="related">[Sprechender Anchor-Text]</a></li>
+      <li><a href="[URL Zubehör 2]" rel="related">[Sprechender Anchor-Text]</a></li>
+      <li><a href="[URL Alternative]" rel="related">[Sprechender Anchor-Text]</a></li>
+    </ul>
+  </section>
+
+</article>
+
+<!--
+  EINBAU-HINWEISE
+  ===============
+
+  Shopify:
+    - Beschreibung: Admin → Produkte → [Produkt] → Beschreibung
+    - JSON-LD: theme.liquid vor </head>, ggf. konditional auf product-Seite
+    - Liquid-Variablen für dynamische Werte:
+        {{ product.title }}
+        {{ product.price | money }}
+        {{ product.featured_image | img_url }}
+
+  WooCommerce:
+    - Beschreibung: Block-Editor des Produkts → HTML-Block
+    - JSON-LD: SEO-Plugin (Rank Math, Yoast, SEOPress) ODER functions.php Hook wp_head
+
+  Shopware 6:
+    - Beschreibung: Backend → Produkt → "Produktbeschreibung lang"
+    - JSON-LD: Theme-Anpassung in meta.html.twig oder via App
+
+  Custom/Headless:
+    - HTML in Komponente einfügen, JSON-LD in <head>-Component (next/head, react-helmet)
+-->
