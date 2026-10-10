@@ -4,7 +4,7 @@ Sammlung lokaler Skills fuer agentische Coding- und Content-Workflows.
 Jeder Skill liegt in einem eigenen Verzeichnis mit einer `SKILL.md` als
 Einstiegspunkt und optionalen Referenzen oder Scripts.
 
-Der aktuelle Stand des Repos umfasst fuenf produktiv nutzbare Skills:
+Der aktuelle Stand des Repos umfasst acht produktiv nutzbare Skills:
 
 | Skill | Zweck | Wichtige Dateien |
 |---|---|---|
@@ -13,6 +13,9 @@ Der aktuelle Stand des Repos umfasst fuenf produktiv nutzbare Skills:
 | `seo-geo-writer` | Erstellt oder optimiert SEO- und GEO-orientierte Blogartikel mit fester Recherche- und Strukturvorgabe | `seo-geo-writer/SKILL.md`, `seo-geo-writer/references/regelwerk.md` |
 | `seo-page-review` | Auditiert eine einzelne URL und vergibt einen gewichteten Score (50% SEO + 50% GEO) mit priorisierten Befunden und Empfehlungen | `seo-page-review/SKILL.md`, `seo-page-review/references/checkliste.md`, `seo-page-review/scripts/analyze_page.py` |
 | `viral-post-wizard` | Erstellt LinkedIn-Posts im Stil von Nikolaus Schausberger auf Basis fester Schreibregeln | `viral-post-wizard/SKILL.md`, `viral-post-wizard/references/*` |
+| `pr-review-loop` | Reviewer-Thread: prueft einen PR mit parallelen Opus-Reviewern, reproduziert Befunde, liefert P1/P2/P3-Liste an den Fixer-Thread, re-reviewt nur das Delta; aendert nie Code, merged nie | `pr-review-loop/SKILL.md` |
+| `fix-findings` | Fixer-Thread: prueft eingefuegte Review-Befunde, setzt angenommene per Test → Fix → Commit um, pusht, liefert Entscheidungstabelle; Merge/Deploy nur auf Befehlswort | `fix-findings/SKILL.md` |
+| `auto-feature` | Autonomer Feature-Workflow aus einem Feature-File: Spec (Fable) → Opus-Review max. 2 → Plan (Fable) → Opus-Review max. 2 → Sonnet-Umsetzung → Haertung → PRs; kein PR-Review-Loop, kein Merge | `auto-feature/SKILL.md` |
 
 ## Repository-Struktur
 
@@ -235,6 +238,22 @@ Themen in postfaehige Fassungen ausgelegt.
 - Abschnitte kurz halten, mit Leerzeilen dazwischen
 - Disallow List als harte Abschlusskontrolle behandeln
 - Im Regelfall drei Varianten liefern, ausser der Nutzer will gezielt nur eine
+
+## Coding-Workflow-Skills (Claude Code)
+
+`pr-review-loop`, `fix-findings` und `auto-feature` sind globale Claude-Code-Skills.
+Sie werden per Symlink eingebunden:
+
+```bash
+for s in pr-review-loop fix-findings auto-feature; do ln -sfn ~/Projects/skillz/nikskills/$s ~/.claude/skills/$s; done
+```
+
+Aufruf mit Argumenten, z. B. `/pr-review-loop 214 fix-214 3`, `/fix-findings <Liste> [mergen] [deployen]`,
+`/auto-feature docs/features/<datei>.md`. Projektspezifische Befehle (Tests, Lint, Deploy)
+stehen im jeweiligen Repo-`CLAUDE.md`, nicht in den Skills.
+
+Gemeinsame harte Regel: Kein Skill merged oder deployt von sich aus. `fix-findings` tut es
+nur, wenn das Befehlswort in den Argumenten steht; die anderen beiden nie.
 
 ## Laufzeitannahmen
 
