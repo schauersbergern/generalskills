@@ -2,6 +2,7 @@
 name: fix-findings
 description: Use when Nikolaus pastes a list of review findings (P1/P2/P3 with file:line, e.g. from a reviewer thread or /pr-review-loop) to be fixed on the current PR branch, or when a reviewer thread sends such a list via message.
 argument-hint: <eingefügte Befundliste> [mergen] [deployen]
+effort: xhigh
 ---
 
 # Review-Befunde abarbeiten

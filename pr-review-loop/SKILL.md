@@ -2,6 +2,7 @@
 name: pr-review-loop
 description: Use when Nikolaus asks to review a pull request until it is clean ("review PR 123 bis sauber", "prüf den PR", "Review-Schleife", "Reviewer-Thread"), optionally naming a separate fixer thread that applies the findings. Review only — this thread never changes code and never merges.
 argument-hint: <PR-Nummer|PR-URL> [Fixer-Thread-Name] [max. Runden, Default 3]
+effort: xhigh
 ---
 
 # PR-Review-Schleife (nur prüfen)
@@ -45,8 +46,9 @@ Ob gemergt wird, entscheidet Nikolaus im Chat.
    - Tests: vakuume Assertions, fehlende Invarianten-Tests, Mutationsproben
    - Verträge und Konsumenten außerhalb des Diffs, Sicherheit und Mandantengrenze; Prosa nur, solange das Prosa-Budget reicht
 
-   Aufruf: `Agent(subagent_type: "general-purpose", model: "opus", run_in_background: false, …)`.
+   Aufruf: `Agent(subagent_type: "opus-xhigh", model: "opus", run_in_background: false, …)`.
    - **`model: "opus"` immer explizit setzen.** Wer stattdessen `prp-core:code-reviewer` nimmt, erbt dessen Frontmatter `model: sonnet` und landet ohne den Parameter still auf Sonnet.
+   - **Fehlt `opus-xhigh`:** `general-purpose` mit `model: "opus"` nehmen und im Bericht „Effort nicht garantiert“ vermerken.
    - **Worktree für Mutationsproben:** Jeder Reviewer bekommt einen eigenen, und nur du legst ihn an: `git worktree add --detach <scratchpad>/rev-<runde>-<i> <head-sha>`. Nach der Runde entfernst du ihn mit `git worktree remove --force`.
    - **Fehlende Abhängigkeiten:** Lassen sich im Worktree keine Tests ausführen, meldet der Reviewer die Mutationsprobe als Verdacht. Er baut keine Umgebung auf.
 3. **Befunde selbst reproduzieren**, bevor irgendetwas weitergeht:
