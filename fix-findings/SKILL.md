@@ -49,6 +49,10 @@ Die Eingabe ist die Befundliste, eventuell gefolgt von den Befehlswörtern „me
    - **Steht in `CLAUDE.md` eine Teststrategie,** schränkt sie ein, welche Verhaltens-Befunde einen Test bekommen.
    - **Prosa: streichen statt umformulieren**, das verhindert Folgebefunde.
 5. **Verifikation:** die Prüfbefehle aus `CLAUDE.md`. Fehlen sie, die aus `package.json`, `Makefile`, `pyproject.toml` oder der CI-Konfiguration ableiten und sagen, woher sie stammen. Ausgabe zeigen (`superpowers:verification-before-completion`).
+   - **Je Befund nur gezielte Tests** (die betroffenen Testdateien, z. B. `pnpm vitest run <pfade>`), nicht die ganze Suite.
+   - **Die ganze Suite läuft genau einmal vor dem Push**, und zwar dort, wo umgesetzt wird.
+   - **Hast du an einen Subagenten delegiert** und liegt dessen Ausgabe des Vollaufs vor, prüfst du danach nur Typecheck (z. B. `tsc --noEmit`) und die gezielten Tests. Kein zweiter Vollauf.
+   - **Den dritten Vollauf macht die CI.** Grüne CI ist ohnehin die Abbruchbedingung der Review-Schleife.
 6. **Pushen** auf den PR-Branch, ohne nachzufragen.
 7. **Abschluss:** Tabelle unten. Kam die Liste per Nachricht aus einem Reviewer-Thread, dorthin per `SendMessage` antworten (`to` = `from` der Nachricht) und den neuen Head-SHA nennen.
 
@@ -78,4 +82,5 @@ Die letzte Zeile entfällt nur, wenn mit Befehlswort gemergt bzw. deployt wurde.
 | „Approved und grün, er will heute live, ich merge“ | Ein Ziel ist keine Freigabe. Das Approval gilt außerdem für einen Stand vor deinen Commits. |
 | „Ich fixe nur die gemeldete Stelle“ | Die Geschwisterstelle kommt in der nächsten Runde als neuer Befund zurück. Klasse statt Instanz. |
 | „Abgelehnte Befunde lasse ich einfach weg“ | Ohne begründete Ablehnung in der Tabelle meldet der Reviewer sie erneut. |
+| „Zur Sicherheit nochmal die ganze Suite“ | Subagent, Orchestrator und CI dreimal je Runde kostet bei großen Suiten eine Viertelstunde pro Runde. Einmal vor dem Push, den Rest macht die CI. |
 | „Soll ich pushen?“ | Auf dem PR-Branch nach Commit ohne Rückfrage pushen. |

@@ -1,7 +1,7 @@
 ---
 name: pr-review-loop
 description: Use when Nikolaus asks to review a pull request until it is clean ("review PR 123 bis sauber", "prüf den PR", "Review-Schleife", "Reviewer-Thread"), optionally naming a separate fixer thread that applies the findings. Review only — this thread never changes code and never merges.
-argument-hint: <PR-Nummer|PR-URL> [Fixer-Thread-Name] [max. Runden, Default 3]
+argument-hint: <PR-Nummer|PR-URL …> [Fixer-Thread-Name] [max. Runden, Default 3]
 effort: xhigh
 ---
 
@@ -11,6 +11,7 @@ Argumente: `$ARGUMENTS`.
 - **Erstes Argument** (Pflicht): PR-Nummer oder -URL.
 - **Letztes Argument**, wenn es eine reine Zahl ist: die maximale Rundenzahl. Sonst gilt **3**.
 - **Was dazwischen steht**, ist der Name des Fixer-Threads.
+- **Mehrere PRs** (z. B. `#130 #131`): siehe „Mehrere PRs“ unten.
 
 **Kern:** Dieser Thread ist der Prüfer, nie der Implementierer.
 - Er liefert eine verifizierte, nummerierte Befundliste.
@@ -32,8 +33,27 @@ Ob gemergt wird, entscheidet Nikolaus im Chat.
 - **Max. Runden** begrenzt die Durchgänge. Ist die letzte erlaubte Runde gelaufen, wird nicht mehr geprüft, auch kein Fix-Delta.
 - **Code-Befund** ändert das Programmverhalten.
 - **Prosa-Befund** ändert nur, was jemand liest: Kommentar, Docstring, Doku, Fehlermeldungstext, PR-Text.
-  - Prosa bekommt höchstens **2 Runden mit verschickten Prosa-Befunden**.
+  - **Prosa-Budget** = Zahl der Runden mit verschickten Prosa-Befunden: **2 bei Code-PRs, 1 bei Doku-/Ops-PRs** (siehe Prüftiefe).
   - Danach werden Prosa-Befunde nicht mehr verschickt, sondern in der Abschlussmeldung als „offen, nicht blockierend“ gelistet.
+
+## Prüftiefe nach PR-Art
+
+Die Art legst du in Schritt 1 anhand der geänderten Dateien fest und nennst sie im Kopf der Befundliste.
+
+| Art | Erkennen | Reviewer | Mutationsproben | Was gemeldet wird | Prosa-Budget |
+|---|---|---|---|---|---|
+| **Doku/Prosa-only** | nur Markdown, Kommentare, Texte | **1** | keine | nur sachliche Fehler: falsche Zahlen, falsche Aussagen, widersprüchliche Anweisungen. Keine Stil- oder Formulierungsbefunde | **1** |
+| **Ops/Config** | Dockerfile, Compose, CI, Env, Config ohne Programmlogik | **1** | keine | wie Doku, plus Fehler, die Build oder Betrieb brechen | **1** |
+| **Code** | alles mit Programmlogik | **2–3** mit Fokus (Schritt 2) | ja, gezielt | wie unten unter Schweregrade | **2** |
+
+- **Gemischte PRs gelten als Code.**
+- **Doku- und Ops-PRs nach Runde 1:** Die folgenden Runden prüfen nur noch, ob die gemeldeten Fehler behoben sind. Neue Befunde gibt es dort nur, wenn ein Fix selbst etwas falsch macht.
+
+## Mehrere PRs
+
+Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die Prüfer eines anderen.
+- **Bevorzugt:** je PR einen eigenen Reviewer-Thread starten (in der Desktop-App `mcp__ccd_session__start_session`, Brief: `/pr-review-loop <PR> [Fixer] [Runden]`), dieser Thread koordiniert dann nur noch.
+- **Geht das nicht:** in diesem Thread die PRs **strikt unabhängig** führen. Reviewer aller PRs in derselben Nachricht starten, aber jede Befundliste **sofort verschicken**, sobald sie für ihren PR fertig ist, nicht gesammelt. Runden, Prosa-Budget, Ende und Abschlussmeldung zählen je PR.
 
 ## Ablauf
 
@@ -41,7 +61,8 @@ Ob gemergt wird, entscheidet Nikolaus im Chat.
    - `gh pr view <n> --json number,url,headRefName,headRefOid,baseRefName,mergeable,mergeStateStatus,isDraft,body`, dazu `git fetch origin`. Den Head-SHA notieren.
    - Projekt-`CLAUDE.md` sowie die im PR verlinkte Spec bzw. den Plan lesen, falls vorhanden.
    - Basis ist die PR-Basis. Bei gestapelten PRs ist das der Vorgänger-Branch, nicht `main`.
-2. **Runde starten:** 2–3 Reviewer **parallel** in einer Nachricht, jeder mit eigenem Fokus:
+   - **PR-Art festlegen** (`gh pr diff <n> --name-only`), siehe „Prüftiefe nach PR-Art“.
+2. **Runde starten.** Doku- und Ops-PRs: **ein** Reviewer mit dem Auftrag „nur sachliche Fehler“, ohne Mutationsproben. Code-PRs: 2–3 Reviewer **parallel** in einer Nachricht, jeder mit eigenem Fokus:
    - Korrektheit, Nebenläufigkeit, Absturzfenster
    - Tests: vakuume Assertions, fehlende Invarianten-Tests, Mutationsproben
    - Verträge und Konsumenten außerhalb des Diffs, Sicherheit und Mandantengrenze; Prosa nur, solange das Prosa-Budget reicht
@@ -50,6 +71,7 @@ Ob gemergt wird, entscheidet Nikolaus im Chat.
    - **`model: "opus"` immer explizit setzen.** Wer stattdessen `prp-core:code-reviewer` nimmt, erbt dessen Frontmatter `model: sonnet` und landet ohne den Parameter still auf Sonnet.
    - **Fehlt `opus-xhigh`:** `general-purpose` mit `model: "opus"` nehmen und im Bericht „Effort nicht garantiert“ vermerken.
    - **Worktree für Mutationsproben:** Jeder Reviewer bekommt einen eigenen, und nur du legst ihn an: `git worktree add --detach <scratchpad>/rev-<runde>-<i> <head-sha>`. Nach der Runde entfernst du ihn mit `git worktree remove --force`.
+   - **Mutationsproben gezielt:** nur gegen die Testdateien, die den mutierten Code abdecken (z. B. `pnpm vitest run <pfade>`, `pytest <pfade>`), **nie die ganze Suite**. Die Vollsuite deckt die CI ab.
    - **Fehlende Abhängigkeiten:** Lassen sich im Worktree keine Tests ausführen, meldet der Reviewer die Mutationsprobe als Verdacht. Er baut keine Umgebung auf.
 3. **Befunde selbst reproduzieren**, bevor irgendetwas weitergeht:
    - die Stelle bei Head-SHA lesen und das Szenario nachvollziehen
@@ -93,7 +115,7 @@ Ob gemergt wird, entscheidet Nikolaus im Chat.
    - fachlicher Kontext in 2–3 Sätzen
 3. **Dein Fokus** (siehe Schritt 2) mit gezielten Prüfpunkten:
    - Behauptet Code oder Text etwas, das er nicht hält?
-   - Bleibt ein Test grün, wenn man die geprüfte Logik entfernt? Belege das per Mutation in deinem Worktree `<pfad>` und setz sie danach zurück.
+   - Bleibt ein Test grün, wenn man die geprüfte Logik entfernt? Belege das per Mutation in deinem Worktree `<pfad>` und setz sie danach zurück. Lauf nur die betroffenen Testdateien, nicht die ganze Suite. (Entfällt bei Doku-/Ops-PRs.)
    - Gibt es Konsumenten außerhalb des Diffs?
 4. **Verbote:**
    - keine Edits außerhalb deines Worktrees
@@ -108,7 +130,7 @@ Ob gemergt wird, entscheidet Nikolaus im Chat.
 ## Format der Befundliste
 
 ```
-PR #<n> · Runde <r>/<max> · geprüft auf <head-sha>
+PR #<n> · <Code|Doku|Ops> · Runde <r>/<max> · geprüft auf <head-sha>
 R<r>-1 [P1] pfad/datei.ts:88 — <Befund in einem Satz>
        Szenario: <Ablauf bis zum Fehler>
        Erwartet: <Richtung des Fixes, kein fertiger Patch nötig>
@@ -138,4 +160,7 @@ Letzte Zeile, wenn sauber, wörtlich: **„Bereit für deine Merge-Entscheidung.
 | „Der Reviewer klingt sicher, ich reiche durch“ | Ungeprüfte Befunde erzeugen Fix-Runden für Phantome. Erst reproduzieren. |
 | „Lieber nochmal den ganzen Diff“ | Das erzeugt neue Nits auf Altbestand, und die Schleife konvergiert nicht. Nur das Delta. |
 | „Eine Runde mehr findet sicher noch was“ | Ein Review findet immer etwas. Die Grenze steht in den Argumenten, verlängern darf nur Nikolaus. |
+| „Ich prüfe die drei PRs in einem Rutsch und schicke alles zusammen“ | Dann wartet jeder PR auf den langsamsten Prüfer. Je PR eine eigene Schleife, jede Liste sofort raus. |
+| „Ein Doku-PR verdient dieselbe Sorgfalt wie Code“ | Sorgfalt heißt dort: sachliche Fehler finden. Mehrere Opus-Prüfer und Stilbefunde auf eine Notiz kosten Stunden ohne Gewinn. |
+| „Zur Sicherheit die ganze Suite pro Mutation“ | Eine Mutation betrifft wenige Testdateien. Die Vollsuite läuft in der CI. |
 | „Ohne `model` erbt der Reviewer schon Opus“ | Agent-Definitionen können ein eigenes Modell im Frontmatter setzen. Immer `model: "opus"` angeben. |

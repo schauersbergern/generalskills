@@ -77,7 +77,7 @@ Die Task-Reviews von `subagent-driven-development` (Spec-Treue und Codequalität
 
 ## Härtungsdurchgang (E2)
 
-Vor dem PR den gebauten Code systematisch durchgehen und diese sechs Fragen **schriftlich mit vollständiger Aufzählung** beantworten. Trifft keine zu, genügt ein Satz.
+Vor dem PR den gebauten Code systematisch durchgehen und diese acht Fragen **schriftlich mit vollständiger Aufzählung** beantworten. Trifft keine zu, genügt ein Satz.
 
 1. **Lange Operationen:** Timeouts, Leases, Stuck-Erkennung, alle, auch in Schleifen.
 2. **Teilzustandsfenster** (DB + Storage, zwei Dateien): Was bleibt beim Absturz dazwischen liegen, und ist es auffindbar?
@@ -85,6 +85,8 @@ Vor dem PR den gebauten Code systematisch durchgehen und diese sechs Fragen **sc
 4. **Zeitpunkt-Zusagen** (eingefrorene Dokumente/Protokolle): Halten sie, wenn Daten danach gelöscht werden?
 5. **Stille Fallbacks:** jedes `catch`, `?? default`, jedes Überspringen. Wäre ein sichtbarer Fehler besser?
 6. **Zwei Worker/Geräte gleichzeitig:** Was passiert, wenn einer enteignet wird, während er noch schreibt?
+7. **Endgültigkeitszusagen:** jede Stelle, die etwas als dauerhaft, nicht wiederholbar, endgültig oder „immer/nie“ markiert, in Code (Statuswerte, Sperren, Retry-Verbote) und in Texten (Meldungen, Kommentare). Gilt die Zusage für **jeden** Weg, der dort ankommt, oder auch für Fälle, in denen ein neuer Versuch gelingen kann?
+8. **Wirksamkeit der Tests:** für jede neue Verzweigung bzw. Invariante eine Mutationsprobe (Zweig entfernen oder Bedingung umdrehen) gegen die betroffenen Testdateien, nicht die ganze Suite. Wird ein Test rot? Wenn nicht, fehlt der Test.
 
 - **Klasse statt Instanz:** Braucht eine Stelle Behandlung, behandelst du im selben Durchgang alle Stellen derselben Klasse.
 - **Lücken schließen:** Jede Lücke wird zu failing test → Fix → grün. Test und Fix schreibt ein Sonnet-Subagent.
@@ -139,6 +141,7 @@ Letzte Zeile: „Stopp. Bitte prüfen; danach `/pr-review-loop <PR>` je PR.“
 | „Runde 2 hat noch Wichtiges, eine dritte schadet nicht“ | Genau so entstehen Endlosschleifen. Offenes kommt in „Offene Review-Punkte“, dann weiter. |
 | „Vier Zeilen schreibe ich schneller selbst“ | Die Hauptsession orchestriert und prüft. Implementiert wird nur von Sonnet. |
 | „Tests grün, also PR“ | Grüne Tests finden keine Absturzfenster. Erst kommt die Härtung. |
+| „Die Tests decken den neuen Zweig ab, steht ja im Namen“ | Erst eine Mutation zeigt, ob ein Test rot wird. Ohne Probe bleibt die Lücke bis zum Review. |
 | „Ich frag kurz, ob TF1 erst gemergt werden soll“ | Kein Stopp vor den PRs, auch wenn Nikolaus online ist. Stapeln ist der Default. |
 | „Zum Schluss noch ein Review-Loop über alle PRs“ | Phase G entfällt. Den Review stößt Nikolaus an. |
 | „Brainstorming fragt mich etwas, ich warte“ | Das Feature-File ist die Antwort. Annahme dokumentieren, weiter. |
