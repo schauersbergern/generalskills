@@ -33,9 +33,22 @@ Ob gemergt wird, entscheidet der User im Chat.
 - **Code-Befund** ändert das Programmverhalten.
 - **Prosa-Befund** ändert nur, was jemand liest: Kommentar, Docstring, Doku, Fehlermeldungstext, PR-Text.
   - **Sachlicher Fehler** = falsche Zahl, falsche Aussage, widersprüchliche oder nicht ausführbare Anweisung. Er zählt nicht als Formulierungsbefund, auch wenn er in Prosa steht.
-  - **Prosa-Budget** = Zahl der Runden mit verschickten **neuen Formulierungsbefunden** (Verständlichkeit, Genauigkeit des Wortlauts): **2 bei Code-PRs, 1 bei Doku-/Ops-PRs** (siehe Prüftiefe).
-  - Danach werden neue Formulierungsbefunde nicht mehr verschickt, sondern in der Abschlussmeldung als „offen, nicht blockierend“ gelistet.
-  - **Immer verschickt werden**, unabhängig vom Budget: sachliche Fehler und nicht behobene Befunde der Vorrunde.
+  - **Formulierungsbefund** = Verständlichkeit oder Genauigkeit des Wortlauts, ohne dass etwas sachlich falsch ist.
+- **Prosa-Budget** = Zahl der Runden, in denen neue Formulierungsbefunde verschickt werden dürfen: **2 bei Code-PRs, 0 bei Doku-/Ops-PRs**.
+
+## Versandregel (gilt für Briefing, Liste und Ende)
+
+Was verschickt wird, entscheidet allein diese Regel, in dieser Reihenfolge:
+
+1. **Immer verschickt**, jeder Schweregrad, unabhängig von Budget und Konvergenz-Bremse:
+   - sachliche Fehler
+   - nicht behobene Befunde der Vorrunde
+   - Ablehnungen, die nicht überzeugen (Schritt 5)
+   - CI rot, Konflikt (Schritt 6)
+2. **Neue Formulierungsbefunde** nur, solange das Prosa-Budget reicht. Danach kommen sie in die Abschlussmeldung als „offen, nicht blockierend“.
+3. **Konvergenz-Bremse ab Runde 3:** Für alles, was nicht unter 1 fällt, gilt: Neue P3 werden nicht mehr verschickt, sondern in der Abschlussmeldung als „offen, nicht blockierend“ geführt.
+
+„Keinen Befund zum Verschicken“ (Ende, Schritt 6) heißt: Nach dieser Regel bleibt nichts übrig.
 
 ## Prüftiefe nach PR-Art
 
@@ -43,8 +56,8 @@ Die Art legst du in Schritt 1 anhand der geänderten Dateien fest und nennst sie
 
 | Art | Erkennen | Reviewer | Mutationsproben | Was gemeldet wird | Prosa-Budget |
 |---|---|---|---|---|---|
-| **Doku/Prosa-only** | nur Markdown, Kommentare, Texte | **1** | keine | nur sachliche Fehler: falsche Zahlen, falsche Aussagen, widersprüchliche Anweisungen. Keine Stil- oder Formulierungsbefunde | **1** |
-| **Ops/Config** | Dockerfile, Compose, CI, Env, Config ohne Programmlogik | **1** | keine | wie Doku, plus Fehler, die Build oder Betrieb brechen | **1** |
+| **Doku/Prosa-only** | nur Markdown, Kommentare, Texte | **1** | keine | nur sachliche Fehler: falsche Zahlen, falsche Aussagen, widersprüchliche Anweisungen. Keine Stil- oder Formulierungsbefunde | **0** |
+| **Ops/Config** | Dockerfile, Compose, CI, Env, Config ohne Programmlogik | **1** | keine | wie Doku, plus Fehler, die Build oder Betrieb brechen | **0** |
 | **Code** | alles mit Programmlogik | **2–3** mit Fokus (Schritt 2) | ja, gezielt | wie unten unter Schweregrade | **2** |
 
 - **Gemischte PRs gelten als Code.**
@@ -66,7 +79,7 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
 2. **Runde starten.** Doku- und Ops-PRs: **ein** Reviewer mit dem Auftrag „nur sachliche Fehler“, ohne Mutationsproben. Code-PRs: 2–3 Reviewer **parallel** in einer Nachricht, jeder mit eigenem Fokus:
    - Korrektheit, Nebenläufigkeit, Absturzfenster
    - Tests: vakuume Assertions, fehlende Invarianten-Tests, Mutationsproben
-   - Verträge und Konsumenten außerhalb des Diffs, Sicherheit und Mandantengrenze; Prosa nur, solange das Prosa-Budget reicht
+   - Verträge und Konsumenten außerhalb des Diffs, Sicherheit und Mandantengrenze; sachliche Fehler in Prosa immer, Formulierungsbefunde nur, solange das Prosa-Budget reicht (Versandregel)
 
    Aufruf: `Agent(subagent_type: "opus-xhigh", model: "opus", run_in_background: false, …)`.
    - **`model: "opus"` immer explizit setzen.** Wer stattdessen `prp-core:code-reviewer` nimmt, erbt dessen Frontmatter `model: sonnet` und landet ohne den Parameter still auf Sonnet.
@@ -112,7 +125,7 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
 - **P3** ist klein oder Prosa.
 - Reine Stil- und Benennungs-Nits verwirfst du, die regelt der Linter.
 
-**Konvergenz-Bremse ab Runde 3:** Ins Briefing gehört: „KEINE BEFUNDE ist der erwartete und erwünschte Ausgang. Melde nur noch, was den Merge blockiert (P1/P2).“ P3-Funde dieser Runden landen in der Abschlussmeldung als „offen, nicht blockierend“.
+**Konvergenz-Bremse ab Runde 3** (Versandregel, Punkt 3): Ins Briefing gehört: „KEINE BEFUNDE ist der erwartete und erwünschte Ausgang. Melde neu nur noch, was den Merge blockiert (P1/P2), oder sachliche Fehler. Prüfe weiter, ob die Befunde der Vorrunde behoben sind.“
 
 ## Reviewer-Briefing (Gerüst, jedes Mal vollständig)
 
