@@ -42,7 +42,7 @@ Was verschickt wird, entscheidet allein diese Regel, in dieser Reihenfolge:
 
 1. **Immer verschickt**, jeder Schweregrad, unabhängig von Budget und Konvergenz-Bremse:
    - sachliche Fehler
-   - nicht behobene Befunde der Vorrunde
+   - nicht behobene Befunde der Vorrunde mit dem Urteil „angenommen“, „angenommen, anders umgesetzt“ oder „erledigt“ (Schritt 5). Befunde mit „offen, User-Entscheidung“ oder „verworfen“ gehen nicht erneut raus.
    - Ablehnungen, die nicht überzeugen (Schritt 5)
    - CI rot, Konflikt (Schritt 6)
 2. **Neue Formulierungsbefunde** nur, solange das Prosa-Budget reicht. Danach kommen sie in die Abschlussmeldung als „offen, nicht blockierend“.
