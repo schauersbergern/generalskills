@@ -112,10 +112,10 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
    - **Nicht behobener Befund der Vorrunde:** Er behält seine ID, z. B. `R1-3 (nicht behoben)`.
    - **Neuer Head-SHA oder Testlauf fehlt in der Fixer-Antwort:** den Head selbst per `gh pr view` holen. Fehlt nur der Testlauf, wird das in der Abschlussmeldung vermerkt.
 6. **Ende:**
-   - **Sauber:** Die Schleife endet, wenn eine Runde **keinen Befund zum Verschicken** liefert, die **CI grün** ist (`gh pr checks <n>`) und der PR **konfliktfrei** ist (`mergeable: MERGEABLE`).
+   - **Sauber:** Die Schleife endet, wenn eine Runde **keinen Befund zum Verschicken** liefert, die **CI grün** ist (`gh pr checks <n>`) und der PR **konfliktfrei** ist (`mergeable: MERGEABLE`, oder UNKNOWN nach drei Abfragen, siehe unten).
    - **Keine Befunde, aber CI oder Konflikt nicht in Ordnung:**
      - **CI läuft noch:** einmal warten (`gh pr checks <n> --watch`), dann neu bewerten.
-     - **`mergeable: UNKNOWN`** (GitHub rechnet nach einem Push noch): kurz warten und neu abfragen, höchstens dreimal im Abstand von etwa 30 Sekunden. Bleibt es UNKNOWN, gilt der PR nicht als konfliktbehaftet, und die Abschlussmeldung vermerkt „Konfliktstatus unbekannt“.
+     - **`mergeable: UNKNOWN`** (GitHub rechnet nach einem Push noch): kurz warten und neu abfragen, höchstens dreimal im Abstand von etwa 30 Sekunden. Bleibt es UNKNOWN, gilt „sauber“ trotzdem (wie bei „keine CI“), und die Abschlussmeldung vermerkt „Konfliktstatus unbekannt“.
      - **Keine CI konfiguriert** (`no checks reported`): zulässig. „Sauber“ gilt dann ohne CI, die Abschlussmeldung vermerkt „keine CI“.
      - **CI rot oder PR `CONFLICTING`:** Das ist ein Befund (P1, `CI`/`Konflikt`, mit fehlschlagendem Check bzw. Konfliktdateien) und geht wie jeder andere an den Fixer, ohne Fixer an den User. Er zählt als verschickter Befund dieser Runde, für die Rundengrenze gilt also das Gleiche wie sonst.
    - **Rundengrenze:** Ist die letzte erlaubte Runde gelaufen und wurden ihre Befunde verschickt, wartest du auf die Fixer-Antwort. Dann holst du CI- und Konfliktstatus des neuen Heads und meldest „Rundengrenze erreicht“. Ein neues Review startest du nicht.
