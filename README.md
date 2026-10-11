@@ -52,6 +52,15 @@ nikskills/
       ghostwriter_spickzettel.md
       viral_framework.md
       voiceprint.md
+  pr-review-loop/
+    SKILL.md
+  fix-findings/
+    SKILL.md
+  auto-feature/
+    SKILL.md
+  agents/
+    opus-xhigh.md
+    sonnet-xhigh.md
 ```
 
 ## Skill-Details
