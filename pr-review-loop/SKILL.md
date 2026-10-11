@@ -100,7 +100,7 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
 
      Den Thread über seinen Namen finden und die Liste schicken. Die Antwort kommt als Nachricht. Nicht pollen.
    - **Ohne Fixer-Thread oder wenn er nicht erreichbar ist:** die Liste als kopierbaren Block in den Chat und auf den User warten.
-5. **Re-Review nur des Deltas:** Die Reviewer bekommen `git diff <alter-head>..<neuer-head>`, die Befundliste der Vorrunde und die Entscheidungstabelle des Fixers. Sie prüfen:
+5. **Re-Review nur des Deltas:** Die Reviewer bekommen `git diff <alter-head>..<neuer-head>`, die Befundliste der Vorrunde und die Entscheidungstabelle des Fixers. Gibt es keine Tabelle (z. B. der User fixt selbst), gelten alle Befunde als „angenommen“. Sie prüfen:
    - Ist jeder Befund mit dem Urteil „angenommen“, „angenommen, anders umgesetzt“ oder „erledigt“ (mit genanntem Commit) wirklich behoben, inklusive Geschwisterstellen?
    - Hat der Fix neue Fehler erzeugt?
 
@@ -132,7 +132,7 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
 1. „Du hast diesen Code nicht geschrieben. Finde Fehler, bestätige die Arbeit nicht. Trau keinem Bericht und keiner PR-Beschreibung, prüf am Code.“
 2. **Einstieg:**
    - Repo-Pfad, `CLAUDE.md` (falls vorhanden), PR-Nummer, Basis, Head-SHA
-   - bei Delta-Runden alter und neuer SHA plus die Befundliste der Vorrunde
+   - bei Delta-Runden alter und neuer SHA, die Befundliste der Vorrunde und die Entscheidungstabelle des Fixers (ohne Tabelle: alle Befunde „angenommen“). Prüfauftrag nur für die Urteile aus Schritt 5; „abgelehnt“ und „offen“ bewertest du selbst
    - Spec- bzw. Plan-Pfad
    - fachlicher Kontext in 2–3 Sätzen
 3. **Dein Fokus** (siehe Schritt 2) mit gezielten Prüfpunkten:
