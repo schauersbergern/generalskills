@@ -259,7 +259,8 @@ Aufruf mit Argumenten, z. B. `/pr-review-loop 214 "Fixer 214" runden=3`, `/fix-f
 stehen im jeweiligen Repo-`CLAUDE.md`, nicht in den Skills.
 
 Gemeinsame harte Regel: Kein Skill merged oder deployt von sich aus. `fix-findings` tut es
-nur, wenn das Befehlswort in den Argumenten steht; die anderen beiden nie.
+nur auf ausdrückliches Befehlswort des Users (in den Argumenten oder im eigenen Begleitsatz,
+bzw. ein „ja“ auf die Rückfrage, wenn der Merge automatisch deployt); die anderen beiden nie.
 
 ## Laufzeitannahmen
 
