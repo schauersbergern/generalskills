@@ -33,8 +33,10 @@ Ob gemergt wird, entscheidet der User im Chat.
 - **Max. Runden** begrenzt die Durchgänge. Ist die letzte erlaubte Runde gelaufen, wird nicht mehr geprüft, auch kein Fix-Delta.
 - **Code-Befund** ändert das Programmverhalten.
 - **Prosa-Befund** ändert nur, was jemand liest: Kommentar, Docstring, Doku, Fehlermeldungstext, PR-Text.
-  - **Prosa-Budget** = Zahl der Runden mit verschickten Prosa-Befunden: **2 bei Code-PRs, 1 bei Doku-/Ops-PRs** (siehe Prüftiefe).
-  - Danach werden Prosa-Befunde nicht mehr verschickt, sondern in der Abschlussmeldung als „offen, nicht blockierend“ gelistet.
+  - **Sachlicher Fehler** = falsche Zahl, falsche Aussage, widersprüchliche oder nicht ausführbare Anweisung. Er zählt nicht als Formulierungsbefund, auch wenn er in Prosa steht.
+  - **Prosa-Budget** = Zahl der Runden mit verschickten **neuen Formulierungsbefunden** (Verständlichkeit, Genauigkeit des Wortlauts): **2 bei Code-PRs, 1 bei Doku-/Ops-PRs** (siehe Prüftiefe).
+  - Danach werden neue Formulierungsbefunde nicht mehr verschickt, sondern in der Abschlussmeldung als „offen, nicht blockierend“ gelistet.
+  - **Immer verschickt werden**, unabhängig vom Budget: sachliche Fehler und nicht behobene Befunde der Vorrunde.
 
 ## Prüftiefe nach PR-Art
 
