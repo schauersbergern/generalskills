@@ -254,7 +254,7 @@ Alle drei Skills setzen `effort: xhigh` im Frontmatter, `auto-feature` zusaetzli
 Die Subagenten bekommen Effort ueber die Agent-Typen `opus-xhigh`/`sonnet-xhigh`; fehlen sie,
 weichen die Skills auf `general-purpose` mit explizitem `model` aus und melden „Effort nicht garantiert“.
 
-Aufruf mit Argumenten, z. B. `/pr-review-loop 214 fix-214 3`, `/fix-findings <Liste> [mergen] [deployen]`,
+Aufruf mit Argumenten, z. B. `/pr-review-loop 214 "Fixer 214" runden=3`, `/fix-findings <Liste> [mergen] [deployen]`,
 `/auto-feature docs/features/<datei>.md`. Projektspezifische Befehle (Tests, Lint, Deploy)
 stehen im jeweiligen Repo-`CLAUDE.md`, nicht in den Skills.
 

@@ -1,17 +1,16 @@
 ---
 name: pr-review-loop
 description: Use when the user asks to review a pull request until it is clean ("review PR 123 bis sauber", "prüf den PR", "Review-Schleife", "Reviewer-Thread"), optionally naming a separate fixer thread that applies the findings. Review only — this thread never changes code and never merges.
-argument-hint: <PR-Nummer|PR-URL …> [Fixer-Thread-Name] [max. Runden, Default 3]
+argument-hint: <PR-Nummer|#n|PR-URL …> ["Fixer-Thread-Name"] [runden=3]
 effort: xhigh
 ---
 
 # PR-Review-Schleife (nur prüfen)
 
 Argumente: `$ARGUMENTS`.
-- **Erstes Argument** (Pflicht): PR-Nummer oder -URL.
-- **Letztes Argument**, wenn es eine reine Zahl ist: die maximale Rundenzahl. Sonst gilt **3**.
-- **Was dazwischen steht**, ist der Name des Fixer-Threads.
-- **Mehrere PRs** (z. B. `#130 #131`): siehe „Mehrere PRs“ unten.
+- **PRs** (mindestens einer): jede Zahl, `#<n>` oder PR-URL. Mehrere PRs (z. B. `130 131`): siehe „Mehrere PRs“ unten.
+- **`runden=<n>`**: die maximale Rundenzahl. Fehlt es, gilt **3**. Eine bloße Zahl ist immer ein PR, nie die Rundenzahl.
+- **Alles Übrige** ist der Name des Fixer-Threads. Enthält er Ziffern oder Leerzeichen, steht er in Anführungszeichen.
 
 **Kern:** Dieser Thread ist der Prüfer, nie der Implementierer.
 - Er liefert eine verifizierte, nummerierte Befundliste.
@@ -54,7 +53,7 @@ Die Art legst du in Schritt 1 anhand der geänderten Dateien fest und nennst sie
 ## Mehrere PRs
 
 Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die Prüfer eines anderen.
-- **Bevorzugt:** je PR einen eigenen Reviewer-Thread starten (in der Desktop-App `mcp__ccd_session__start_session`, Brief: `/pr-review-loop <PR> [Fixer] [Runden]`), dieser Thread koordiniert dann nur noch.
+- **Bevorzugt:** je PR einen eigenen Reviewer-Thread starten (in der Desktop-App `mcp__ccd_session__start_session`, Brief: `/pr-review-loop <PR> ["Fixer"] [runden=<n>]`), dieser Thread koordiniert dann nur noch.
 - **Geht das nicht:** in diesem Thread die PRs **strikt unabhängig** führen. Reviewer aller PRs in derselben Nachricht starten, aber jede Befundliste **sofort verschicken**, sobald sie für ihren PR fertig ist, nicht gesammelt. Runden, Prosa-Budget, Ende und Abschlussmeldung zählen je PR.
 
 ## Ablauf
