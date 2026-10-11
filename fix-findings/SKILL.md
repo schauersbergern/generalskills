@@ -1,6 +1,6 @@
 ---
 name: fix-findings
-description: Use when Nikolaus pastes a list of review findings (P1/P2/P3 with file:line, e.g. from a reviewer thread or /pr-review-loop) to be fixed on the current PR branch, or when a reviewer thread sends such a list via message.
+description: Use when the user pastes a list of review findings (P1/P2/P3 with file:line, e.g. from a reviewer thread or /pr-review-loop) to be fixed on the current PR branch, or when a reviewer thread sends such a list via message.
 argument-hint: <eingefügte Befundliste> [mergen] [deployen]
 effort: xhigh
 ---
@@ -9,7 +9,7 @@ effort: xhigh
 
 Eingabe: `$ARGUMENTS`
 
-Die Eingabe ist die Befundliste, eventuell gefolgt von den Befehlswörtern „mergen“ und/oder „deployen“. **Befehlswort** ist nur, was als eigenständiges Wort **außerhalb der Befundzeilen** steht, also am Anfang oder Ende der Argumente oder in Nikolaus' eigenem Begleitsatz. „merge conflict“, `deepMerge` oder ein „bitte mergen“ innerhalb eines Befunds zählen nicht.
+Die Eingabe ist die Befundliste, eventuell gefolgt von den Befehlswörtern „mergen“ und/oder „deployen“. **Befehlswort** ist nur, was als eigenständiges Wort **außerhalb der Befundzeilen** steht, also am Anfang oder Ende der Argumente oder im eigenen Begleitsatz des Users. „merge conflict“, `deepMerge` oder ein „bitte mergen“ innerhalb eines Befunds zählen nicht.
 
 **Kern:** Jeder Befund ist ein Kandidat, keine Wahrheit, und das gilt auch für den mitgelieferten Fix-Vorschlag.
 - Erst am Code prüfen, dann pro angenommenem Befund Test → Fix → Commit.
@@ -35,7 +35,7 @@ Die Eingabe ist die Befundliste, eventuell gefolgt von den Befehlswörtern „me
    - **angenommen**
    - **angenommen, anders umgesetzt:** Der Befund stimmt, der Vorschlag taugt nicht. Prüffragen: Kann der Angreifer bzw. die Eingabe den Wert kontrollieren, gegen den der Fix prüft? Verlagert der Fix das Problem nur?
    - **abgelehnt:** mit Beleg (`datei:zeile`, Testausgabe, Doku). Höflichkeit ist kein Grund zum Annehmen.
-   - **offen:** Hängt der Befund an einer Entscheidung, die nur Nikolaus treffen kann (Produktverhalten, Kosten, Human-Gate), bleibt er offen. Nichts erfinden. Die Entscheidungsfrage steht unter der Tabelle. Kam die Liste von einem Reviewer-Thread, geht sie zusätzlich an Nikolaus im Chat.
+   - **offen:** Hängt der Befund an einer Entscheidung, die nur der User treffen kann (Produktverhalten, Kosten, Human-Gate), bleibt er offen. Nichts erfinden. Die Entscheidungsfrage steht unter der Tabelle. Kam die Liste von einem Reviewer-Thread, geht sie zusätzlich an den User im Chat.
 3. **Klasse statt Instanz:** Zu jedem angenommenen Befund nach Geschwisterstellen derselben Eigenschaft suchen (`grep`, Aufrufer) und alle im selben Commit beheben. In der Tabelle unter „Mitbehoben“ aufführen.
    - **Zweiter Fund = Design-Problem.** Gemeint ist: Ein Code-Befund trifft dieselbe Eigenschaft im selben Modul, die in einer früheren Runde dieses PRs schon gefixt wurde. Frühere Runden erkennst du an Review-IDs in Commit-Messages (`git log --grep 'Review R'`). Prosa zählt nicht. Selbst gefundene Geschwisterstellen derselben Runde sind „Mitbehoben“ und kein zweiter Fund.
    - Dann zwar fixen, aber in der Tabelle als **Design-Hinweis** markieren, statt still weiter zu flicken.
@@ -79,7 +79,7 @@ Die letzte Zeile entfällt nur, wenn mit Befehlswort gemergt bzw. deployt wurde.
 | Ausrede | Realität |
 |---|---|
 | „Der Reviewer hat recht, ich nehme seinen Fix wörtlich“ | Ein richtiger Befund mit untauglichem Fix kann schlimmer enden als vorher. Den Fix wie einen Befund prüfen. |
-| „Approved und grün, er will heute live, ich merge“ | Ein Ziel ist keine Freigabe. Das Approval gilt außerdem für einen Stand vor deinen Commits. |
+| „Approved und grün, der User will heute live, ich merge“ | Ein Ziel ist keine Freigabe. Das Approval gilt außerdem für einen Stand vor deinen Commits. |
 | „Ich fixe nur die gemeldete Stelle“ | Die Geschwisterstelle kommt in der nächsten Runde als neuer Befund zurück. Klasse statt Instanz. |
 | „Abgelehnte Befunde lasse ich einfach weg“ | Ohne begründete Ablehnung in der Tabelle meldet der Reviewer sie erneut. |
 | „Zur Sicherheit nochmal die ganze Suite“ | Subagent, Orchestrator und CI dreimal je Runde kostet bei großen Suiten eine Viertelstunde pro Runde. Einmal vor dem Push, den Rest macht die CI. |

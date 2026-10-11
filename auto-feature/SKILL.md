@@ -1,6 +1,6 @@
 ---
 name: auto-feature
-description: Use when Nikolaus hands over a feature file (Feature-File, Master-Spec, Backlog with several Teilfeatures) to be implemented autonomously ("autonom umsetzen", "voll autonom", "ich bin bis morgen weg"), from spec through pull requests without further user input.
+description: Use when the user hands over a feature file (Feature-File, Master-Spec, Backlog with several Teilfeatures) to be implemented autonomously ("autonom umsetzen", "voll autonom", "ich bin bis morgen weg"), from spec through pull requests without further user input.
 argument-hint: <Pfad zum Feature-File>
 model: opus
 effort: xhigh
@@ -13,7 +13,7 @@ Feature-File: `$ARGUMENTS`
 **Kern:** Das Feature-File ersetzt den Dialog und ist das Approval.
 - **Pro Teilfeature:** Spec → Spec-Review → Plan → Plan-Review → Umsetzung durch Sonnet-Subagenten → Härtungsdurchgang → Verifikation → PR.
 - **Ohne Zwischenhalt:** Der Lauf geht vom Feature-File bis zu 1…n PRs durch.
-- **Dann harter Stopp (HITL):** Nikolaus prüft den Reasoning-Weg und stößt selbst `/pr-review-loop` an. Merge und Deploy gehören ihm.
+- **Dann harter Stopp (HITL):** Der User prüft den Reasoning-Weg und stößt selbst `/pr-review-loop` an. Merge und Deploy entscheidet der User.
 
 **Modelle und Effort:** Spec und Plan schreibt die Hauptsession mit **Opus 5.5** (Skill-Frontmatter `model: opus`). Reviews machen frische Opus-Subagenten, die Umsetzung macht **Sonnet 5.5**, subagent-driven. **Alles mit Effort `xhigh`**: die Hauptsession über das Skill-Frontmatter, die Subagenten über die Agent-Typen `opus-xhigh` und `sonnet-xhigh` (aus `~/.claude/agents/`). Fehlt ein Typ in der Liste der verfügbaren Agents: `general-purpose` mit demselben `model` und „Effort nicht garantiert“ im Abschlussbericht.
 
@@ -26,7 +26,7 @@ Feature-File: `$ARGUMENTS`
    - `gh auth status` und ein Remote vorhanden.
    - Prüfbefehle bekannt: aus `CLAUDE.md`, ergänzt um Typecheck/Build, falls `package.json`/`Makefile`/`pyproject.toml`/CI-Konfiguration sie haben.
    - Abhängigkeiten zwischen TFs: Nennt das File keine, aus dem Inhalt ableiten und begründen.
-3. **Kein Stopp vor den PRs**, auch wenn Nikolaus online ist. Widersprüche oder Lücken, die sich nicht aus File und Code lösen lassen, werden nicht erfragt. Eine Frage würde den Turn beenden und den Lauf anhalten.
+3. **Kein Stopp vor den PRs**, auch wenn der User online ist. Widersprüche oder Lücken, die sich nicht aus File und Code lösen lassen, werden nicht erfragt. Eine Frage würde den Turn beenden und den Lauf anhalten.
    - Stattdessen den vorsichtigsten umkehrbaren Default wählen und als Annahme dokumentieren.
    - Die offene Frage kommt in den Abschlussbericht.
    - **Fehlen Zugangsdaten oder Anbieterwahl nur für den Betrieb:** hinter einer Schnittstelle mit Stub-Adapter bauen und testen. Live-Schaltung und Anbieterwahl kommen als offene Entscheidung in den Abschlussbericht, besonders bei Kosten oder personenbezogenen Daten (AV-Vertrag).
@@ -113,23 +113,23 @@ Vor dem PR den gebauten Code systematisch durchgehen und diese acht Fragen **sch
   - „Reasoning-Weg“: der TF-Teil des Abschlussberichts (siehe unten), damit er auch nach dem Chat erhalten bleibt
 - **Abhängiges TF:** gestapelt branchen, PR-Basis = Vorgänger-Branch. Binär-Check und Reviews laufen gegen diesen Branch. Ins PR-Body gehört der Hinweis „nach Merge von #<vorgänger> auf `main` retargeten“.
 - **Unabhängiges TF:** gegen `main`.
-- **Branch-Namen ohne die Zeichenfolge „-f“.** Ein lokaler git-Wrapper hält das sonst für einen Force-Push.
+- **Branch-Namen ohne die Zeichenfolge „-f“.** Manche lokalen git-Wrapper halten das sonst für einen Force-Push.
 - Danach sofort das nächste TF. **Nie zwischen TFs fragen**, ob erst gemergt oder reviewt werden soll. Ein offener Vorgänger-PR ist kein Grund anzuhalten.
 
 ## Ende des Laufs: harter Stopp (HITL)
 
 Sobald alle PRs stehen bzw. alle TFs abgeschlossen oder übersprungen sind, **stoppt der Lauf**.
-- **Phase G entfällt:** kein PR-Review-Loop, kein `/code-review`, kein `/pr-review-loop`. Den PR-Review stößt Nikolaus selbst an, nachdem er den Lauf geprüft hat.
+- **Phase G entfällt:** kein PR-Review-Loop, kein `/code-review`, kein `/pr-review-loop`. Den PR-Review stößt der User selbst an, nachdem der Lauf geprüft ist.
 - **Nicht mergen, nicht deployen, keine Server-Aktionen.**
 
-Der **Abschlussbericht** ist die Grundlage für Nikolaus' Prüfung. Er macht den Reasoning-Weg nachvollziehbar, je TF:
+Der **Abschlussbericht** ist die Grundlage für die Prüfung durch den User. Er macht den Reasoning-Weg nachvollziehbar, je TF:
 - **PR:** Link, Basis, Merge-Reihenfolge, Status (offen, übersprungen, kein PR wegen roter Tests)
 - **Entscheidungen und Annahmen:** jede mit Begründung, besonders jeder Default anstelle einer offenen Frage
 - **Review-Verlauf B/D:** je Runde die Befunde und das Urteil (angenommen, abgelehnt mit Grund, offen)
 - **Umsetzung:** Abweichungen vom Plan, Task-Korrekturen, Design-Passes und warum
 - **Härtungsdurchgang:** Ergebnis in Kurzform, gefundene Lücken
 - **Verifikation:** Befehle und Ergebnis
-- **Offene Fragen und Entscheidungen** für Nikolaus, inklusive Abweichungen von repo-eigenen Workflow-Dokumenten und „Effort nicht garantiert“, falls zutreffend
+- **Offene Fragen und Entscheidungen** für den User, inklusive Abweichungen von repo-eigenen Workflow-Dokumenten und „Effort nicht garantiert“, falls zutreffend
 - **Nötige Ops-Schritte:** Migrationen, Env, Resync
 
 Letzte Zeile: „Stopp. Bitte prüfen; danach `/pr-review-loop <PR>` je PR.“
@@ -142,8 +142,8 @@ Letzte Zeile: „Stopp. Bitte prüfen; danach `/pr-review-loop <PR>` je PR.“
 | „Vier Zeilen schreibe ich schneller selbst“ | Die Hauptsession orchestriert und prüft. Implementiert wird nur von Sonnet. |
 | „Tests grün, also PR“ | Grüne Tests finden keine Absturzfenster. Erst kommt die Härtung. |
 | „Die Tests decken den neuen Zweig ab, steht ja im Namen“ | Erst eine Mutation zeigt, ob ein Test rot wird. Ohne Probe bleibt die Lücke bis zum Review. |
-| „Ich frag kurz, ob TF1 erst gemergt werden soll“ | Kein Stopp vor den PRs, auch wenn Nikolaus online ist. Stapeln ist der Default. |
-| „Zum Schluss noch ein Review-Loop über alle PRs“ | Phase G entfällt. Den Review stößt Nikolaus an. |
+| „Ich frag kurz, ob TF1 erst gemergt werden soll“ | Kein Stopp vor den PRs, auch wenn der User online ist. Stapeln ist der Default. |
+| „Zum Schluss noch ein Review-Loop über alle PRs“ | Phase G entfällt. Den Review stößt der User an. |
 | „Brainstorming fragt mich etwas, ich warte“ | Das Feature-File ist die Antwort. Annahme dokumentieren, weiter. |
-| „Nikolaus ist doch online, ich frag kurz“ | Kein Stopp vor den PRs. Default wählen, im Bericht als offene Frage führen. |
-| „PRs stehen, ich starte gleich `/pr-review-loop`“ | Erst prüft Nikolaus den Lauf (HITL). Den Review stößt er an. |
+| „Der User ist doch online, ich frag kurz“ | Kein Stopp vor den PRs. Default wählen, im Bericht als offene Frage führen. |
+| „PRs stehen, ich starte gleich `/pr-review-loop`“ | Erst prüft der User den Lauf (HITL) und stößt dann den Review an. |
