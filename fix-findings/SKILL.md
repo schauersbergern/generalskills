@@ -37,7 +37,7 @@ Die Eingabe ist die Befundliste, eventuell gefolgt von den Befehlswörtern „me
    - **abgelehnt:** mit Beleg (`datei:zeile`, Testausgabe, Doku). Höflichkeit ist kein Grund zum Annehmen.
    - **offen:** Hängt der Befund an einer Entscheidung, die nur der User treffen kann (Produktverhalten, Kosten, Human-Gate), bleibt er offen. Nichts erfinden. Die Entscheidungsfrage steht unter der Tabelle. Kam die Liste von einem Reviewer-Thread, geht sie zusätzlich an den User im Chat.
 3. **Klasse statt Instanz:** Zu jedem angenommenen Befund nach Geschwisterstellen derselben Eigenschaft suchen (`grep`, Aufrufer) und alle im selben Commit beheben. In der Tabelle unter „Mitbehoben“ aufführen.
-   - **Zweiter Fund = Design-Problem.** Gemeint ist: Ein Code-Befund trifft dieselbe Eigenschaft im selben Modul, die in einer früheren Runde dieses PRs schon gefixt wurde. Frühere Runden erkennst du an Review-IDs in Commit-Messages (`git log --grep 'Review R'`). Prosa zählt nicht. Selbst gefundene Geschwisterstellen derselben Runde sind „Mitbehoben“ und kein zweiter Fund.
+   - **Zweiter Fund = Design-Problem.** Gemeint ist: Ein Code-Befund trifft dieselbe Eigenschaft im selben Modul, die in einer früheren Runde dieses PRs schon gefixt wurde. Frühere Runden erkennst du an Review-IDs in Commit-Messages (`git log origin/<basis>..HEAD --grep 'Review R'`, nur die Commits dieses PRs). Prosa zählt nicht. Selbst gefundene Geschwisterstellen derselben Runde sind „Mitbehoben“ und kein zweiter Fund.
    - Dann zwar fixen, aber in der Tabelle als **Design-Hinweis** markieren, statt still weiter zu flicken.
 4. **Pro angenommenem Befund:**
    - **Verhaltens-Befund:**
