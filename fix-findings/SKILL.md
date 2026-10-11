@@ -52,7 +52,7 @@ Die Eingabe ist die Befundliste, eventuell gefolgt von den Befehlswörtern „me
    - **Je Befund nur gezielte Tests** (die betroffenen Testdateien, z. B. `pnpm vitest run <pfade>`), nicht die ganze Suite.
    - **Die ganze Suite läuft genau einmal vor dem Push**, und zwar dort, wo umgesetzt wird.
    - **Hast du an einen Subagenten delegiert** und liegt dessen Ausgabe des Vollaufs vor, prüfst du danach nur Typecheck (z. B. `tsc --noEmit`) und die gezielten Tests. Kein zweiter Vollauf.
-   - **Den dritten Vollauf macht die CI.** Grüne CI ist ohnehin die Abbruchbedingung der Review-Schleife.
+   - **Den Rest macht die CI.** Grüne CI ist ohnehin die Abbruchbedingung der Review-Schleife.
 6. **Pushen** auf den PR-Branch, ohne nachzufragen.
 7. **Abschluss:** Tabelle unten. Kam die Liste per Nachricht aus einem Reviewer-Thread, dorthin per `SendMessage` antworten (`to` = `from` der Nachricht) und den neuen Head-SHA nennen.
 
