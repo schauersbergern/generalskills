@@ -4,7 +4,7 @@ Sammlung lokaler Skills fuer agentische Coding- und Content-Workflows.
 Jeder Skill liegt in einem eigenen Verzeichnis mit einer `SKILL.md` als
 Einstiegspunkt und optionalen Referenzen oder Scripts.
 
-Der aktuelle Stand des Repos umfasst fuenf produktiv nutzbare Skills:
+Der aktuelle Stand des Repos umfasst acht produktiv nutzbare Skills plus zwei Agent-Definitionen:
 
 | Skill | Zweck | Wichtige Dateien |
 |---|---|---|
@@ -13,6 +13,10 @@ Der aktuelle Stand des Repos umfasst fuenf produktiv nutzbare Skills:
 | `seo-geo-writer` | Erstellt oder optimiert SEO- und GEO-orientierte Blogartikel mit fester Recherche- und Strukturvorgabe | `seo-geo-writer/SKILL.md`, `seo-geo-writer/references/regelwerk.md` |
 | `seo-page-review` | Auditiert eine einzelne URL und vergibt einen gewichteten Score (50% SEO + 50% GEO) mit priorisierten Befunden und Empfehlungen | `seo-page-review/SKILL.md`, `seo-page-review/references/checkliste.md`, `seo-page-review/scripts/analyze_page.py` |
 | `viral-post-wizard` | Erstellt LinkedIn-Posts im Stil von Nikolaus Schausberger auf Basis fester Schreibregeln | `viral-post-wizard/SKILL.md`, `viral-post-wizard/references/*` |
+| `pr-review-loop` | Reviewer-Thread: prueft einen PR mit 1–3 Opus-Reviewern je nach PR-Art (Doku/Ops 1, Code 2–3 parallel), reproduziert Befunde, liefert P1/P2/P3-Liste an den Fixer-Thread, re-reviewt nur das Delta; aendert nie Code, merged nie | `pr-review-loop/SKILL.md` |
+| `fix-findings` | Fixer-Thread: prueft eingefuegte Review-Befunde, setzt angenommene per Test → Fix → Commit um, pusht, liefert Entscheidungstabelle; Merge/Deploy nur auf Befehlswort | `fix-findings/SKILL.md` |
+| `auto-feature` | Autonomer Feature-Workflow aus einem Feature-File ohne Zwischenhalt: Spec (Opus 5.5) → Opus-Review max. 2 → Plan (Opus 5.5) → Opus-Review max. 2 → Sonnet-5.5-Umsetzung → Haertung → PRs → harter Stopp (HITL); alles Effort xhigh; kein PR-Review-Loop, kein Merge | `auto-feature/SKILL.md` |
+| `agents/opus-xhigh`, `agents/sonnet-xhigh` | Subagent-Definitionen mit `effort: xhigh` fuer Reviews bzw. Umsetzung, genutzt von `pr-review-loop` und `auto-feature` | `agents/*.md` |
 
 ## Repository-Struktur
 
@@ -48,6 +52,15 @@ nikskills/
       ghostwriter_spickzettel.md
       viral_framework.md
       voiceprint.md
+  pr-review-loop/
+    SKILL.md
+  fix-findings/
+    SKILL.md
+  auto-feature/
+    SKILL.md
+  agents/
+    opus-xhigh.md
+    sonnet-xhigh.md
 ```
 
 ## Skill-Details
@@ -235,6 +248,28 @@ Themen in postfaehige Fassungen ausgelegt.
 - Abschnitte kurz halten, mit Leerzeilen dazwischen
 - Disallow List als harte Abschlusskontrolle behandeln
 - Im Regelfall drei Varianten liefern, ausser der Nutzer will gezielt nur eine
+
+## Coding-Workflow-Skills (Claude Code)
+
+`pr-review-loop`, `fix-findings` und `auto-feature` sind globale Claude-Code-Skills.
+Sie werden per Symlink eingebunden:
+
+```bash
+for s in pr-review-loop fix-findings auto-feature; do ln -sfn ~/Projects/skillz/nikskills/$s ~/.claude/skills/$s; done
+for a in opus-xhigh sonnet-xhigh; do ln -sfn ~/Projects/skillz/nikskills/agents/$a.md ~/.claude/agents/$a.md; done
+```
+
+Alle drei Skills setzen `effort: xhigh` im Frontmatter, `auto-feature` zusaetzlich `model: opus`.
+Die Subagenten bekommen Effort ueber die Agent-Typen `opus-xhigh`/`sonnet-xhigh`; fehlen sie,
+weichen die Skills auf `general-purpose` mit explizitem `model` aus und melden „Effort nicht garantiert“.
+
+Aufruf mit Argumenten, z. B. `/pr-review-loop 214 "Fixer 214" runden=3`, `/fix-findings <Liste> [mergen] [deployen]`,
+`/auto-feature docs/features/<datei>.md`. Projektspezifische Befehle (Tests, Lint, Deploy)
+stehen im jeweiligen Repo-`CLAUDE.md`, nicht in den Skills.
+
+Gemeinsame harte Regel: Kein Skill merged oder deployt von sich aus. `fix-findings` tut es
+nur auf ausdrückliches Befehlswort des Users (in den Argumenten oder im eigenen Begleitsatz,
+bzw. ein „ja“ auf die Rückfrage, wenn der Merge automatisch deployt); die anderen beiden nie.
 
 ## Laufzeitannahmen
 
