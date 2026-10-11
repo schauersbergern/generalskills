@@ -101,7 +101,7 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
      Den Thread über seinen Namen finden und die Liste schicken. Die Antwort kommt als Nachricht. Nicht pollen.
    - **Ohne Fixer-Thread oder wenn er nicht erreichbar ist:** die Liste als kopierbaren Block in den Chat und auf den User warten.
 5. **Re-Review nur des Deltas:** Die Reviewer bekommen `git diff <alter-head>..<neuer-head>`, die Befundliste der Vorrunde und die Entscheidungstabelle des Fixers. Sie prüfen:
-   - Ist jeder angenommene Befund wirklich behoben, inklusive Geschwisterstellen?
+   - Ist jeder Befund mit dem Urteil „angenommen“, „angenommen, anders umgesetzt“ oder „erledigt“ (mit genanntem Commit) wirklich behoben, inklusive Geschwisterstellen?
    - Hat der Fix neue Fehler erzeugt?
 
    Die übrigen Urteile des Fixers bewertest **du** selbst am Code:
