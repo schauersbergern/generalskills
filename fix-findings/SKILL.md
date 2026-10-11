@@ -54,7 +54,7 @@ Die Eingabe ist die Befundliste, eventuell gefolgt von den Befehlswörtern „me
    - **Hast du an einen Subagenten delegiert** und liegt dessen Ausgabe des Vollaufs vor, prüfst du danach nur Typecheck (z. B. `tsc --noEmit`) und die gezielten Tests. Kein zweiter Vollauf.
    - **Den Rest macht die CI.** Grüne CI ist ohnehin die Abbruchbedingung der Review-Schleife.
 6. **Pushen** auf den PR-Branch, ohne nachzufragen.
-7. **Abschluss:** Tabelle unten. Kam die Liste per Nachricht aus einem Reviewer-Thread, dorthin per `SendMessage` antworten (`to` = `from` der Nachricht) und den neuen Head-SHA nennen.
+7. **Abschluss:** Tabelle unten. Kam die Liste per Nachricht aus einem Reviewer-Thread, dorthin per `SendMessage` antworten und den neuen Head-SHA nennen. Adresse: `from` der Nachricht, sonst die Zeile „Antwort an:“ aus der Liste (`SendMessage` nimmt auch `local_…`-IDs). Fehlt beides, die Tabelle in den Chat.
 
 ## Abschlusstabelle
 

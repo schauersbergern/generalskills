@@ -147,6 +147,7 @@ R<r>-1 [P1] pfad/datei.ts:88 — <Befund in einem Satz>
 R<r>-2 [P3, Prosa] …
 Verdacht (nicht belegt): …
 Verworfen: <Befund> — <Grund>
+Antwort an: <Name und Session-ID dieses Threads, z. B. local_…>
 Bitte nach dem Push mit neuem Head-SHA und Testlauf antworten.
 ```
 
