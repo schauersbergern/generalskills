@@ -98,7 +98,7 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
    - **Kein Fixer-Name, erste Liste dieses PRs:** einen Fixer-Thread nur für diesen PR starten, per `mcp__ccd_session__start_session`:
      - `initiation: "user_asked"` (der User hat den Fixer durch das Weglassen des Namens bestellt), `context: "fresh"`, `use_worktree: true`, `name: "fix-<n>"`, Titel „Fixer PR #<n>“
      - `background`: Repo, PR-Nummer, Branch und Basis; dass dies der Fixer zu einer Review-Schleife ist und Folgelisten per Nachricht kommen
-     - `prompt`: „Skill `fix-findings` auf diese Befundliste anwenden.“ und darunter die Liste. **Die Wörter „mergen“ und „deployen“ kommen im Brief nicht vor**, sonst liest `fix-findings` sie als Befehlswort.
+     - `prompt`: „Skill `fix-findings` auf diese Befundliste anwenden.“ und darunter die Liste. **Außerhalb der Befundzeilen (Begleitsatz, `background`) kommen die Wörter „mergen“ und „deployen“ nicht vor**, dort liest `fix-findings` sie als Befehlswort.
      - Die `local_…`-ID aus dem Ergebnis merken.
    - **Kein Fixer-Name, Folgerunde:** die Liste per `SendMessage` an dieselbe `local_…`-ID. Nie einen zweiten Fixer für denselben PR starten; der erste kennt seine Entscheidungen.
    - **Die Antwort kommt als Nachricht.** Nicht pollen. Bei einem selbst gestarteten Fixer meldet dir die App sein Turn-Ende mit seiner letzten Nachricht; die ist seine Antwort, auch wenn er kein `SendMessage` geschickt hat. In die Zeile „Antwort an:“ schreibst du immer deine `local_…`-ID (`mcp__ccd_session_mgmt__get_session` mit `"self"`, Feld `sessionId`). Fehlt das Werkzeug (CLI), trägt die per `SendMessage` verschickte Liste deine Adresse im `from`.
