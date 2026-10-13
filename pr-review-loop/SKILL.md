@@ -125,7 +125,7 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
    - **Rundengrenze** (nur mit `runden=<n>`): Ist die letzte erlaubte Runde gelaufen und wurden ihre Befunde verschickt, wartest du auf die Fixer-Antwort. Dann holst du CI- und Konfliktstatus des neuen Heads und meldest „Rundengrenze erreicht“. Ein neues Review startest du nicht.
    - **Stillstand** (gilt immer, ohne `runden=<n>` die einzige Bremse; trifft er in der letzten erlaubten Runde zu, geht er der Rundengrenze vor). Er liegt vor, wenn eins davon zutrifft:
      - Derselbe Befund ist in zwei Runden hintereinander „nicht behoben“ oder „Ablehnung nicht überzeugend“, in beliebiger Kombination.
-     - Die Zahl der zu verschickenden Befunde ist zwei Runden hintereinander nicht gesunken (z. B. 4 → 4 → 5), auch wenn es jedes Mal neue sind.
+     - Die Zahl der zu verschickenden Befunde (nach der Versandregel, CI- und Konflikt-Befunde eingeschlossen, Verdachte nicht) ist in zwei Runden hintereinander nicht unter das Minimum aller früheren Runden dieses PRs gesunken, auch wenn es jedes Mal neue sind. Beispiele: 4 → 4 → 5 und 4 → 2 → 3 → 2 sind Stillstand in der dritten bzw. vierten Runde.
 
      Dann verschickst du keine weitere Liste. Du meldest „Stillstand“ mit diesen Befunden und dem, was der Fixer dazu geschrieben hat, und wartest auf den User.
 
@@ -193,7 +193,7 @@ Letzte Zeile, wenn sauber, wörtlich: **„Bereit für deine Merge-Entscheidung.
 | „Alles grün, der User ist offline, ich merge“ | Grün ist ein Vorschlag, kein Auftrag. Merge nur auf ausdrücklichen Befehl des Users im Chat. |
 | „Der Reviewer klingt sicher, ich reiche durch“ | Ungeprüfte Befunde erzeugen Fix-Runden für Phantome. Erst reproduzieren. |
 | „Lieber nochmal den ganzen Diff“ | Das erzeugt neue Nits auf Altbestand, und die Schleife konvergiert nicht. Nur das Delta. |
-| „Eine Runde mehr findet sicher noch was“ | Ein Review findet immer etwas. Mit `runden=<n>` ist die Grenze fest, verlängern darf nur der User. Ohne Grenze enden Schleifen bei sauber oder Stillstand: Derselbe Befund kehrt wieder, oder die Befundzahl sinkt nicht mehr. |
+| „Eine Runde mehr findet sicher noch was“ | Ein Review findet immer etwas. Mit `runden=<n>` ist die Grenze fest, verlängern darf nur der User. Ohne Grenze enden Schleifen bei sauber oder Stillstand (Schritt 6). |
 | „Kein Fixer genannt, also Liste in den Chat“ | Ohne Namen startest du je PR einen Fixer-Thread. In den Chat nur, wenn das Starten nicht geht. |
 | „Ein Fixer für alle PRs reicht“ | Dann laufen die Fixes nacheinander, und zwei PRs teilen sich einen Kontext. Je PR ein Fixer. |
 | „Für die Folgerunde starte ich einen frischen Fixer“ | Der neue kennt die Ablehnungen und offenen Fragen der Vorrunde nicht. Folgelisten an denselben Fixer. |
