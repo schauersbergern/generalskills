@@ -94,6 +94,7 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
 
    Jeder Befund wird **bestätigt**, **verworfen** (mit Grund) oder als **Verdacht** markiert. Ein Verdacht geht nur mit dieser Kennzeichnung weiter. Zum bestätigten Befund gehören alle Geschwisterstellen derselben Klasse (Klasse statt Instanz).
 4. **Liste ausliefern** im Format unten. Die Werkzeuge ggf. erst per `ToolSearch` laden.
+   - **Vorher Stillstand prüfen:** CI- und Konfliktstatus abfragen und die Stillstand-Kriterien aus Schritt 6 anwenden. Liegt Stillstand vor, wird nichts ausgeliefert; weiter mit Schritt 6.
    - **Fixer-Name angegeben:** Je nach Umgebung `ListAgents` + `SendMessage` oder in der Desktop-App `mcp__ccd_session_mgmt__list_sessions` + `send_message`. Den Thread über seinen Namen finden und die Liste schicken.
    - **Kein Fixer-Name, erste Liste dieses PRs:** einen Fixer-Thread nur für diesen PR starten, per `mcp__ccd_session__start_session`:
      - `initiation: "user_asked"` (der User hat den Fixer durch das Weglassen des Namens bestellt), `context: "fresh"`, `use_worktree: true`, `name: "fix-<n>"`, Titel „Fixer PR #<n>“
