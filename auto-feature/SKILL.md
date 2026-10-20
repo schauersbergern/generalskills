@@ -112,7 +112,7 @@ Ins Review-Briefing gehört:
 - Die Mutation danach von Hand zurücknehmen. Am Ende muss `git status` den Stand vor dem Review zeigen. Kein `git checkout`/`stash`/`reset`, keine Commits.
 - Ergebnis je Probe im Review: „Mutation → Test <Name> rot“ oder „kein Test rot → Befund Wichtig: Test fehlt“.
 - Re-Reviews mutieren nur, wenn der Fix-Diff selbst Logik ändert, und dann nur dort.
-- Mutationsproben nur, solange kein anderer Subagent im selben Worktree arbeitet.
+- Reviews mit Mutationsprobe (auch Re-Reviews) erst dispatchen, wenn kein anderer Subagent im selben Worktree arbeitet, und bis zu ihrem Ende keinen weiteren dort starten. Warten statt auslassen.
 
 ### Task-Reviews und Korrekturdurchläufe
 
