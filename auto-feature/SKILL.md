@@ -98,7 +98,7 @@ Die Hauptsession legt den Agent-Typ je Implementierung und je Review beim Dispat
 | `sonnet-high` | **Re-Reviews** von Fix-Diffs, immer, auch bei DB, Sperren, Jobs, Zustandsautomaten oder Raw SQL; **lesende Task-Reviews** reiner Refactor-/UI-Tasks; **mechanische Implementierungen** (Verschieben, Umbenennen, Re-Exporte, Texte, Styles ohne neue Logik). |
 
 - **Im Zweifel und bei Misch-Tasks** gilt für Implementierung und Task-Review `sonnet-xhigh`. Re-Reviews bleiben bei `sonnet-high`. Ein Task ist erst dann mechanisch, wenn er keine neue Verzweigung, Invariante oder Abfrage einführt.
-- **Fix-Runden** laufen als Fortsetzung desselben Implementierers (`SendMessage`), also mit dessen Typ. Das spart die Einarbeitung.
+- **Fix-Runden** laufen als Fortsetzung desselben Implementierers (`SendMessage`), also mit dessen Typ. Das spart die Einarbeitung. Ausnahme: Bringt ein Fix neue Logik (Verzweigung, Invariante, Abfrage) oder einen der `sonnet-xhigh`-Bereiche in einen `sonnet-high`-Task, schreibt ihn ein frischer `sonnet-xhigh`-Implementierer.
 - **Unverändert bleiben** die Opus-Reviews (B/D) und die Härtungs-Subagenten (E2, `sonnet-xhigh`). Begründung: Alle 28 Blocker des Referenzlaufs kamen aus Opus-Reviews, und die Härtung fand in jedem TF echte Lücken.
 - **Begründung des Abschlags:** Re-Reviews brachten 0,14 Blocker+Wichtig je 100k Tokens (Median 91k), und beide echten Funde lagen im eng umrissenen Fix-Diff. Lesende Reviews von Refactor-/UI-Tasks kosteten 100–136k und fanden 0–1 Wichtig. Ein kleineres Modell als Sonnet ist nicht vorgesehen, weil auch Re-Review-Funde Transaktions- und Deadlock-Semantik verlangten.
 
