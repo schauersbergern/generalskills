@@ -59,14 +59,14 @@ Feature-File: `$ARGUMENTS`
 Jeder Plan hat einen Abschnitt **„Review Focus“**. Er beginnt mit der folgenden festen Checkliste wiederkehrender Fehlerklassen, danach folgen TF-spezifische Punkte. Je Punkt steht im Plan entweder „trifft zu → Task <n>, Test <Name>“ oder „trifft nicht zu“ mit einem Satz Begründung. Ein zutreffender Punkt ohne Task und Test ist ein Plan-Fehler.
 
 1. **Sperren mit deterministischem Wartenachweis:** Jede neue Sperre (Advisory Lock, `SELECT … FOR UPDATE`, Lease-Spalte, Mutex) bekommt einen Test, der nachweist, dass der zweite Aufrufer tatsächlich wartet bzw. abgewiesen wird: über Barriere oder Latch im ersten Halter oder Abfrage des Sperrzustands (`pg_locks`), nicht über `sleep` oder Timing.
-2. **Werte, die die Validierung bestehen, aber in PostgreSQL scheitern:** je Eingabefeld, das in die DB geht, Grenzwerte gegen die echte DB prüfen:
-   - Datumsbereiche: `Invalid Date`, Jahre außerhalb des PostgreSQL-Bereichs, Geräteuhr auf 1970
+2. **Werte, die die App-Validierung bestehen, aber an Prisma/PostgreSQL scheitern oder still verfälscht werden:** je Eingabefeld, das in die DB geht, Grenzwerte gegen die echte DB prüfen:
+   - Datumsbereiche: `Invalid Date` (lehnt schon der Prisma-Client ab), Jahr 0 (gibt es in PostgreSQL nicht, z. B. scheitert `0000-…` als `::date`), Jahre außerhalb des PostgreSQL-Bereichs
    - Steuerzeichen: `\u0000` in `text`/`jsonb`
-   - Surrogate: ungepaarte UTF-16-Surrogate (`\uD800`)
+   - Surrogate: ungepaarte UTF-16-Surrogate (`\uD800`) scheitern je nach Pfad in der Prisma-Engine oder werden still zu U+FFFD
 3. **Transaktions-Timeouts explizit:** Jede interaktive Transaktion setzt `timeout` (und `maxWait`) ausdrücklich. Der Prisma-Default von 5 s führt bei Sperrwartezeit oder Last zu P2028.
 4. **Org-/Owner-Scope in neuen Modulen:** Jede Abfrage eines neuen Moduls ist org-scoped bzw. läuft über den Besitzer-Filter des Repos (siehe `CLAUDE.md`). Test mit fremder Org bzw. fremdem Besitzer.
 5. **Testaufbau mit genug Quellen:** Zusammenführungs- und Abgleichstests mit **≥ 2 Quellen** (Orgs, Projekte, Geräte), Nebenläufigkeitstests mit **≥ 3 parallelen Aufrufern**. Bei einer Quelle bzw. zwei Aufrufern bleiben Reihenfolge- und Opferwahl-Fehler verborgen.
-6. **Uhrsprung und monotone Uhr bei Sperren:** Lease- und Sperrablauf an genau einer Uhr messen (DB-`now()` oder monotone Uhr wie `performance.now()`/`process.hrtime`), nie Geräte- und Serveruhr mischen. Das Verhalten bei Uhrsprung (Neustart, NTP, Geräteuhr 1970) steht im Plan.
+6. **Uhrsprung und monotone Uhr bei Sperren:** Lease- und Sperrablauf an genau einer Uhr messen (DB-`now()` oder monotone Uhr wie `performance.now()`/`process.hrtime`), nie Geräte- und Serveruhr mischen. Das Verhalten bei Uhrsprung (Neustart, NTP) steht im Plan, ebenso Sortierung und Paginierung nach Gerätezeit: Eine Geräteuhr auf 1970 ist ein gültiger DB-Wert, aber ein Logik-Grenzfall.
 
 **Herkunft:** Diese Klassen tauchten im Lauf Meckelein (2026-10-17) erst in Task-Reviews oder in der Härtung auf (u. a. P2028 nach 5 s, `busySince` nach Neustart, „Mehr laden“ bei Geräteuhr 1970, Sperre ohne monotone Uhr, ungetestete Sperren). Im Plan kosten sie einen Satz, in der Umsetzung eine Fix-Runde.
 
