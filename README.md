@@ -4,7 +4,7 @@ Sammlung lokaler Skills fuer agentische Coding- und Content-Workflows.
 Jeder Skill liegt in einem eigenen Verzeichnis mit einer `SKILL.md` als
 Einstiegspunkt und optionalen Referenzen oder Scripts.
 
-Der aktuelle Stand des Repos umfasst acht produktiv nutzbare Skills plus zwei Agent-Definitionen:
+Der aktuelle Stand des Repos umfasst acht produktiv nutzbare Skills plus drei Agent-Definitionen:
 
 | Skill | Zweck | Wichtige Dateien |
 |---|---|---|
