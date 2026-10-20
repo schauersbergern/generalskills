@@ -15,7 +15,7 @@ Feature-File: `$ARGUMENTS`
 - **Ohne Zwischenhalt:** Der Lauf geht vom Feature-File bis zu 1…n PRs durch.
 - **Dann harter Stopp (HITL):** Der User prüft den Reasoning-Weg und stößt selbst `/pr-review-loop` an. Merge und Deploy entscheidet der User.
 
-**Modelle und Effort:** Spec und Plan schreibt die Hauptsession mit **Opus 5.5** (Skill-Frontmatter `model: opus`). Reviews machen frische Opus-Subagenten, die Umsetzung macht **Sonnet 5.5**, subagent-driven. **Effort `xhigh` als Standard**: die Hauptsession über das Skill-Frontmatter, die Subagenten über die Agent-Typen `opus-xhigh` und `sonnet-xhigh` (aus `~/.claude/agents/`). **Einzige Ausnahme:** In Phase E gehen Re-Reviews, lesende Reviews reiner Refactor-/UI-Tasks und mechanische Implementierungen an `sonnet-high` (Regel unter „Effort-Regel“). Fehlt ein Typ in der Liste der verfügbaren Agents: `general-purpose` mit demselben `model` und „Effort nicht garantiert“ im Abschlussbericht.
+**Modelle und Effort:** Spec und Plan schreibt die Hauptsession mit **Opus 5.5** (Skill-Frontmatter `model: opus`). Reviews machen frische Opus-Subagenten, die Umsetzung macht **Sonnet 5.5**, subagent-driven. **Effort `xhigh` als Standard**: die Hauptsession über das Skill-Frontmatter, die Subagenten über die Agent-Typen `opus-xhigh` und `sonnet-xhigh` (aus `~/.claude/agents/`). **Einzige Ausnahme:** In Phase E gehen Re-Reviews (immer, auch bei DB oder Sperren), lesende Reviews reiner Refactor-/UI-Tasks und mechanische Implementierungen an `sonnet-high` (Regel unter „Effort-Regel“). Fehlt ein Typ in der Liste der verfügbaren Agents: `general-purpose` mit demselben `model` und „Effort nicht garantiert“ im Abschlussbericht.
 
 **Projektspezifisches** liefert das Repo-`CLAUDE.md`: Befehle, Konventionen, Pfade, Teststrategie. Dieser Skill liefert den Ablauf. Weicht ein anderes Workflow-Dokument im Repo davon ab (nicht `CLAUDE.md`), gilt dieser Skill. Die Abweichung kommt in den Abschlussbericht.
 
@@ -94,10 +94,10 @@ Die Hauptsession legt den Agent-Typ je Implementierung und je Review beim Dispat
 
 | Typ | Wofür |
 |---|---|
-| `sonnet-xhigh` | Implementierung **und** Task-Review jedes Tasks, der **DB** (Schema, Migration, Abfragen), **Sperren**, **Jobs/Inngest**, **Zustandsautomaten** oder **Raw SQL** berührt. Außerdem alle Härtungs-Subagenten (E2). |
-| `sonnet-high` | **Re-Reviews** von Fix-Diffs; **lesende Task-Reviews** reiner Refactor-/UI-Tasks; **mechanische Implementierungen** (Verschieben, Umbenennen, Re-Exporte, Texte, Styles ohne neue Logik). |
+| `sonnet-xhigh` | Implementierung **und** Task-Review (nicht Re-Review) jedes Tasks, der **DB** (Schema, Migration, Abfragen), **Sperren**, **Jobs/Inngest**, **Zustandsautomaten** oder **Raw SQL** berührt. Außerdem alle Härtungs-Subagenten (E2). |
+| `sonnet-high` | **Re-Reviews** von Fix-Diffs, immer, auch bei DB, Sperren, Jobs, Zustandsautomaten oder Raw SQL; **lesende Task-Reviews** reiner Refactor-/UI-Tasks; **mechanische Implementierungen** (Verschieben, Umbenennen, Re-Exporte, Texte, Styles ohne neue Logik). |
 
-- **Im Zweifel und bei Misch-Tasks** gilt `sonnet-xhigh`. Ein Task ist erst dann mechanisch, wenn er keine neue Verzweigung, Invariante oder Abfrage einführt.
+- **Im Zweifel und bei Misch-Tasks** gilt für Implementierung und Task-Review `sonnet-xhigh`. Re-Reviews bleiben bei `sonnet-high`. Ein Task ist erst dann mechanisch, wenn er keine neue Verzweigung, Invariante oder Abfrage einführt.
 - **Fix-Runden** laufen als Fortsetzung desselben Implementierers (`SendMessage`), also mit dessen Typ. Das spart die Einarbeitung.
 - **Unverändert bleiben** die Opus-Reviews (B/D) und die Härtung (E2). Begründung: Alle 28 Blocker des Referenzlaufs kamen aus Opus-Reviews, und die Härtung fand in jedem TF echte Lücken.
 - **Begründung des Abschlags:** Re-Reviews brachten 0,14 Blocker+Wichtig je 100k Tokens (Median 91k), und beide echten Funde lagen im eng umrissenen Fix-Diff. Lesende Reviews von Refactor-/UI-Tasks kosteten 100–136k und fanden 0–1 Wichtig. Ein kleineres Modell als Sonnet ist nicht vorgesehen, weil auch Re-Review-Funde Transaktions- und Deadlock-Semantik verlangten.
@@ -204,7 +204,7 @@ Führt der Lauf eine Agent-Statistik (Feature-File, User-Auftrag oder Repo-Konve
 | „Die Tests decken den neuen Zweig ab, steht ja im Namen“ | Erst eine Mutation zeigt, ob ein Test rot wird. Ohne Probe bleibt die Lücke bis zum Review. |
 | „Der Task ist klein, Review lesend reicht“ | Hat er Logik, wird mutiert. Lesend nur reine Refactor-/UI-Tasks. |
 | „Spart Tokens: Plan-Review mit Sonnet oder Effort high“ | Alle Blocker des Referenzlaufs kamen aus Opus-xhigh-Reviews. Der Abschlag gilt nur in Phase E nach der Effort-Regel. |
-| „Der Task fasst nur kurz die DB an, `sonnet-high` reicht“ | DB, Sperren, Jobs, Zustandsautomaten oder Raw SQL bedeuten immer `sonnet-xhigh`, für Implementierung und Review. |
+| „Der Task fasst nur kurz die DB an, `sonnet-high` reicht“ | DB, Sperren, Jobs, Zustandsautomaten oder Raw SQL bedeuten immer `sonnet-xhigh`, für Implementierung und Task-Review. Nur das Re-Review des Fix-Diffs geht an `sonnet-high`. |
 | „Ich frag kurz, ob TF1 erst gemergt werden soll“ | Kein Stopp vor den PRs, auch wenn der User online ist. Stapeln ist der Default. |
 | „Zum Schluss noch ein Review-Loop über alle PRs“ | Phase G entfällt. Den Review stößt der User an. |
 | „Brainstorming fragt mich etwas, ich warte“ | Das Feature-File ist die Antwort. Annahme dokumentieren, weiter. |
