@@ -189,9 +189,9 @@ Führt der Lauf eine Agent-Statistik (Feature-File, User-Auftrag oder Repo-Konve
 - **Quelle:** die `<usage>`-Angaben der Task-Notifications (`subagent_tokens`, `duration_ms`, `tool_uses`). Fehlt eine Angabe, steht dort „n/a“, nicht geschätzt.
 - **Spalten:** # | Zeitpunkt | TF | Rolle | Agent-Typ | Modell | Effort | tokens | Δ tokens | duration_ms | tool_uses | B/W/K | angenommen | betriebsrelevant | Fix-Runden | Status
 - **Fortsetzungen per `SendMessage`** (Fix-Runden, Nachträge):
-  - `tokens` = gemeldeter Wert, gekennzeichnet mit „(kum.)“, weil er vermutlich die Vorläufe desselben Agenten enthält.
+  - `tokens` = gemeldeter Wert, gekennzeichnet mit „(kum.)“. Annahme, nicht belegt: Der Wert enthält die Vorläufe desselben Agenten.
   - `Δ tokens` = gemeldeter Wert minus Vorwert, also minus dem zuletzt gemeldeten Wert desselben Agenten.
-  - Ist der gemeldete Wert kleiner als der Vorwert, zählt die Plattform nicht kumulativ. Dann gilt `Δ tokens` = `tokens`, ohne „(kum.)“, und die Auswertung hält das fest.
+  - Ist der gemeldete Wert kleiner als der Vorwert, trägt die Annahme für diesen Agenten nicht, etwa weil der Wert nach einer Kompaktierung nur noch die Kontextgröße zeigt. Dann gilt `Δ tokens` = `tokens`, ohne „(kum.)“, und die Auswertung hält das fest.
   - Erstläufe: `Δ tokens` = `tokens`.
   - **Summen, Mediane und Ausbeuten rechnen mit `Δ tokens`.**
 - **betriebsrelevant:** Anzahl der angenommenen Befunde, die im Betrieb sichtbar geworden wären (Fehler oder Absturz, Datenverlust, Hänger, falsche Anzeige, Sicherheits- oder Scope-Lücke), Format `n: Stichwort; Stichwort`. Reine Stil-, Test-, Doku- und Benennungsbefunde zählen nicht. Gilt für Reviews und Härtungsläufe (gefundene Lücken je Härtungs-Subagent), sonst „–“.
