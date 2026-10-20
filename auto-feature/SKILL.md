@@ -123,7 +123,7 @@ Die Task-Reviews von `subagent-driven-development` (Spec-Treue und Codequalität
 
 ## Härtungsdurchgang (E2)
 
-Die Hauptsession verantwortet den Durchgang. Die Durchsicht samt Test und Fix gibt sie an einen oder mehrere `sonnet-xhigh`-Subagenten (bei großen TFs getrennt, z. B. Server und Client), prüft deren Antworten und gefundene Lücken selbst und fordert Fehlendes nach.
+Die Hauptsession verantwortet den Durchgang. Die Durchsicht samt Test und Fix gibt sie an einen oder mehrere `sonnet-xhigh`-Subagenten (bei großen TFs getrennt, z. B. Server und Client). Mehrere laufen nacheinander oder in getrennten Worktrees, weil sie mutieren und fixen. Die Hauptsession prüft deren Antworten und gefundene Lücken selbst und fordert Fehlendes nach.
 
 Vor dem PR den gebauten Code systematisch durchgehen und diese acht Fragen **schriftlich mit vollständiger Aufzählung** beantworten. Trifft keine zu, genügt ein Satz.
 
