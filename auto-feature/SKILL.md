@@ -65,10 +65,10 @@ Jeder Plan hat einen Abschnitt **„Review Focus“**. Er beginnt mit der folgen
    - Surrogate: ungepaarte UTF-16-Surrogate (`\uD800`) scheitern je nach Pfad in der Prisma-Engine oder werden still zu U+FFFD
 3. **Transaktions-Timeouts explizit:** Jede interaktive Transaktion setzt `timeout` (und `maxWait`) ausdrücklich. Der Prisma-Default von 5 s führt bei Sperrwartezeit oder Last zu P2028.
 4. **Org-/Owner-Scope in neuen Modulen:** Jede Abfrage eines neuen Moduls ist org-scoped bzw. läuft über den Besitzer-Filter des Repos (siehe `CLAUDE.md`). Test mit fremder Org bzw. fremdem Besitzer.
-5. **Testaufbau mit genug Quellen:** Zusammenführungs- und Abgleichstests mit **≥ 2 Quellen** (Orgs, Projekte, Geräte), Nebenläufigkeitstests mit **≥ 3 parallelen Aufrufern**. Bei einer Quelle bzw. zwei Aufrufern bleiben Reihenfolge- und Opferwahl-Fehler verborgen.
+5. **Testaufbau mit genug Quellen:** Zusammenführungs- und Abgleichstests mit **≥ 2 Quellen** (Orgs, Projekte, Geräte), Nebenläufigkeitstests mit **≥ 3 parallelen Aufrufern** (Festlegung, nicht aus dem Referenzlauf abgeleitet). Mit nur einer Quelle führt ein Zusammenführungstest nichts zusammen. Tests mit Gegenreihenfolge legen das Deadlock-Opfer deterministisch fest, statt auf die Opferwahl von PostgreSQL zu setzen.
 6. **Uhrsprung und Uhrwahl bei Sperren:** Lease- und Sperrablauf an genau einer Uhr messen, nie Geräte- und Serveruhr mischen. Persistierte Leases und Sperren laufen über DB-Zeit (`clock_timestamp()`, oder bewusst `now()` = Start der Transaktion). Prozesslokale Sperren laufen über eine monotone Uhr (`performance.now()`/`process.hrtime`), die nur innerhalb des Prozesses und nicht über einen Neustart gilt. Das Verhalten bei Uhrsprung (Neustart, NTP) steht im Plan, ebenso Sortierung und Paginierung nach Gerätezeit: Eine Geräteuhr auf 1970 ist ein gültiger DB-Wert, aber ein Logik-Grenzfall.
 
-**Herkunft:** Diese Klassen tauchten im Lauf Meckelein (2026-10-17) erst in Task-Reviews oder in der Härtung auf (u. a. P2028 nach 5 s, `busySince` nach Neustart, „Mehr laden“ bei Geräteuhr 1970, Sperre ohne monotone Uhr, ungetestete Sperren). Im Plan kosten sie einen Satz, in der Umsetzung eine Fix-Runde.
+**Herkunft:** Diese Klassen tauchten im Lauf Meckelein (2026-10-17) erst in Task-/Re-Reviews oder in der Härtung auf (u. a. P2028 nach 5 s, `busySince` nach Neustart, „Mehr laden“ bei Geräteuhr 1970, Sperre ohne monotone Uhr, ungetestete Sperren). Im Plan kosten sie einen Satz, in der Umsetzung eine Fix-Runde.
 
 ## Reviews (B und D)
 
@@ -104,7 +104,7 @@ Die Hauptsession legt den Agent-Typ je Implementierung und je Review beim Dispat
 
 ### Mutationsproben im Task-Review
 
-**Task-Reviews mit Logik führen Mutationsproben durch.** Logik heißt: neue Verzweigung, Invariante, Validierung, Abfrage oder ein neuer Zustandsübergang. Rein lesend geprüft werden nur reine Refactor-/UI-Tasks ohne neue Logik. Im Referenzlauf fanden fast nur Reviews mit Mutationsproben die echten Laufzeitfehler (Cursor-Tag → 500, „Mehr laden“ hängt bei Geräteuhr 1970, Reconcile ohne Verfügbarkeitsprüfung, ungetestete Sperren).
+**Task-Reviews mit Logik führen Mutationsproben durch.** Logik heißt: neue Verzweigung, Invariante, Validierung, Abfrage oder ein neuer Zustandsübergang. Rein lesend geprüft werden nur reine Refactor-/UI-Tasks ohne neue Logik. Im Referenzlauf fanden Reviews mit Mutationsproben echte Laufzeitfehler (Cursor-Tag → 500, „Mehr laden“ hängt bei Geräteuhr 1970, Reconcile ohne Verfügbarkeitsprüfung, ungetestete Sperren).
 
 Ins Review-Briefing gehört:
 - **Vorrang vor dem Template:** Die Reviewer-Templates von `subagent-driven-development` (`task-reviewer-prompt.md`, `re-review-prompt.md`) verlangen ein rein lesendes Review und Tests nur bei konkretem Zweifel. Das Briefing sagt ausdrücklich, dass beides für dieses Review aufgehoben ist und stattdessen gilt: Arbeitsbaum nur temporär ändern, Endstand = Ausgangsstand, nur die betroffenen Testdateien laufen lassen. Das gilt auch für Re-Reviews, die mutieren.
