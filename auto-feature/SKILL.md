@@ -107,6 +107,7 @@ Die Hauptsession legt den Agent-Typ je Implementierung und je Review beim Dispat
 **Task-Reviews mit Logik führen Mutationsproben durch.** Logik heißt: neue Verzweigung, Invariante, Validierung, Abfrage oder ein neuer Zustandsübergang. Rein lesend geprüft werden nur reine Refactor-/UI-Tasks ohne neue Logik. Im Referenzlauf fanden fast nur Reviews mit Mutationsproben die echten Laufzeitfehler (Cursor-Tag → 500, „Mehr laden“ hängt bei Geräteuhr 1970, Reconcile ohne Verfügbarkeitsprüfung, ungetestete Sperren).
 
 Ins Review-Briefing gehört:
+- **Vorrang vor dem Template:** Die Reviewer-Templates von `subagent-driven-development` (`task-reviewer-prompt.md`, `re-review-prompt.md`) verlangen ein rein lesendes Review und Tests nur bei konkretem Zweifel. Das Briefing sagt ausdrücklich, dass beides für dieses Review aufgehoben ist und stattdessen gilt: Arbeitsbaum nur temporär ändern, Endstand = Ausgangsstand, nur die betroffenen Testdateien laufen lassen. Das gilt auch für Re-Reviews, die mutieren.
 - Je neuer Verzweigung bzw. Invariante eine Mutation (Zweig entfernen, Bedingung umdrehen, Sperre oder Scope-Filter weglassen) und nur die betroffenen Testdateien laufen lassen, nicht die ganze Suite.
 - Die Mutation danach von Hand zurücknehmen. Am Ende muss `git status` den Stand vor dem Review zeigen. Kein `git checkout`/`stash`/`reset`, keine Commits.
 - Ergebnis je Probe im Review: „Mutation → Test <Name> rot“ oder „kein Test rot → Befund Wichtig: Test fehlt“.
