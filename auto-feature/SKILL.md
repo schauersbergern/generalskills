@@ -43,7 +43,7 @@ Feature-File: `$ARGUMENTS`
 | C Plan | Hauptsession (**Opus 5.5**) · `superpowers:writing-plans` | Repo-Konvention, sonst `docs/superpowers/plans/<YYYY-MM-DD>-<tf>.md`; TDD-Tasks mit exakten Pfaden; Abschnitt „Review Focus“ mit fester Checkliste (siehe „Plan (C)“); Commit auf dem TF-Branch |
 | D Plan-Review | frischer `opus-xhigh`-Subagent je Runde | **max. 2 Runden** |
 | E Umsetzung | nur Sonnet-Subagenten (**Sonnet 5.5**) · `superpowers:subagent-driven-development`, TDD | ein Implementierer je Plan-Task; Task-Reviews ebenfalls Sonnet; `sonnet-xhigh` oder `sonnet-high` nach der Effort-Regel |
-| E2 Härtung | Hauptsession | immer durchgehen; ausführlich bei Storage, Zuständen, Jobs, Nebenläufigkeit |
+| E2 Härtung | Hauptsession verantwortet und prüft; Durchsicht samt Test und Fix an `sonnet-xhigh`-Subagenten | immer durchgehen; ausführlich bei Storage, Zuständen, Jobs, Nebenläufigkeit |
 | Verifikation | Hauptsession | Prüfbefehle aus `CLAUDE.md`, Output zeigen (`superpowers:verification-before-completion`) |
 | F PR | Hauptsession | pushen ohne Rückfrage, `gh pr create`, **nie Draft** |
 
@@ -99,7 +99,7 @@ Die Hauptsession legt den Agent-Typ je Implementierung und je Review beim Dispat
 
 - **Im Zweifel und bei Misch-Tasks** gilt für Implementierung und Task-Review `sonnet-xhigh`. Re-Reviews bleiben bei `sonnet-high`. Ein Task ist erst dann mechanisch, wenn er keine neue Verzweigung, Invariante oder Abfrage einführt.
 - **Fix-Runden** laufen als Fortsetzung desselben Implementierers (`SendMessage`), also mit dessen Typ. Das spart die Einarbeitung.
-- **Unverändert bleiben** die Opus-Reviews (B/D) und die Härtung (E2). Begründung: Alle 28 Blocker des Referenzlaufs kamen aus Opus-Reviews, und die Härtung fand in jedem TF echte Lücken.
+- **Unverändert bleiben** die Opus-Reviews (B/D) und die Härtungs-Subagenten (E2, `sonnet-xhigh`). Begründung: Alle 28 Blocker des Referenzlaufs kamen aus Opus-Reviews, und die Härtung fand in jedem TF echte Lücken.
 - **Begründung des Abschlags:** Re-Reviews brachten 0,14 Blocker+Wichtig je 100k Tokens (Median 91k), und beide echten Funde lagen im eng umrissenen Fix-Diff. Lesende Reviews von Refactor-/UI-Tasks kosteten 100–136k und fanden 0–1 Wichtig. Ein kleineres Modell als Sonnet ist nicht vorgesehen, weil auch Re-Review-Funde Transaktions- und Deadlock-Semantik verlangten.
 
 ### Mutationsproben im Task-Review
@@ -123,6 +123,8 @@ Die Task-Reviews von `subagent-driven-development` (Spec-Treue und Codequalität
 
 ## Härtungsdurchgang (E2)
 
+Die Hauptsession verantwortet den Durchgang. Die Durchsicht samt Test und Fix gibt sie an einen oder mehrere `sonnet-xhigh`-Subagenten (bei großen TFs getrennt, z. B. Server und Client), prüft deren Antworten und gefundene Lücken selbst und fordert Fehlendes nach.
+
 Vor dem PR den gebauten Code systematisch durchgehen und diese acht Fragen **schriftlich mit vollständiger Aufzählung** beantworten. Trifft keine zu, genügt ein Satz.
 
 1. **Lange Operationen:** Timeouts, Leases, Stuck-Erkennung, alle, auch in Schleifen.
@@ -135,7 +137,7 @@ Vor dem PR den gebauten Code systematisch durchgehen und diese acht Fragen **sch
 8. **Wirksamkeit der Tests:** für jede neue Verzweigung bzw. Invariante eine Mutationsprobe (Zweig entfernen oder Bedingung umdrehen) gegen die betroffenen Testdateien, nicht die ganze Suite. Wird ein Test rot? Wenn nicht, fehlt der Test.
 
 - **Klasse statt Instanz:** Braucht eine Stelle Behandlung, behandelst du im selben Durchgang alle Stellen derselben Klasse.
-- **Lücken schließen:** Jede Lücke wird zu failing test → Fix → grün. Test und Fix schreibt ein Sonnet-Subagent.
+- **Lücken schließen:** Jede Lücke wird zu failing test → Fix → grün. Test und Fix schreibt ein `sonnet-xhigh`-Subagent.
 - **Zweiter Fund = Design-Pass**, kein weiterer Flicken. Das gilt, wenn dieselbe Eigenschaft im selben Modul ein zweites Mal auffällt, egal ob in Spec-/Plan-Review, Task-Review oder Härtung:
   - Die Hauptsession überarbeitet den betroffenen Abschnitt in Spec und Plan, ohne neue Review-Runde.
   - Sonnet setzt die Änderung um.
@@ -192,7 +194,7 @@ Führt der Lauf eine Agent-Statistik (Feature-File, User-Auftrag oder Repo-Konve
   - Ist der gemeldete Wert kleiner als der Vorwert, zählt die Plattform nicht kumulativ. Dann gilt `Δ tokens` = `tokens`, ohne „(kum.)“, und die Auswertung hält das fest.
   - Erstläufe: `Δ tokens` = `tokens`.
   - **Summen, Mediane und Ausbeuten rechnen mit `Δ tokens`.**
-- **betriebsrelevant:** Anzahl der angenommenen Befunde, die im Betrieb sichtbar geworden wären (Fehler oder Absturz, Datenverlust, Hänger, falsche Anzeige, Sicherheits- oder Scope-Lücke), Format `n: Stichwort; Stichwort`. Reine Stil-, Test-, Doku- und Benennungsbefunde zählen nicht. Gilt für Reviews und Härtung (gefundene Lücken), sonst „–“.
+- **betriebsrelevant:** Anzahl der angenommenen Befunde, die im Betrieb sichtbar geworden wären (Fehler oder Absturz, Datenverlust, Hänger, falsche Anzeige, Sicherheits- oder Scope-Lücke), Format `n: Stichwort; Stichwort`. Reine Stil-, Test-, Doku- und Benennungsbefunde zählen nicht. Gilt für Reviews und Härtungsläufe (gefundene Lücken je Härtungs-Subagent), sonst „–“.
 - **Auswertung je Rolle:** Läufe, Summe und Median `Δ tokens`, Dauer-Median, B/W/K, Blocker+Wichtig je 100k, betriebsrelevant je 100k. `sonnet-high` und `sonnet-xhigh` getrennt ausweisen, damit sich die Effort-Regel überprüfen lässt.
 
 ## Ausreden und was stimmt
