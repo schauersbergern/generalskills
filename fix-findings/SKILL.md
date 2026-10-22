@@ -57,7 +57,7 @@ Die Eingabe ist die Befundliste, eventuell gefolgt von den Befehlswörtern „me
      - die Tests, die von den Dateien des Fix-Diffs abhängen: der Befehl aus `CLAUDE.md`, sonst das Runner-Äquivalent, z. B. Vitest `vitest related --run <geänderte Dateien>`, Jest `--findRelatedTests <dateien>`, bei pytest die Testdateien der geänderten Module
    - **Ganze Suite nur, wenn der Import-Graph die Betroffenen nicht findet:** Der Fix ändert Test-Infrastruktur (Setup, Helfer, Config), Schema oder Migrationen, Abhängigkeiten oder Build-Konfiguration. Dann genau einmal vor dem Push, dort, wo umgesetzt wird.
    - **Hast du an einen Subagenten delegiert** und liegt dessen Ausgabe des Testlaufs vor, prüfst du danach nur Typecheck und die gezielten Tests. Kein zweiter Lauf.
-   - **Den Rest macht die CI.** Grüne CI ist ohnehin die Abbruchbedingung der Review-Schleife.
+   - **Den Rest macht die CI, falls der PR eine hat.** Grüne CI ist dann ohnehin die Abbruchbedingung der Review-Schleife. **Ohne CI** (`gh pr checks <n>` meldet `no checks reported`) läuft die ganze Suite genau einmal vor dem Push.
 6. **Pushen** auf den PR-Branch, ohne nachzufragen.
 7. **Abschluss:** Tabelle unten. Kam die Liste per Nachricht aus einem Reviewer-Thread, dorthin per `SendMessage` antworten und den neuen Head-SHA nennen. Adresse: `from` der Nachricht, sonst die Zeile „Antwort an:“ aus der Liste (`SendMessage` nimmt auch `local_…`-IDs). Fehlt beides, die Tabelle in den Chat.
 
@@ -91,5 +91,5 @@ Die letzte Zeile entfällt nur, wenn mit Befehlswort gemergt bzw. deployt wurde.
 | „Approved und grün, der User will heute live, ich merge“ | Ein Ziel ist keine Freigabe. Das Approval gilt außerdem für einen Stand vor deinen Commits. |
 | „Ich fixe nur die gemeldete Stelle“ | Die Geschwisterstelle kommt in der nächsten Runde als neuer Befund zurück. Klasse statt Instanz. |
 | „Abgelehnte Befunde lasse ich einfach weg“ | Ohne begründete Ablehnung in der Tabelle meldet der Reviewer sie erneut. |
-| „Zur Sicherheit nochmal die ganze Suite“ | Subagent, Orchestrator und CI dreimal je Runde kostet bei großen Suiten eine Viertelstunde pro Runde. Vor dem Push Typecheck und die abhängigen Tests, die ganze Suite läuft in der CI. |
+| „Zur Sicherheit nochmal die ganze Suite“ | Subagent, Orchestrator und CI dreimal je Runde kostet bei großen Suiten eine Viertelstunde pro Runde. Vor dem Push Typecheck und die abhängigen Tests, die ganze Suite läuft in der CI (ohne CI einmal vor dem Push). |
 | „Soll ich pushen?“ | Auf dem PR-Branch nach Commit ohne Rückfrage pushen. |

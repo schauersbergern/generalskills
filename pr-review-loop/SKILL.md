@@ -97,7 +97,7 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
    - **Fehlt `opus-xhigh`:** `general-purpose` mit `model: "opus"` nehmen und im Bericht „Effort nicht garantiert“ vermerken.
    - **Worktree für Mutationsproben:** Jeder Reviewer bekommt einen eigenen, und nur du legst ihn an: `git worktree add --detach <scratchpad>/rev-<runde>-<i> <head-sha>`. Nach der Runde entfernst du ihn mit `git worktree remove --force`.
    - **Abhängigkeiten nicht neu installieren:** Im Worktree verlinkst du das installierte Abhängigkeitsverzeichnis des Haupt-Checkouts (z. B. `ln -s <repo>/node_modules <worktree>/node_modules`) und kopierst lokale Test-Env-Dateien (z. B. `.env.test`). Ändert der PR Abhängigkeiten oder Quellen von generiertem Code (Lockfile, Prisma-Schema), gelten Proben, die davon abhängen, als Verdacht.
-   - **Mutationsproben gezielt:** nur gegen die Testdateien, die den mutierten Code abdecken (z. B. `pnpm vitest run <pfade>`, `pytest <pfade>`), **nie die ganze Suite**. Die Vollsuite deckt die CI ab.
+   - **Mutationsproben gezielt:** nur gegen die Testdateien, die den mutierten Code abdecken (z. B. `pnpm vitest run <pfade>`, `pytest <pfade>`), **nie die ganze Suite**.
    - **Fehlende Abhängigkeiten:** Lassen sich im Worktree keine Tests ausführen, meldet der Reviewer die Mutationsprobe als Verdacht. Er baut keine Umgebung auf.
 3. **Befunde selbst reproduzieren**, bevor irgendetwas weitergeht:
    - die Stelle bei Head-SHA lesen und das Szenario nachvollziehen
@@ -219,11 +219,11 @@ Jede Schleife führt eine, als Grundlage für spätere Token-Optimierung.
 | „Ich frag kurz, ob ich den Fixer-Thread starten darf“ | Ohne Fixer-Namen hat der User ihn bestellt. In Schritt 1 starten, nicht fragen. Verweigert die App den Start, nur um ein kurzes „weiter“ bitten. |
 | „Den Fixer starte ich, wenn die erste Liste steht“ | Dann liegt der Start meist in einem automatisch ausgelösten Zug, und die App verweigert ihn. Fixer in Schritt 1 starten. |
 | „Delta-Runde lieber wieder mit zwei, drei Opus“ | Ein Delta-Review braucht den engen Diff, nicht mehrere Opus-Blicke. Im App-Gerüst-Lauf fanden `sonnet-high`-Re-Reviews nicht weniger als zuvor `sonnet-xhigh` (0,23 statt 0,14 Blocker+Wichtig je 100k), bei 40 s Median. |
-| „Runde 2 fand nur P3, eine dritte zur Kontrolle“ | Bis 2026-10-22 brauchte jeder PR 1,5–2 h, und Runde 3 fand fast nie etwas. P3-Fixes deckt die CI. |
+| „Runde 2 fand nur P3, eine dritte zur Kontrolle“ | Bis 2026-10-22 brauchte jeder PR 1,5–2 h, und Runde 3 fand fast nie etwas. |
 | „Kein Fixer genannt, also Liste in den Chat“ | Ohne Namen startest du je PR einen Fixer-Thread. In den Chat nur, wenn das Starten nicht geht. |
 | „Ein Fixer für alle PRs reicht“ | Dann laufen die Fixes nacheinander, und zwei PRs teilen sich einen Kontext. Je PR ein Fixer. |
 | „Für die Folgerunde starte ich einen frischen Fixer“ | Der neue kennt die Ablehnungen und offenen Fragen der Vorrunde nicht. Folgelisten an denselben Fixer. |
 | „Ich prüfe die drei PRs in einem Rutsch und schicke alles zusammen“ | Dann wartet jeder PR auf den langsamsten Prüfer. Je PR eine eigene Schleife, jede Liste sofort raus. |
 | „Ein Doku-PR verdient dieselbe Sorgfalt wie Code“ | Sorgfalt heißt dort: sachliche Fehler finden. Mehrere Opus-Prüfer und Stilbefunde auf eine Notiz kosten Stunden ohne Gewinn. |
-| „Zur Sicherheit die ganze Suite pro Mutation“ | Eine Mutation betrifft wenige Testdateien. Die Vollsuite läuft in der CI. |
+| „Zur Sicherheit die ganze Suite pro Mutation“ | Eine Mutation betrifft wenige Testdateien. |
 | „Ohne `model` erbt der Reviewer schon Opus“ | Agent-Definitionen können ein eigenes Modell im Frontmatter setzen. Immer `model: "opus"` angeben. |
