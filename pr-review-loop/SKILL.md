@@ -38,7 +38,9 @@ Ob gemergt wird, entscheidet der User im Chat.
 
 ## Versandregel (gilt für Briefing, Liste und Ende)
 
-Was verschickt wird, entscheidet allein diese Regel, in dieser Reihenfolge. Einzige Ausnahme ist Stillstand (Schritt 6): Dann wird die nach dieser Regel zusammengestellte Liste nicht verschickt, sondern dem User gemeldet.
+Was verschickt wird, entscheidet allein diese Regel, in dieser Reihenfolge. Es gibt zwei Ausnahmen (beide Schritt 6):
+- **Stillstand:** Die nach dieser Regel zusammengestellte Liste wird nicht verschickt, sondern dem User gemeldet.
+- **Runde 3 und später nur nach P1/P2:** Hat die Vorrunde keinen P1/P2 verschickt, geht außer CI rot oder Konflikt nichts mehr raus. Nicht überzeugende Ablehnungen werden dann „offen, nicht blockierend“, statt nach Punkt 1 erneut verschickt zu werden.
 
 1. **Immer verschickt**, jeder Schweregrad, unabhängig von Budget und Konvergenz-Bremse:
    - sachliche Fehler
