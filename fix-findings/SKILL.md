@@ -63,7 +63,7 @@ Die Eingabe ist die Befundliste, eventuell gefolgt von den Befehlswörtern „me
 
 ## Agent-Statistik
 
-Startest du Subagenten (Umsetzung, Prüfung), führst du eine Agent-Statistik, als Grundlage für spätere Token-Optimierung. Format: Skill `auto-feature`, Abschnitt „Agent-Statistik“ (`~/.claude/skills/auto-feature/SKILL.md`), Spalte TF = PR-Nummer, Rolle z. B. `Fix R<r>`. Ablage `~/.claude/agent-stats/<repo>/<YYYY-MM-DD>-pr<n>-fix.md`, je Liste fortschreiben, Kopf mit Repo, PR und der eigenen Session-ID. Ohne Subagenten genügt der Kopf mit einer Zeile je Liste (Uhrzeit Eingang, Uhrzeit Push), damit sich die Rundenzeiten später zuordnen lassen.
+Startest du Subagenten (Umsetzung, Prüfung), führst du eine Agent-Statistik, als Grundlage für spätere Token-Optimierung. Format: Skill `auto-feature`, Abschnitt „Agent-Statistik“ (`~/.claude/skills/auto-feature/SKILL.md`), Spalte TF = PR-Nummer, Rolle z. B. `Fix R<r>`. Ablage `~/.claude/agent-stats/<repo>/<YYYY-MM-DD>-pr<n>-fix.md`, Kopf mit Repo, PR und der eigenen Session-ID. Ohne Subagenten genügt der Kopf mit einer Zeile je Liste (Uhrzeit Eingang, Uhrzeit Push), damit sich die Rundenzeiten später zuordnen lassen.
 
 ## Abschlusstabelle
 

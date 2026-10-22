@@ -206,7 +206,7 @@ Letzte Zeile, wenn sauber, wörtlich: **„Bereit für deine Merge-Entscheidung.
 
 Jede Schleife führt eine, als Grundlage für spätere Token-Optimierung.
 - **Format:** Skill `auto-feature`, Abschnitt „Agent-Statistik“ (`~/.claude/skills/auto-feature/SKILL.md`). Spalte TF = PR-Nummer. Rollen: `Review R1 <Fokus>`, `Delta-Review R<r>`, `Repro` (falls du für eine Reproduktion einen Subagenten startest).
-- **Ablage:** `~/.claude/agent-stats/<repo>/<YYYY-MM-DD>-pr<n>-review.md`, nach jeder Runde fortschreiben. Ein Koordinator über mehrere PRs schreibt keine eigene Datei, die Reviewer-Threads schreiben je PR.
+- **Ablage:** `~/.claude/agent-stats/<repo>/<YYYY-MM-DD>-pr<n>-review.md`. Ein Koordinator über mehrere PRs schreibt keine eigene Datei, die Reviewer-Threads schreiben je PR.
 - **Kopf:** Repo, PR, Basis, die eigene Session-ID und die des Fixers. Die Tokens der Threads selbst stehen in keiner `<usage>`-Angabe und lassen sich später aus den Transkripten holen. Dazu je Runde Start (Reviewer gestartet) und Ende (Liste verschickt bzw. Ende festgestellt) als Uhrzeit.
 - **Auswertung** am Ende der Schleife je Rolle, wie im Format beschrieben.
 
