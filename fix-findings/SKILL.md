@@ -31,6 +31,8 @@ Die Eingabe ist die Befundliste, eventuell gefolgt von den Befehlswörtern „me
    - **PR finden:** aus dem Kopf der Liste (`PR #<n>`), sonst über den aktuellen Branch (`gh pr view --json number,headRefName`). Ist beides nicht möglich, die eine Frage nach der PR-Nummer stellen.
    - **Branch vorbereiten:** auf den PR-Branch wechseln, dann `git pull --ff-only`. Nie auf `main` committen, nie force-pushen.
    - **Arbeitet ein anderer Thread im selben Verzeichnis:** eigener Worktree. Scheitert der Checkout, weil der Branch woanders ausgecheckt ist: `git checkout -b <tmp> origin/<branch>` und `git push origin <tmp>:<branch>`. Nicht in fremde Worktrees wechseln.
+   - **Gestapelter PR** (Basis ist nicht der Default-Branch): mit der ersten Liste die aktuelle Basis hereinmergen (`git merge origin/<basis>`), als eigenen Merge-Commit vor den Fixes. Der Reviewer prüft Merge-Commits nicht mit.
+   - **Vorbereitungsauftrag ohne Liste** (Fixer vorab von `pr-review-loop` gestartet): nur Worktree, Abhängigkeiten, `CLAUDE.md` und PR lesen, dann den Zug beenden. Die Liste kommt per Nachricht.
 2. **Jeden Befund prüfen, bevor du etwas änderst:** Stelle lesen, Szenario nachvollziehen. Ein Klammerhinweis in der Liste ersetzt das Nachlesen nicht. Ist der Branch seit dem geprüften SHA weitergelaufen, die Stelle am aktuellen Head suchen. Ist der Befund dort schon erledigt, lautet das Urteil „erledigt“ mit dem Commit, der ihn erledigt hat. Mögliche Urteile:
    - **angenommen**
    - **angenommen, anders umgesetzt:** Der Befund stimmt, der Vorschlag taugt nicht. Prüffragen: Kann der Angreifer bzw. die Eingabe den Wert kontrollieren, gegen den der Fix prüft? Verlagert der Fix das Problem nur?
@@ -50,11 +52,18 @@ Die Eingabe ist die Befundliste, eventuell gefolgt von den Befehlswörtern „me
    - **Prosa: streichen statt umformulieren**, das verhindert Folgebefunde.
 5. **Verifikation:** die Prüfbefehle aus `CLAUDE.md`. Fehlen sie, die aus `package.json`, `Makefile`, `pyproject.toml` oder der CI-Konfiguration ableiten und sagen, woher sie stammen. Ausgabe zeigen (`superpowers:verification-before-completion`).
    - **Je Befund nur gezielte Tests** (die betroffenen Testdateien, z. B. `pnpm vitest run <pfade>`), nicht die ganze Suite.
-   - **Die ganze Suite läuft genau einmal vor dem Push**, und zwar dort, wo umgesetzt wird.
-   - **Hast du an einen Subagenten delegiert** und liegt dessen Ausgabe des Vollaufs vor, prüfst du danach nur Typecheck (z. B. `tsc --noEmit`) und die gezielten Tests. Kein zweiter Vollauf.
+   - **Vor dem Push keine ganze Suite**, sondern:
+     - Typecheck (z. B. `tsc --noEmit`) und, falls schnell, Lint
+     - die Tests, die von den Dateien des Fix-Diffs abhängen: der Befehl aus `CLAUDE.md`, sonst das Runner-Äquivalent, z. B. Vitest `vitest related --run <geänderte Dateien>`, Jest `--findRelatedTests <dateien>`, bei pytest die Testdateien der geänderten Module
+   - **Ganze Suite nur, wenn der Import-Graph die Betroffenen nicht findet:** Der Fix ändert Test-Infrastruktur (Setup, Helfer, Config), Schema oder Migrationen, Abhängigkeiten oder Build-Konfiguration. Dann genau einmal vor dem Push, dort, wo umgesetzt wird.
+   - **Hast du an einen Subagenten delegiert** und liegt dessen Ausgabe des Testlaufs vor, prüfst du danach nur Typecheck und die gezielten Tests. Kein zweiter Lauf.
    - **Den Rest macht die CI.** Grüne CI ist ohnehin die Abbruchbedingung der Review-Schleife.
 6. **Pushen** auf den PR-Branch, ohne nachzufragen.
 7. **Abschluss:** Tabelle unten. Kam die Liste per Nachricht aus einem Reviewer-Thread, dorthin per `SendMessage` antworten und den neuen Head-SHA nennen. Adresse: `from` der Nachricht, sonst die Zeile „Antwort an:“ aus der Liste (`SendMessage` nimmt auch `local_…`-IDs). Fehlt beides, die Tabelle in den Chat.
+
+## Agent-Statistik
+
+Startest du Subagenten (Umsetzung, Prüfung), führst du eine Agent-Statistik, als Grundlage für spätere Token-Optimierung. Format: Skill `auto-feature`, Abschnitt „Agent-Statistik“ (`~/.claude/skills/auto-feature/SKILL.md`), Spalte TF = PR-Nummer, Rolle z. B. `Fix R<r>`. Ablage `~/.claude/agent-stats/<repo>/<YYYY-MM-DD>-pr<n>-fix.md`, je Liste fortschreiben, Kopf mit Repo, PR und der eigenen Session-ID. Ohne Subagenten genügt der Kopf mit einer Zeile je Liste (Uhrzeit Eingang, Uhrzeit Push), damit sich die Rundenzeiten später zuordnen lassen.
 
 ## Abschlusstabelle
 
@@ -82,5 +91,5 @@ Die letzte Zeile entfällt nur, wenn mit Befehlswort gemergt bzw. deployt wurde.
 | „Approved und grün, der User will heute live, ich merge“ | Ein Ziel ist keine Freigabe. Das Approval gilt außerdem für einen Stand vor deinen Commits. |
 | „Ich fixe nur die gemeldete Stelle“ | Die Geschwisterstelle kommt in der nächsten Runde als neuer Befund zurück. Klasse statt Instanz. |
 | „Abgelehnte Befunde lasse ich einfach weg“ | Ohne begründete Ablehnung in der Tabelle meldet der Reviewer sie erneut. |
-| „Zur Sicherheit nochmal die ganze Suite“ | Subagent, Orchestrator und CI dreimal je Runde kostet bei großen Suiten eine Viertelstunde pro Runde. Einmal vor dem Push, den Rest macht die CI. |
+| „Zur Sicherheit nochmal die ganze Suite“ | Subagent, Orchestrator und CI dreimal je Runde kostet bei großen Suiten eine Viertelstunde pro Runde. Vor dem Push Typecheck und die abhängigen Tests, die ganze Suite läuft in der CI. |
 | „Soll ich pushen?“ | Auf dem PR-Branch nach Commit ohne Rückfrage pushen. |

@@ -102,6 +102,14 @@ Die Hauptsession legt den Agent-Typ je Implementierung und je Review beim Dispat
 - **Unverändert bleiben** die Opus-Reviews (B/D) und die Härtungs-Subagenten (E2, `sonnet-xhigh`). Begründung: Alle 28 Blocker des Referenzlaufs kamen aus Opus-Reviews, und die Härtung fand in jedem TF echte Lücken.
 - **Begründung des Abschlags:** Re-Reviews brachten 0,14 Blocker+Wichtig je 100k Tokens (Median 91k), und beide echten Funde lagen im eng umrissenen Fix-Diff. Lesende Reviews von Refactor-/UI-Tasks kosteten 100–136k und fanden 0–1 Wichtig. Ein kleineres Modell als Sonnet ist nicht vorgesehen, weil auch Re-Review-Funde Transaktions- und Deadlock-Semantik verlangten.
 
+### Testumfang
+
+Die ganze Suite läuft **einmal je TF**, in der Verifikation. Implementierer, Fix-Runden, Reviews und Härtungs-Subagenten lassen nur laufen:
+- Typecheck und die Testdateien des Tasks bzw. Fixes
+- die Tests, die von den geänderten Dateien abhängen: der Befehl aus `CLAUDE.md`, sonst das Runner-Äquivalent (z. B. `vitest related --run <dateien>`, Jest `--findRelatedTests`)
+
+Das steht ausdrücklich im Briefing, denn die Templates von `subagent-driven-development` lassen sonst die ganze Suite laufen. **Ausnahme:** Ändert ein Task Test-Infrastruktur, Schema oder Migrationen, Abhängigkeiten oder Build-Konfiguration, läuft dort einmal die ganze Suite, weil der Import-Graph die Betroffenen nicht findet.
+
 ### Mutationsproben im Task-Review
 
 **Task-Reviews mit Logik führen Mutationsproben durch.** Logik heißt: neue Verzweigung, Invariante, Validierung, Abfrage oder ein neuer Zustandsübergang. Rein lesend geprüft werden nur reine Refactor-/UI-Tasks ohne neue Logik. Im Referenzlauf fanden Reviews mit Mutationsproben echte Laufzeitfehler (Cursor-Tag → 500, „Mehr laden“ hängt bei Geräteuhr 1970, Reconcile ohne Verfügbarkeitsprüfung, ungetestete Sperren).
@@ -179,12 +187,16 @@ Der **Abschlussbericht** ist die Grundlage für die Prüfung durch den User. Er 
 - **Verifikation:** Befehle und Ergebnis
 - **Offene Fragen und Entscheidungen** für den User, inklusive Abweichungen von repo-eigenen Workflow-Dokumenten und „Effort nicht garantiert“, falls zutreffend
 - **Nötige Ops-Schritte:** Migrationen, Env, Resync
+- **Agent-Statistik:** Pfad und die Auswertung je Rolle
 
 Letzte Zeile: „Stopp. Bitte prüfen; danach `/pr-review-loop <PR>` je PR.“
 
 ## Agent-Statistik
 
-Führt der Lauf eine Agent-Statistik (Feature-File, User-Auftrag oder Repo-Konvention), gilt dieses Format. Ablage nach Repo-Konvention, sonst `docs/superpowers/runs/<YYYY-MM-DD>-<lauf>-agent-stats.md`.
+**Jeder Lauf führt eine Agent-Statistik**, als Grundlage für spätere Token-Optimierung. Dieses Format gilt auch für `pr-review-loop`, `fix-findings` und jede andere Session, die Subagenten startet. Ablage nach Repo-Konvention, sonst `docs/superpowers/runs/<YYYY-MM-DD>-<lauf>-agent-stats.md`. Außerhalb von `auto-feature` liegt sie unter `~/.claude/agent-stats/<repo>/`.
+
+- **Kopf:** Repo, Lauf, Session-ID der Hauptsession. Deren eigene Tokens stehen in keiner `<usage>`-Angabe und lassen sich später aus dem Transkript holen.
+- **Fortschreiben** nach jeder Task-Notification, nicht erst am Ende. Nach einer Kompaktierung fehlen sonst die Werte.
 
 - **Quelle:** die `<usage>`-Angaben der Task-Notifications (`subagent_tokens`, `duration_ms`, `tool_uses`). Fehlt eine Angabe, steht dort „n/a“, nicht geschätzt.
 - **Spalten:** # | Zeitpunkt | TF | Rolle | Agent-Typ | Modell | Effort | tokens | Δ tokens | duration_ms | tool_uses | B/W/K | angenommen | betriebsrelevant | Fix-Runden | Status
@@ -203,6 +215,8 @@ Führt der Lauf eine Agent-Statistik (Feature-File, User-Auftrag oder Repo-Konve
 |---|---|
 | „Runde 2 hat noch Wichtiges, eine dritte schadet nicht“ | Genau so entstehen Endlosschleifen. Offenes kommt in „Offene Review-Punkte“, dann weiter. |
 | „Vier Zeilen schreibe ich schneller selbst“ | Die Hauptsession orchestriert und prüft. Implementiert wird nur von Sonnet. |
+| „Zur Sicherheit nach jedem Task die ganze Suite“ | Die läuft einmal je TF in der Verifikation und dann in der CI. Je Task Typecheck und die abhängigen Tests. |
+| „Die Statistik schreibe ich am Ende zusammen“ | Nach einer Kompaktierung sind die `<usage>`-Werte weg. Nach jeder Notification fortschreiben. |
 | „Tests grün, also PR“ | Grüne Tests finden keine Absturzfenster. Erst kommt die Härtung. |
 | „Die Tests decken den neuen Zweig ab, steht ja im Namen“ | Erst eine Mutation zeigt, ob ein Test rot wird. Ohne Probe bleibt die Lücke bis zum Review. |
 | „Der Task ist klein, Review lesend reicht“ | Hat er Logik, wird mutiert. Lesend nur reine Refactor-/UI-Tasks. |
