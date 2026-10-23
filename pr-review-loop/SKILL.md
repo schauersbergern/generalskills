@@ -169,7 +169,7 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
    - keine Edits außerhalb deines Worktrees
    - keine schreibenden git-Befehle (`checkout`, `switch`, `stash`, `reset`, `commit`, `push`)
    - keine Subagenten, kein Docker, keine GitHub-Kommentare
-   - Wegwerf-Repos und Messskripte nur in einem frischen Temp-Verzeichnis: `d=$(mktemp -d) && cd "$d" || exit 1`, alle weiteren Befehle in derselben `&&`-Kette oder mit absoluten Pfaden unter `$d`. Nie `rm` als ersten Schritt einer Kette, nie ein Skript ohne geprüftes `cd`.
+   - Wegwerf-Repos und Messskripte nur in einem frischen Temp-Verzeichnis: `d=$(mktemp -d) && cd "$d" || exit 1`, alle weiteren Befehle in derselben `&&`-Kette oder mit absoluten Pfaden unter `$d`. `$d` gilt nur im selben Bash-Aufruf, in Folgeaufrufen den ausgegebenen Pfad wörtlich einsetzen (`git -C /…/tmp.XXXX …`), nie `$d` (`cd ""` gelingt und bleibt im Repo). Nie `rm` als ersten Schritt einer Kette, nie ein Skript ohne geprüftes `cd`.
    - Was du nicht durch Lesen oder Messen belegen kannst, ist ein Verdacht, kein Befund.
 5. **Ausgabe:**
    - je Befund: P1/P2/P3, Code oder Prosa, `datei:zeile`, konkreter Ablauf bis zum Fehler, betroffene Geschwisterstellen
