@@ -104,7 +104,7 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
    - **Fehlende Abhängigkeiten:** Lassen sich im Worktree keine Tests ausführen, meldet der Reviewer die Mutationsprobe als Verdacht. Er baut keine Umgebung auf.
 3. **Befunde selbst reproduzieren**, bevor irgendetwas weitergeht:
    - die Stelle bei Head-SHA lesen und das Szenario nachvollziehen
-   - bei Test-Befunden die Mutation nachstellen, wenn das billig ist (in einem eigenen, danach entfernten Worktree, nie im Arbeitsverzeichnis)
+   - bei Test-Befunden die Mutation nachstellen, wenn das billig ist (in einem eigenen, danach entfernten Worktree, nie im Arbeitsverzeichnis; Wegwerf-Repos und Messskripte nur nach der Temp-Verzeichnis-Regel aus dem Reviewer-Briefing, Punkt 4)
    - Dubletten zusammenführen
 
    Jeder Befund wird **bestätigt**, **verworfen** (mit Grund) oder als **Verdacht** markiert. Ein Verdacht geht nur mit dieser Kennzeichnung weiter. Zum bestätigten Befund gehören alle Geschwisterstellen derselben Klasse (Klasse statt Instanz).
@@ -169,6 +169,7 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
    - keine Edits außerhalb deines Worktrees
    - keine schreibenden git-Befehle (`checkout`, `switch`, `stash`, `reset`, `commit`, `push`)
    - keine Subagenten, kein Docker, keine GitHub-Kommentare
+   - Wegwerf-Repos und Messskripte nur in einem frischen Temp-Verzeichnis: `d=$(mktemp -d) && cd "$d" || exit 1`, alle weiteren Befehle in derselben `&&`-Kette oder mit absoluten Pfaden unter `$d`. Nie `rm` als ersten Schritt einer Kette, nie ein Skript ohne geprüftes `cd`.
    - Was du nicht durch Lesen oder Messen belegen kannst, ist ein Verdacht, kein Befund.
 5. **Ausgabe:**
    - je Befund: P1/P2/P3, Code oder Prosa, `datei:zeile`, konkreter Ablauf bis zum Fehler, betroffene Geschwisterstellen

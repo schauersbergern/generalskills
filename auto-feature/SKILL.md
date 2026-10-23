@@ -80,6 +80,7 @@ Jeder Plan hat einen Abschnitt **„Review Focus“**. Er beginnt mit der folgen
   - Auftrag „als Design prüfen“: fehlende Anforderungen, Widersprüche, falsche Datei-/Typ-Annahmen gegen den echten Code, Sicherheits- und Betriebsrisiken, Testbarkeit; beim Plan zusätzlich: deckt er die Spec vollständig ab, und ist jeder Punkt der „Review Focus“-Checkliste gegen den echten Code richtig als zutreffend/nicht zutreffend eingestuft und mit Task und Test hinterlegt?
   - Ausgabe Blocker / Wichtig / Klein mit Datei-/Zeilenbeleg
   - **ändert nichts**, kein `git checkout`/`switch`/`stash`/`reset`, keine Subagenten
+  - Wegwerf-Repos und Messskripte nur in einem frischen Temp-Verzeichnis: `d=$(mktemp -d) && cd "$d" || exit 1`, alle weiteren Befehle in derselben `&&`-Kette oder mit absoluten Pfaden unter `$d`. Nie `rm` als ersten Schritt einer Kette, nie ein Skript ohne geprüftes `cd`.
   - Pläne **nicht probeweise umsetzen**; was nicht durch Lesen belegbar ist, als Verdacht kennzeichnen
 - **Die Hauptsession urteilt** über jeden Befund (`superpowers:receiving-code-review`), statt ihn abzunicken, und arbeitet ihn ein. Begründete Ablehnungen kommen ins Dokument.
 - **Runde 2 nur**, wenn Runde 1 Blocker oder Wichtiges ergab. Danach geht es immer weiter, auch mit offenen Befunden. Diese stehen als Abschnitt **„Offene Review-Punkte“** in Spec bzw. Plan und später im PR-Body. Eine dritte Runde gibt es nicht.
@@ -118,6 +119,7 @@ Ins Review-Briefing gehört:
 - **Vorrang vor dem Template:** Die Reviewer-Templates von `subagent-driven-development` (`task-reviewer-prompt.md`, `re-review-prompt.md`) verlangen ein rein lesendes Review, Tests nur bei konkretem Zweifel und keine git-Befehle. Das Briefing sagt ausdrücklich, dass alle drei Vorgaben für dieses Review aufgehoben sind und stattdessen gilt: Arbeitsbaum nur temporär ändern, Endstand = Ausgangsstand, nur die betroffenen Testdateien laufen lassen, `git status`/`git diff` nur zur Kontrolle des Endstands, sonst keine git-Befehle. Das gilt auch für Re-Reviews, die mutieren.
 - Je neuer Verzweigung bzw. Invariante eine Mutation (Zweig entfernen, Bedingung umdrehen, Sperre oder Scope-Filter weglassen) und nur die betroffenen Testdateien laufen lassen, nicht die ganze Suite.
 - Die Mutation danach von Hand zurücknehmen. Am Ende muss `git status` den Stand vor dem Review zeigen. Kein `git checkout`/`stash`/`reset`, keine Commits.
+- Wegwerf-Repos und Messskripte nur in einem frischen Temp-Verzeichnis: `d=$(mktemp -d) && cd "$d" || exit 1`, alle weiteren Befehle in derselben `&&`-Kette oder mit absoluten Pfaden unter `$d`. Nie `rm` als ersten Schritt einer Kette, nie ein Skript ohne geprüftes `cd`.
 - Ergebnis je Probe im Review: „Mutation → Test <Name> rot“ oder „kein Test rot → Befund Wichtig: Test fehlt“.
 - Re-Reviews mutieren nur, wenn der Fix-Diff selbst Logik ändert, und dann nur dort.
 - Reviews mit Mutationsprobe (auch Re-Reviews) erst dispatchen, wenn kein anderer Subagent im selben Worktree arbeitet, und bis zu ihrem Ende keinen weiteren dort starten. Warten statt auslassen.
@@ -131,7 +133,7 @@ Die Task-Reviews von `subagent-driven-development` (Spec-Treue und Codequalität
 
 ## Härtungsdurchgang (E2)
 
-Die Hauptsession verantwortet den Durchgang. Die Durchsicht samt Test und Fix gibt sie an einen oder mehrere `sonnet-xhigh`-Subagenten (bei großen TFs getrennt, z. B. Server und Client). Mehrere laufen nacheinander oder in getrennten Worktrees, weil sie mutieren und fixen. Die Hauptsession prüft deren Antworten und gefundene Lücken selbst und fordert Fehlendes nach.
+Die Hauptsession verantwortet den Durchgang. Die Durchsicht samt Test und Fix gibt sie an einen oder mehrere `sonnet-xhigh`-Subagenten (bei großen TFs getrennt, z. B. Server und Client). Mehrere laufen nacheinander oder in getrennten Worktrees, weil sie mutieren und fixen. Ins Briefing gehört die Temp-Verzeichnis-Regel für Wegwerf-Repos und Messskripte aus „Mutationsproben im Task-Review“. Die Hauptsession prüft deren Antworten und gefundene Lücken selbst und fordert Fehlendes nach.
 
 Vor dem PR den gebauten Code systematisch durchgehen und diese acht Fragen **schriftlich mit vollständiger Aufzählung** beantworten. Trifft keine zu, genügt ein Satz.
 

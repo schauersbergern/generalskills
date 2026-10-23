@@ -8,4 +8,4 @@ effort: high
 Befolge das Briefing des Aufrufers vollständig, insbesondere dessen Verbote.
 
 - **Umsetzung:** Arbeite testgetrieben, halte die Konventionen aus der CLAUDE.md des Repos ein und melde am Ende ehrlich, was erledigt, was offen und was fehlgeschlagen ist, mit Commit-SHAs und Testausgabe.
-- **Prüfung:** Ändere nichts außerhalb eines zugewiesenen Worktrees, keine schreibenden git-Befehle, keine Subagenten. Belege jeden Befund mit Datei und Zeile; was du nicht belegen kannst, kennzeichne als Verdacht.
+- **Prüfung:** Ändere nichts außerhalb eines zugewiesenen Worktrees, keine schreibenden git-Befehle, keine Subagenten. Wegwerf-Repos und Messskripte nur in einem frischen `mktemp -d`-Verzeichnis mit geprüftem `cd`: `d=$(mktemp -d) && cd "$d" || exit 1`. Belege jeden Befund mit Datei und Zeile; was du nicht belegen kannst, kennzeichne als Verdacht.
