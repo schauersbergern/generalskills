@@ -79,7 +79,8 @@ Jeder Plan hat einen Abschnitt **„Review Focus“**. Er beginnt mit der folgen
   - Pfad der Spec bzw. des Plans, Feature-File, Hinweis auf `CLAUDE.md`
   - Auftrag „als Design prüfen“: fehlende Anforderungen, Widersprüche, falsche Datei-/Typ-Annahmen gegen den echten Code, Sicherheits- und Betriebsrisiken, Testbarkeit; beim Plan zusätzlich: deckt er die Spec vollständig ab, und ist jeder Punkt der „Review Focus“-Checkliste gegen den echten Code richtig als zutreffend/nicht zutreffend eingestuft und mit Task und Test hinterlegt?
   - Ausgabe Blocker / Wichtig / Klein mit Datei-/Zeilenbeleg
-  - **ändert nichts**, kein `git checkout`/`switch`/`stash`/`reset`, keine Subagenten
+  - **ändert nichts** im Repo, kein `git checkout`/`switch`/`stash`/`reset`, keine Subagenten (im eigenen Wegwerf-Repo, nächster Punkt, sind Edits und git-Befehle erlaubt)
+  - Wegwerf-Repos und Messskripte nur in einem frischen Temp-Verzeichnis: `d=$(mktemp -d) && cd "$d" || exit 1`, alle weiteren Befehle in derselben `&&`-Kette oder mit absoluten Pfaden unter `$d`. `$d` gilt nur im selben Bash-Aufruf, in Folgeaufrufen den ausgegebenen Pfad wörtlich einsetzen (`git -C /…/tmp.XXXX …`), nie `$d` (`cd ""` gelingt und bleibt im Repo). Nie `rm` als ersten Schritt einer Kette, nie ein Skript ohne geprüftes `cd`.
   - Pläne **nicht probeweise umsetzen**; was nicht durch Lesen belegbar ist, als Verdacht kennzeichnen
 - **Die Hauptsession urteilt** über jeden Befund (`superpowers:receiving-code-review`), statt ihn abzunicken, und arbeitet ihn ein. Begründete Ablehnungen kommen ins Dokument.
 - **Runde 2 nur**, wenn Runde 1 Blocker oder Wichtiges ergab. Danach geht es immer weiter, auch mit offenen Befunden. Diese stehen als Abschnitt **„Offene Review-Punkte“** in Spec bzw. Plan und später im PR-Body. Eine dritte Runde gibt es nicht.
@@ -102,14 +103,23 @@ Die Hauptsession legt den Agent-Typ je Implementierung und je Review beim Dispat
 - **Unverändert bleiben** die Opus-Reviews (B/D) und die Härtungs-Subagenten (E2, `sonnet-xhigh`). Begründung: Alle 28 Blocker des Referenzlaufs kamen aus Opus-Reviews, und die Härtung fand in jedem TF echte Lücken.
 - **Begründung des Abschlags:** Re-Reviews brachten 0,14 Blocker+Wichtig je 100k Tokens (Median 91k), und beide echten Funde lagen im eng umrissenen Fix-Diff. Lesende Reviews von Refactor-/UI-Tasks kosteten 100–136k und fanden 0–1 Wichtig. Ein kleineres Modell als Sonnet ist nicht vorgesehen, weil auch Re-Review-Funde Transaktions- und Deadlock-Semantik verlangten.
 
+### Testumfang
+
+Die ganze Suite läuft **einmal je TF**, in der Verifikation. Implementierer, Fix-Runden, Reviews und Härtungs-Subagenten lassen nur laufen:
+- Typecheck und die Testdateien des Tasks bzw. Fixes
+- die Tests, die von den geänderten Dateien abhängen: der Befehl aus `CLAUDE.md`, sonst das Runner-Äquivalent (z. B. `vitest related --run <dateien>`, Jest `--findRelatedTests`)
+
+Das steht ausdrücklich im Briefing, denn die Templates von `subagent-driven-development` lassen sonst die ganze Suite laufen. **Ausnahme:** Ändert ein Task Test-Infrastruktur, Schema oder Migrationen, Abhängigkeiten oder Build-Konfiguration, läuft dort einmal die ganze Suite, weil der Import-Graph die Betroffenen nicht findet.
+
 ### Mutationsproben im Task-Review
 
 **Task-Reviews mit Logik führen Mutationsproben durch.** Logik heißt: neue Verzweigung, Invariante, Validierung, Abfrage oder ein neuer Zustandsübergang. Rein lesend geprüft werden nur reine Refactor-/UI-Tasks ohne neue Logik. Im Referenzlauf fanden Reviews mit Mutationsproben echte Laufzeitfehler (Cursor-Tag → 500, „Mehr laden“ hängt bei Geräteuhr 1970, Reconcile ohne Verfügbarkeitsprüfung, ungetestete Sperren).
 
 Ins Review-Briefing gehört:
-- **Vorrang vor dem Template:** Die Reviewer-Templates von `subagent-driven-development` (`task-reviewer-prompt.md`, `re-review-prompt.md`) verlangen ein rein lesendes Review, Tests nur bei konkretem Zweifel und keine git-Befehle. Das Briefing sagt ausdrücklich, dass alle drei Vorgaben für dieses Review aufgehoben sind und stattdessen gilt: Arbeitsbaum nur temporär ändern, Endstand = Ausgangsstand, nur die betroffenen Testdateien laufen lassen, `git status`/`git diff` nur zur Kontrolle des Endstands, sonst keine git-Befehle. Das gilt auch für Re-Reviews, die mutieren.
+- **Vorrang vor dem Template:** Die Reviewer-Templates von `subagent-driven-development` (`task-reviewer-prompt.md`, `re-review-prompt.md`) verlangen ein rein lesendes Review, Tests nur bei konkretem Zweifel und keine git-Befehle. Das Briefing sagt ausdrücklich, dass alle drei Vorgaben für dieses Review aufgehoben sind und stattdessen gilt: Arbeitsbaum nur temporär ändern, Endstand = Ausgangsstand, nur die betroffenen Testdateien laufen lassen, `git status`/`git diff` nur zur Kontrolle des Endstands, sonst keine git-Befehle im Repo (im eigenen Wegwerf-Repo, siehe unten, sind sie erlaubt). Das gilt auch für Re-Reviews, die mutieren.
 - Je neuer Verzweigung bzw. Invariante eine Mutation (Zweig entfernen, Bedingung umdrehen, Sperre oder Scope-Filter weglassen) und nur die betroffenen Testdateien laufen lassen, nicht die ganze Suite.
-- Die Mutation danach von Hand zurücknehmen. Am Ende muss `git status` den Stand vor dem Review zeigen. Kein `git checkout`/`stash`/`reset`, keine Commits.
+- Die Mutation danach von Hand zurücknehmen. Am Ende muss `git status` den Stand vor dem Review zeigen. Kein `git checkout`/`stash`/`reset`, keine Commits im Repo.
+- Wegwerf-Repos und Messskripte nur in einem frischen Temp-Verzeichnis: `d=$(mktemp -d) && cd "$d" || exit 1`, alle weiteren Befehle in derselben `&&`-Kette oder mit absoluten Pfaden unter `$d`. `$d` gilt nur im selben Bash-Aufruf, in Folgeaufrufen den ausgegebenen Pfad wörtlich einsetzen (`git -C /…/tmp.XXXX …`), nie `$d` (`cd ""` gelingt und bleibt im Repo). Nie `rm` als ersten Schritt einer Kette, nie ein Skript ohne geprüftes `cd`.
 - Ergebnis je Probe im Review: „Mutation → Test <Name> rot“ oder „kein Test rot → Befund Wichtig: Test fehlt“.
 - Re-Reviews mutieren nur, wenn der Fix-Diff selbst Logik ändert, und dann nur dort.
 - Reviews mit Mutationsprobe (auch Re-Reviews) erst dispatchen, wenn kein anderer Subagent im selben Worktree arbeitet, und bis zu ihrem Ende keinen weiteren dort starten. Warten statt auslassen.
@@ -123,7 +133,7 @@ Die Task-Reviews von `subagent-driven-development` (Spec-Treue und Codequalität
 
 ## Härtungsdurchgang (E2)
 
-Die Hauptsession verantwortet den Durchgang. Die Durchsicht samt Test und Fix gibt sie an einen oder mehrere `sonnet-xhigh`-Subagenten (bei großen TFs getrennt, z. B. Server und Client). Mehrere laufen nacheinander oder in getrennten Worktrees, weil sie mutieren und fixen. Die Hauptsession prüft deren Antworten und gefundene Lücken selbst und fordert Fehlendes nach.
+Die Hauptsession verantwortet den Durchgang. Die Durchsicht samt Test und Fix gibt sie an einen oder mehrere `sonnet-xhigh`-Subagenten (bei großen TFs getrennt, z. B. Server und Client). Mehrere laufen nacheinander oder in getrennten Worktrees, weil sie mutieren und fixen. Ins Briefing gehört die Temp-Verzeichnis-Regel für Wegwerf-Repos und Messskripte aus „Mutationsproben im Task-Review“. Die Hauptsession prüft deren Antworten und gefundene Lücken selbst und fordert Fehlendes nach.
 
 Vor dem PR den gebauten Code systematisch durchgehen und diese acht Fragen **schriftlich mit vollständiger Aufzählung** beantworten. Trifft keine zu, genügt ein Satz.
 
@@ -179,12 +189,16 @@ Der **Abschlussbericht** ist die Grundlage für die Prüfung durch den User. Er 
 - **Verifikation:** Befehle und Ergebnis
 - **Offene Fragen und Entscheidungen** für den User, inklusive Abweichungen von repo-eigenen Workflow-Dokumenten und „Effort nicht garantiert“, falls zutreffend
 - **Nötige Ops-Schritte:** Migrationen, Env, Resync
+- **Agent-Statistik:** Pfad und die Auswertung je Rolle
 
 Letzte Zeile: „Stopp. Bitte prüfen; danach `/pr-review-loop <PR>` je PR.“
 
 ## Agent-Statistik
 
-Führt der Lauf eine Agent-Statistik (Feature-File, User-Auftrag oder Repo-Konvention), gilt dieses Format. Ablage nach Repo-Konvention, sonst `docs/superpowers/runs/<YYYY-MM-DD>-<lauf>-agent-stats.md`.
+**Jeder Lauf führt eine Agent-Statistik**, als Grundlage für spätere Token-Optimierung. Dieses Format gilt auch für `pr-review-loop`, `fix-findings` und jede andere Session, die Subagenten startet. Ablage nach Repo-Konvention, sonst `docs/superpowers/runs/<YYYY-MM-DD>-<lauf>-agent-stats.md`. Außerhalb von `auto-feature` liegt sie unter `~/.claude/agent-stats/<repo>/`.
+
+- **Kopf:** Repo, Lauf, Session-ID der Hauptsession. Deren eigene Tokens stehen in keiner `<usage>`-Angabe und lassen sich später aus dem Transkript holen.
+- **Fortschreiben** nach jeder Task-Notification, nicht erst am Ende. Nach einer Kompaktierung fehlen sonst die Werte.
 
 - **Quelle:** die `<usage>`-Angaben der Task-Notifications (`subagent_tokens`, `duration_ms`, `tool_uses`). Fehlt eine Angabe, steht dort „n/a“, nicht geschätzt.
 - **Spalten:** # | Zeitpunkt | TF | Rolle | Agent-Typ | Modell | Effort | tokens | Δ tokens | duration_ms | tool_uses | B/W/K | angenommen | betriebsrelevant | Fix-Runden | Status
@@ -203,6 +217,8 @@ Führt der Lauf eine Agent-Statistik (Feature-File, User-Auftrag oder Repo-Konve
 |---|---|
 | „Runde 2 hat noch Wichtiges, eine dritte schadet nicht“ | Genau so entstehen Endlosschleifen. Offenes kommt in „Offene Review-Punkte“, dann weiter. |
 | „Vier Zeilen schreibe ich schneller selbst“ | Die Hauptsession orchestriert und prüft. Implementiert wird nur von Sonnet. |
+| „Zur Sicherheit nach jedem Task die ganze Suite“ | Die läuft einmal je TF in der Verifikation und dann in der CI. Je Task Typecheck und die abhängigen Tests. |
+| „Die Statistik schreibe ich am Ende zusammen“ | Nach einer Kompaktierung sind die `<usage>`-Werte weg. Nach jeder Notification fortschreiben. |
 | „Tests grün, also PR“ | Grüne Tests finden keine Absturzfenster. Erst kommt die Härtung. |
 | „Die Tests decken den neuen Zweig ab, steht ja im Namen“ | Erst eine Mutation zeigt, ob ein Test rot wird. Ohne Probe bleibt die Lücke bis zum Review. |
 | „Der Task ist klein, Review lesend reicht“ | Hat er Logik, wird mutiert. Lesend nur reine Refactor-/UI-Tasks. |
