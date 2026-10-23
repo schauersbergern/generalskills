@@ -166,8 +166,8 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
    - Bleibt ein Test grün, wenn man die geprüfte Logik entfernt? Belege das per Mutation in deinem Worktree `<pfad>` und setz sie danach zurück. Lauf nur die betroffenen Testdateien, nicht die ganze Suite. (Entfällt bei Doku-/Ops-PRs.)
    - Gibt es Konsumenten außerhalb des Diffs?
 4. **Verbote:**
-   - keine Edits außerhalb deines Worktrees
-   - keine schreibenden git-Befehle (`checkout`, `switch`, `stash`, `reset`, `commit`, `push`)
+   - keine Edits außerhalb deines Worktrees, außer im eigenen Wegwerf-Repo (letzter Punkt)
+   - keine schreibenden git-Befehle (`checkout`, `switch`, `stash`, `reset`, `commit`, `push`) in Repo und Worktrees; im eigenen Wegwerf-Repo sind sie erlaubt
    - keine Subagenten, kein Docker, keine GitHub-Kommentare
    - Wegwerf-Repos und Messskripte nur in einem frischen Temp-Verzeichnis: `d=$(mktemp -d) && cd "$d" || exit 1`, alle weiteren Befehle in derselben `&&`-Kette oder mit absoluten Pfaden unter `$d`. `$d` gilt nur im selben Bash-Aufruf, in Folgeaufrufen den ausgegebenen Pfad wörtlich einsetzen (`git -C /…/tmp.XXXX …`), nie `$d` (`cd ""` gelingt und bleibt im Repo). Nie `rm` als ersten Schritt einer Kette, nie ein Skript ohne geprüftes `cd`.
    - Was du nicht durch Lesen oder Messen belegen kannst, ist ein Verdacht, kein Befund.
