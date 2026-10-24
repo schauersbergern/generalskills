@@ -96,6 +96,18 @@ class Schreiben(Basis):
             self.assertIn(teil, text)
         self.assertEqual(text.count("<!-- agent-stats:auswertung -->"), 1)
 
+    def test_marker_ohne_ende_bricht_ab(self):  # R2-1
+        self.add("A", 1000)
+        self.assertEqual(lauf("summarize", self.datei, "--write").returncode, 0)
+        text = open(self.datei, encoding="utf-8").read()
+        text = text.replace("<!-- /agent-stats:auswertung -->\n", "") + "\n## Notizen\n\nNotiz\n"
+        open(self.datei, "w", encoding="utf-8").write(text)
+        for _ in range(2):
+            r = lauf("summarize", self.datei, "--write")
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("Marker", r.stderr)
+        self.assertEqual(open(self.datei, encoding="utf-8").read(), text)
+
     def test_add_fuegt_in_agenten_tabelle_ein(self):  # R1-2
         self.add("A", 1000)
         with open(self.datei, "a", encoding="utf-8") as f:

@@ -223,13 +223,17 @@ def cmd_summarize(a):
     text = open(pfad, encoding="utf-8").read().splitlines()
     # Nur den eigenen, markierten Block ersetzen; fremder Text und Datenzeilen bleiben stehen.
     block = [MARKE, *tabelle, MARKE_ENDE]
-    start = next((i for i, z in enumerate(text) if z.strip() == MARKE), None)
-    ende = next((i for i in range(start + 1, len(text)) if text[i].strip() == MARKE_ENDE), None) \
-        if start is not None else None
-    if ende is None:
+    starts = [i for i, z in enumerate(text) if z.strip() == MARKE]
+    enden = [i for i, z in enumerate(text) if z.strip() == MARKE_ENDE]
+    if not starts and not enden:
         text += ["", "## Auswertung je Rolle", "", *block]
+    elif len(starts) == 1 and len(enden) == 1 and starts[0] < enden[0]:
+        text[starts[0]:enden[0] + 1] = block
     else:
-        text[start:ende + 1] = block
+        # Verwaiste oder doppelte Marker: raten hieße womöglich fremden Text überschreiben.
+        sys.exit(f"Marker der Auswertung unvollständig oder doppelt (Start in Zeile "
+                 f"{', '.join(str(i + 1) for i in starts) or '–'}, Ende in Zeile "
+                 f"{', '.join(str(i + 1) for i in enden) or '–'}). Bitte von Hand reparieren.")
     schreibe(pfad, text)
     print(f"Auswertung geschrieben: {pfad}")
 
