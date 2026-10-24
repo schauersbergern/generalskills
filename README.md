@@ -13,9 +13,9 @@ Der aktuelle Stand des Repos umfasst acht produktiv nutzbare Skills plus drei Ag
 | `seo-geo-writer` | Erstellt oder optimiert SEO- und GEO-orientierte Blogartikel mit fester Recherche- und Strukturvorgabe | `seo-geo-writer/SKILL.md`, `seo-geo-writer/references/regelwerk.md` |
 | `seo-page-review` | Auditiert eine einzelne URL und vergibt einen gewichteten Score (50% SEO + 50% GEO) mit priorisierten Befunden und Empfehlungen | `seo-page-review/SKILL.md`, `seo-page-review/references/checkliste.md`, `seo-page-review/scripts/analyze_page.py` |
 | `viral-post-wizard` | Erstellt LinkedIn-Posts im Stil von Nikolaus Schausberger auf Basis fester Schreibregeln | `viral-post-wizard/SKILL.md`, `viral-post-wizard/references/*` |
-| `pr-review-loop` | Reviewer-Thread: startet ohne Fixer-Namen sofort je PR einen eigenen Fixer, prueft Runde 1 mit 1–3 Opus-Reviewern je nach PR-Art (Doku/Ops 1, Code 2–3 parallel), reproduziert Befunde, liefert P1/P2/P3-Liste an den Fixer-Thread, re-reviewt nur das Delta mit einem `sonnet-high`, Runde 3+ nur nach P1/P2, ohne `runden=<n>` bis sauber oder Stillstand; Agent-Statistik unter `~/.claude/agent-stats/`; aendert nie Code, merged nie | `pr-review-loop/SKILL.md` |
-| `fix-findings` | Fixer-Thread: prueft eingefuegte Review-Befunde, setzt angenommene per Test → Fix → Commit um, vor dem Push nur Typecheck und abhaengige Tests (ganze Suite in der CI, ohne CI einmal vor dem Push), pusht, liefert Entscheidungstabelle; Merge/Deploy nur auf Befehlswort | `fix-findings/SKILL.md` |
-| `auto-feature` | Autonomer Feature-Workflow aus einem Feature-File ohne Zwischenhalt: Spec (Opus 5.5) → Opus-Review max. 2 → Plan (Opus 5.5) → Opus-Review max. 2 → Sonnet-5.5-Umsetzung → Haertung → PRs → harter Stopp (HITL); Effort xhigh, nur Re-Reviews, lesende Refactor-/UI-Reviews und mechanische Tasks mit `sonnet-high`; ganze Suite einmal je TF; Agent-Statistik Pflicht (Format gilt fuer alle Skills); kein PR-Review-Loop, kein Merge | `auto-feature/SKILL.md` |
+| `pr-review-loop` | Reviewer-Thread: startet ohne Fixer-Namen sofort je PR einen eigenen Fixer, prueft Runde 1 mit 1–3 Opus-Reviewern je nach PR-Art (Doku/Ops 1, Code klein 1, Code 2, Code mit Risiko 3 inkl. Tests-Fokus), Fixer auf Sonnet/high, eigene Test-DB je mutierendem Reviewer, reproduziert Befunde, liefert P1/P2/P3-Liste an den Fixer-Thread, re-reviewt nur das Delta mit einem `sonnet-high` (kleine, Doku- und P3-Deltas selbst, Merges nur per `--remerge-diff`), zweiter P2 an derselben Heuristik geht als Entscheidung an den User, Runde 3+ nur nach P1/P2, ohne `runden=<n>` bis sauber oder Stillstand; Agent-Statistik unter `~/.claude/agent-stats/` inkl. Thread-Tokens per Skript; aendert nie Code, merged nie | `pr-review-loop/SKILL.md` |
+| `fix-findings` | Fixer-Thread (Effort high, von `pr-review-loop` mit Sonnet gestartet): prueft eingefuegte Review-Befunde, setzt angenommene per Test → Fix → Commit um, vor dem Push nur Typecheck und abhaengige Tests (ganze Suite in der CI, ohne CI einmal vor dem Push), pusht, liefert Entscheidungstabelle; Merge/Deploy nur auf Befehlswort | `fix-findings/SKILL.md` |
+| `auto-feature` | Autonomer Feature-Workflow aus einem Feature-File ohne Zwischenhalt: Spec (Opus 5.5) → Opus-Review max. 2 → Plan (Opus 5.5) → Opus-Review max. 2 → Sonnet-5.5-Umsetzung → Haertung → PRs → harter Stopp (HITL); Effort xhigh, nur Re-Reviews, lesende Refactor-/UI-Reviews und mechanische Tasks mit `sonnet-high`; ganze Suite einmal je TF; Agent-Statistik Pflicht (Format gilt fuer alle Skills, Skript `scripts/agent-stats.py` fuer Eintrag, Auswertung und Thread-Tokens aus Transkripten); kein PR-Review-Loop, kein Merge | `auto-feature/SKILL.md`, `auto-feature/scripts/agent-stats.py` |
 | `agents/opus-xhigh`, `agents/sonnet-xhigh`, `agents/sonnet-high` | Subagent-Definitionen mit `effort: xhigh` fuer Reviews bzw. Umsetzung, genutzt von `pr-review-loop` und `auto-feature`; `sonnet-high` (`effort: high`) fuer die Delta-Reviews in `pr-review-loop` und die Abschlaege nach der Effort-Regel in `auto-feature` | `agents/*.md` |
 
 ## Repository-Struktur
@@ -58,6 +58,8 @@ nikskills/
     SKILL.md
   auto-feature/
     SKILL.md
+    scripts/
+      agent-stats.py
   agents/
     opus-xhigh.md
     sonnet-xhigh.md
@@ -260,7 +262,7 @@ for s in pr-review-loop fix-findings auto-feature; do ln -sfn ~/Projects/skillz/
 for a in opus-xhigh sonnet-xhigh sonnet-high; do ln -sfn ~/Projects/skillz/nikskills/agents/$a.md ~/.claude/agents/$a.md; done
 ```
 
-Alle drei Skills setzen `effort: xhigh` im Frontmatter, `auto-feature` zusaetzlich `model: opus`.
+`pr-review-loop` und `auto-feature` setzen `effort: xhigh` im Frontmatter, `auto-feature` zusaetzlich `model: opus`; `fix-findings` setzt `effort: high`.
 Die Subagenten bekommen Effort ueber die Agent-Typen `opus-xhigh`/`sonnet-xhigh`/`sonnet-high`; fehlen sie,
 weichen die Skills auf `general-purpose` mit explizitem `model` aus und melden „Effort nicht garantiert“.
 

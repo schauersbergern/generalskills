@@ -197,8 +197,15 @@ Letzte Zeile: „Stopp. Bitte prüfen; danach `/pr-review-loop <PR>` je PR.“
 
 **Jeder Lauf führt eine Agent-Statistik**, als Grundlage für spätere Token-Optimierung. Dieses Format gilt auch für `pr-review-loop`, `fix-findings` und jede andere Session, die Subagenten startet. Ablage nach Repo-Konvention, sonst `docs/superpowers/runs/<YYYY-MM-DD>-<lauf>-agent-stats.md`. Außerhalb von `auto-feature` liegt sie unter `~/.claude/agent-stats/<repo>/`.
 
-- **Kopf:** Repo, Lauf, Session-ID der Hauptsession. Deren eigene Tokens stehen in keiner `<usage>`-Angabe und lassen sich später aus dem Transkript holen.
+- **Kopf:** Repo, Lauf, Session-ID der Hauptsession.
 - **Fortschreiben** nach jeder Task-Notification, nicht erst am Ende. Nach einer Kompaktierung fehlen sonst die Werte.
+- **Werkzeug:** `S=~/.claude/skills/auto-feature/scripts/agent-stats.py` (nur Python-Standardbibliothek). Es hält das Format ein, damit sich die Dateien über Läufe hinweg auswerten lassen:
+  - `python3 $S add <datei> --rolle "<Rolle>" --typ <agent-typ> --tokens <subagent_tokens> --dauer <duration_ms> --tool-uses <n> [--tf …] [--bwk 0/1/3] [--angenommen …] [--betrieb "n: …"] [--fix-runden …] [--status …]`, bei einer `SendMessage`-Fortsetzung zusätzlich `--fortsetzung-von <#>`, dann rechnet es `(kum.)` und `Δ tokens` selbst. Eine neue Datei legt es an, Kopfzeilen per `--kopf "Repo: …"`. Befunde nachtragen: Zelle von Hand ändern.
+  - `python3 $S summarize <datei> --write`: Abschnitt „Auswertung je Rolle“, am Ende des Laufs.
+  - `python3 $S threads self <weitere local_…-IDs> --subagents --md`: Tokens der Hauptsession, gestarteter Threads und ihrer Subagenten aus den Transkripten, inklusive Cache-Reads und Input-Äquivalent. Am Ende des Laufs in den Abschnitt „Threads“, **bevor** Threads archiviert oder gelöscht werden.
+  - `python3 $S summarize-all [--seit YYYY-MM-DD]`: Auswertung über alle Dateien unter `~/.claude/agent-stats/` (Grundlage für Regeländerungen wie diese).
+- **Rollen-Namen** einheitlich, denn die Auswertung gruppiert nach dem ersten Wort (bei `Review R1` nach dem Fokus): `Spec-Review R<r>`, `Plan-Review R<r>`, `Impl T<n>`, `Task-Review T<n>`, `Re-Review T<n>`, `Fix T<n>`, `Härtung`, `Design-Pass`, `Builder-Check`; in `pr-review-loop` `Review R1 <Korrektheit|Verträge|Tests|sachlich>` und `Delta-Review R<r>`.
+- **`<usage>` unterschätzt die Kosten:** `subagent_tokens` enthält keine Cache-Reads. Ein Review mit gemeldeten 149k entsprach im Transkript 665k Input-Äquivalent. Vergleiche zwischen Rollen gehen mit `Δ tokens`, Kostenaussagen nur mit `threads`.
 
 - **Quelle:** die `<usage>`-Angaben der Task-Notifications (`subagent_tokens`, `duration_ms`, `tool_uses`). Fehlt eine Angabe, steht dort „n/a“, nicht geschätzt.
 - **Spalten:** # | Zeitpunkt | TF | Rolle | Agent-Typ | Modell | Effort | tokens | Δ tokens | duration_ms | tool_uses | B/W/K | angenommen | betriebsrelevant | Fix-Runden | Status
@@ -209,7 +216,8 @@ Letzte Zeile: „Stopp. Bitte prüfen; danach `/pr-review-loop <PR>` je PR.“
   - Erstläufe: `Δ tokens` = `tokens`.
   - **Summen, Mediane und Ausbeuten rechnen mit `Δ tokens`.**
 - **betriebsrelevant:** Anzahl der angenommenen Befunde, die im Betrieb sichtbar geworden wären (Fehler oder Absturz, Datenverlust, Hänger, falsche Anzeige, Sicherheits- oder Scope-Lücke), Format `n: Stichwort; Stichwort`. Reine Stil-, Test-, Doku- und Benennungsbefunde zählen nicht. Gilt für Reviews und Härtungsläufe (gefundene Lücken je Härtungs-Subagent), sonst „–“.
-- **Auswertung je Rolle:** Läufe, Summe und Median `Δ tokens`, Dauer-Median, B/W/K, Blocker+Wichtig je 100k, betriebsrelevant je 100k. `sonnet-high` und `sonnet-xhigh` getrennt ausweisen, damit sich die Effort-Regel überprüfen lässt.
+- **Auswertung je Rolle:** Läufe, Summe und Median `Δ tokens`, Dauer-Median, B/W/K, Blocker+Wichtig je 100k, betriebsrelevant je 100k. `sonnet-high` und `sonnet-xhigh` getrennt ausweisen, damit sich die Effort-Regel überprüfen lässt (`summarize` trennt nach Agent-Typ).
+- **Stand 22.–24.10.2026** (`summarize-all`, 116 Läufe im Standardformat): Die Härtung brachte mit 1,05 betriebsrelevanten Befunden je 100k die höchste Ausbeute, vor Task-Reviews (0,81) und PR-Reviews Runde 1 (0,16–0,72 je Fokus). Frei werdende Tokens gehören eher in E2 als in zusätzliche Review-Runden.
 
 ## Ausreden und was stimmt
 
@@ -218,7 +226,8 @@ Letzte Zeile: „Stopp. Bitte prüfen; danach `/pr-review-loop <PR>` je PR.“
 | „Runde 2 hat noch Wichtiges, eine dritte schadet nicht“ | Genau so entstehen Endlosschleifen. Offenes kommt in „Offene Review-Punkte“, dann weiter. |
 | „Vier Zeilen schreibe ich schneller selbst“ | Die Hauptsession orchestriert und prüft. Implementiert wird nur von Sonnet. |
 | „Zur Sicherheit nach jedem Task die ganze Suite“ | Die läuft einmal je TF in der Verifikation und dann in der CI. Je Task Typecheck und die abhängigen Tests. |
-| „Die Statistik schreibe ich am Ende zusammen“ | Nach einer Kompaktierung sind die `<usage>`-Werte weg. Nach jeder Notification fortschreiben. |
+| „Die Statistik schreibe ich am Ende zusammen“ | Nach einer Kompaktierung sind die `<usage>`-Werte weg. Nach jeder Notification fortschreiben, per `agent-stats.py add`. |
+| „Die Tabelle tippe ich schneller von Hand“ | Handtabellen drifteten (eigene Spalten, fehlendes Δ, fehlende Uhrzeiten) und fielen aus der Auswertung über alle Läufe. |
 | „Tests grün, also PR“ | Grüne Tests finden keine Absturzfenster. Erst kommt die Härtung. |
 | „Die Tests decken den neuen Zweig ab, steht ja im Namen“ | Erst eine Mutation zeigt, ob ein Test rot wird. Ohne Probe bleibt die Lücke bis zum Review. |
 | „Der Task ist klein, Review lesend reicht“ | Hat er Logik, wird mutiert. Lesend nur reine Refactor-/UI-Tasks. |
