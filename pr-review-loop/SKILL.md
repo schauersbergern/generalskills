@@ -40,7 +40,7 @@ Ob gemergt wird, entscheidet der User im Chat.
 
 Was verschickt wird, entscheidet allein diese Regel, in dieser Reihenfolge. Es gibt drei Ausnahmen (alle Schritt 6):
 - **Stillstand:** Die nach dieser Regel zusammengestellte Liste wird nicht verschickt, sondern dem User gemeldet.
-- **Heuristik-Schleife:** Ein P2, der dieselbe Heuristik zum zweiten Mal trifft, geht als Entscheidungsfrage an den User statt an den Fixer.
+- **Heuristik-Schleife:** Ein P2 an einer Heuristik, an der in einer früheren Runde dieses PRs schon ein P2 gefixt wurde, geht als Entscheidungsfrage an den User statt an den Fixer.
 - **Runde 3 und später nur nach P1/P2:** Hat die Vorrunde keinen P1/P2 verschickt, geht außer CI rot oder Konflikt nichts mehr raus. Nicht überzeugende Ablehnungen werden dann „offen, nicht blockierend“, statt nach Punkt 1 erneut verschickt zu werden.
 
 1. **Immer verschickt**, jeder Schweregrad, unabhängig von Budget und Konvergenz-Bremse:
@@ -203,7 +203,7 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
 ## Format der Befundliste
 
 ```
-PR #<n> · <Code|Doku|Ops> · Runde <r>/<max, ohne Grenze nur r> · geprüft auf <head-sha>
+PR #<n> · <Doku|Ops|Code klein|Code|Code mit Risiko> · Runde <r>/<max, ohne Grenze nur r> · geprüft auf <head-sha>
 R<r>-1 [P1] pfad/datei.ts:88 — <Befund in einem Satz>
        Szenario: <Ablauf bis zum Fehler>
        Erwartet: <Richtung des Fixes, kein fertiger Patch nötig>
@@ -258,6 +258,6 @@ Jede Schleife führt eine, als Grundlage für spätere Token-Optimierung.
 | „Zur Sicherheit immer ein eigener Tests-Reviewer“ | Er war im Median der langsamste Fokus der Runde 1 und brachte die wenigsten betriebsrelevanten Befunde (0,29 je 100k, Korrektheit 0,80). Eigener Fokus nur bei „Code mit Risiko“, sonst belegt jeder Reviewer seine eigenen Behauptungen per Mutation. |
 | „Der Fixer muss urteilen, also Opus“ | Die Befunde sind schon reproduziert, und sein Urteil prüft die nächste Runde. Auf Opus xhigh waren die Fixer der teuerste Thread-Typ der Schleife. |
 | „Das Merge-Delta schicke ich komplett an einen Reviewer“ | Die Basis-Commits sind geprüft. Neu sind die Konfliktauflösung (`git show --remerge-diff`) und Wechselwirkungen mit dem PR, die der Dateiabgleich und die CI zeigen. |
-| „Noch ein Grenzfall an derselben Heuristik, den fixen wir auch“ | Der zweite P2 an derselben Heuristik ist eine Produktfrage. Sie geht an den User, sonst wiederholt sich das wie bei m365 #15 über vier Runden. |
+| „Noch ein Grenzfall an derselben Heuristik, den fixen wir auch“ | Ein weiterer P2 an einer schon einmal gefixten Heuristik ist eine Produktfrage. Sie geht an den User, sonst wiederholt sich das wie bei m365 #15 über vier Runden. |
 | „Die Thread-Tokens hole ich später“ | Nach dem Löschen oder Worktree-Aufräumen können die Transkripte fehlen. Vorher `agent-stats.py threads`. |
 | „Ohne `model` erbt der Reviewer schon Opus“ | Agent-Definitionen können ein eigenes Modell im Frontmatter setzen. Immer `model: "opus"` angeben. |
