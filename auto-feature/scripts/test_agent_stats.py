@@ -10,13 +10,16 @@ import unittest
 SKRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent-stats.py")
 
 
-def lauf(*args, home=None):
+def lauf(*args, home=None, stand=None, skript=SKRIPT):
     env = dict(os.environ)
     if home:
         env["HOME"] = home
     env.pop("CLAUDE_CODE_HOST_SESSION_ID", None)
     env.pop("CLAUDE_CODE_SESSION_ID", None)
-    return subprocess.run([sys.executable, "-I", SKRIPT, *args], capture_output=True, text=True, env=env)
+    env.pop("AGENT_STATS_SKILLS_STAND", None)
+    if stand:
+        env["AGENT_STATS_SKILLS_STAND"] = stand
+    return subprocess.run([sys.executable, "-I", skript, *args], capture_output=True, text=True, env=env)
 
 
 class Basis(unittest.TestCase):
@@ -155,6 +158,89 @@ class Auswertung(Basis):
         r = lauf("summarize-all", "--root", os.path.join(self.d, "root"))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("2026-10-24-hand.md", r.stderr)
+
+
+class SkillStand(Basis):
+    A, B = "generalskills@aaaaaaa (2026-10-24, main)", "generalskills@bbbbbbb (2026-10-25, main)"
+
+    def add_mit(self, stand, rolle="Review R1 Korrektheit", tokens=1000):
+        r = lauf("add", self.datei, "--rolle", rolle, "--typ", "opus-xhigh", "--tokens", str(tokens),
+                 "--zeit", "2026-10-24 10:00", stand=stand)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def text(self):
+        with open(self.datei, encoding="utf-8") as f:
+            return f.read()
+
+    def kopf(self):
+        return [z.strip() for z in self.text().splitlines() if z.startswith("- Skills")]
+
+    def test_neue_datei_stempelt_stand_einmal(self):
+        self.add_mit(self.A)
+        self.add_mit(self.A)
+        self.assertEqual(self.kopf(), [f"- Skills: {self.A}"])
+
+    def test_wechsel_im_lauf_gilt_ab_der_zeile(self):
+        self.add_mit(self.A)
+        self.add_mit(self.A)
+        self.add_mit(self.B)
+        self.add_mit(self.B)
+        self.assertEqual(self.kopf(), [f"- Skills: {self.A}", f"- Skills ab #3: {self.B}"])
+
+    def test_datei_ohne_stempel_bekommt_ab_zeile(self):
+        with open(self.datei, "w", encoding="utf-8") as f:
+            f.write("# Alt\n\nRepo x, ohne Stempel.\n\n## Agenten\n\n")
+        self.add_mit(self.A)
+        self.assertEqual(self.kopf(), [f"- Skills ab #1: {self.A}"])
+        self.assertEqual(self.text().splitlines()[2], f"- Skills ab #1: {self.A}")
+
+    def test_summarize_all_trennt_nach_stand(self):
+        self.add_mit(self.A, tokens=1000)
+        self.add_mit(self.B, tokens=3000)
+        alt = os.path.join(self.d, "alt.md")
+        with open(alt, "w", encoding="utf-8") as f:  # Datei ohne Stempel
+            f.write(self.text().replace("- Skills", "- Notiz"))
+        r = lauf("summarize-all", "--root", self.d, "--nach-version")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        teile = r.stdout.split("### Skills: ")
+        self.assertTrue(teile[1].startswith("unbekannt (2 Läufe)"), r.stdout)
+        self.assertTrue(teile[2].startswith(f"{self.A} (1 Läufe)") and "| 1.000 |" in teile[2], r.stdout)
+        self.assertTrue(teile[3].startswith(f"{self.B} (1 Läufe)") and "| 3.000 |" in teile[3], r.stdout)
+
+    def test_stamp_schreibt_verweigert_und_ersetzt(self):
+        self.add_mit(self.A)
+        r = lauf("stamp", self.datei, "--stand", self.B)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.kopf(), [f"- Skills: {self.A}"])
+        r = lauf("stamp", self.datei, "--stand", self.B, "--hinweis", "nachgetragen", "--ersetzen")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.kopf(), [f"- Skills: {self.B} · nachgetragen"])
+        r = lauf("summarize-all", "--root", self.d, "--nach-version")
+        self.assertIn(f"### Skills: {self.B} (1 Läufe)", r.stdout)  # Hinweis gehört nicht zum Stand
+
+    def test_stand_aus_dem_git_checkout_des_skripts(self):
+        repo = os.path.join(self.d, "generalskills")
+        os.makedirs(os.path.join(repo, "auto-feature", "scripts"))
+        ziel = os.path.join(repo, "auto-feature", "scripts", "agent-stats.py")
+        with open(SKRIPT, encoding="utf-8") as q, open(ziel, "w", encoding="utf-8") as z:
+            z.write(q.read())
+        g = lambda *a: subprocess.run(["git", "-C", repo, *a], capture_output=True, text=True, check=True).stdout
+        g("init", "-q", "-b", "main")
+        g("add", ".")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init")
+        sha = g("log", "-1", "--format=%h").strip()
+        link = os.path.join(self.d, "skills-link")
+        os.symlink(os.path.join(repo, "auto-feature"), link)  # wie ~/.claude/skills/auto-feature
+        r = lauf("add", self.datei, "--rolle", "Impl T1", "--typ", "sonnet-xhigh", "--tokens", "1",
+                 skript=os.path.join(link, "scripts", "agent-stats.py"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(self.kopf()[0], rf"^- Skills: generalskills@{sha} \(\d{{4}}-\d{{2}}-\d{{2}}, main\)$")
+        with open(ziel, "a", encoding="utf-8") as z:
+            z.write("# lokal geändert\n")
+        r = lauf("add", self.datei, "--rolle", "Impl T2", "--typ", "sonnet-xhigh", "--tokens", "1",
+                 skript=os.path.join(link, "scripts", "agent-stats.py"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(self.kopf()[1], rf"^- Skills ab #2: generalskills@{sha}-dirty ")
 
 
 class Threads(unittest.TestCase):
