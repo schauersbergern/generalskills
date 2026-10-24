@@ -17,8 +17,10 @@ import glob
 import json
 import os
 import re
+import stat
 import statistics
 import sys
+import tempfile
 
 SPALTEN = ["#", "Zeitpunkt", "TF", "Rolle", "Agent-Typ", "Modell", "Effort", "tokens",
            "Δ tokens", "duration_ms", "tool_uses", "B/W/K", "angenommen", "betriebsrelevant",
@@ -28,7 +30,8 @@ TYPEN = {"opus-xhigh": ("opus", "xhigh"), "sonnet-xhigh": ("sonnet", "xhigh"),
 # Preisverhältnisse relativ zu frischem Input (Anthropic-Listenpreise, für Opus und Sonnet gleich).
 FAKTOR = {"input_tokens": 1.0, "cache_creation_input_tokens": 1.25,
           "cache_read_input_tokens": 0.1, "output_tokens": 5.0}
-APP_SESSIONS = os.path.expanduser("~/Library/Application Support/Claude/claude-code-sessions")
+MARKE, MARKE_ENDE = "<!-- agent-stats:auswertung -->", "<!-- /agent-stats:auswertung -->"
+APP_SESSIONS =os.path.expanduser("~/Library/Application Support/Claude/claude-code-sessions")
 PROJECTS = os.path.expanduser("~/.claude/projects")
 
 
@@ -55,6 +58,35 @@ def ist_datenzeile(zeile):
 def zahl(text):
     t = text.replace("(kum.)", "").replace(".", "").replace(",", "").replace(" ", "").strip()
     return int(t) if t.isdigit() else None
+
+
+def schreibe(pfad, zeilen):
+    # Über eine Temp-Datei, damit ein Abbruch keine gekürzte Datei hinterlässt.
+    ordner = os.path.dirname(pfad) or "."
+    os.makedirs(ordner, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=ordner, prefix=".agent-stats-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("\n".join(zeilen).rstrip() + "\n")
+        if os.path.exists(pfad):
+            os.chmod(tmp, stat.S_IMODE(os.stat(pfad).st_mode))
+        os.replace(tmp, pfad)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+
+def agenten_ende(zeilen):
+    """Index hinter der Agenten-Tabelle: Kopf im Standardformat, sonst Block der ersten Datenzeile."""
+    start = next((i for i, z in enumerate(zeilen)
+                  if z.lstrip().startswith("|") and zellen(z)[:len(SPALTEN)] == SPALTEN), None)
+    if start is None:
+        start = next((i for i, z in enumerate(zeilen) if ist_datenzeile(z)), None)
+    if start is None:
+        return None
+    while start + 1 < len(zeilen) and zeilen[start + 1].lstrip().startswith("|"):
+        start += 1
+    return start + 1
 
 
 def zeile_md(werte):
@@ -102,16 +134,17 @@ def cmd_add(a):
                     a.tool_uses if a.tool_uses is not None else "n/a",
                     a.bwk, a.angenommen, a.betrieb, a.fix_runden, a.status])
 
-    if daten:
-        zeilen.insert(daten[-1][0] + 1, neu)
+    ende = agenten_ende(zeilen)
+    if ende is not None:
+        zeilen.insert(ende, neu)
     else:
         if not zeilen:
             zeilen = [f"# Agent-Statistik · {os.path.splitext(os.path.basename(pfad))[0]}", ""]
             zeilen += [f"- {k}" for k in a.kopf] + ([""] if a.kopf else [])
+        else:
+            zeilen.append("")
         zeilen += ["## Agenten", "", zeile_md(SPALTEN), zeile_md(["---"] * len(SPALTEN)), neu]
-    os.makedirs(os.path.dirname(pfad) or ".", exist_ok=True)
-    with open(pfad, "w", encoding="utf-8") as f:
-        f.write("\n".join(zeilen) + "\n")
+    schreibe(pfad, zeilen)
     print(f"#{nr} eingetragen: {rolle} · {a.typ} · Δ {delta}")
 
 
@@ -174,15 +207,16 @@ def cmd_summarize(a):
         print("\n".join(tabelle))
         return
     text = open(pfad, encoding="utf-8").read().splitlines()
-    abschnitt = ["## Auswertung je Rolle", "", *tabelle, ""]
-    start = next((i for i, z in enumerate(text) if z.startswith("## Auswertung")), None)
-    if start is None:
-        text += [""] + abschnitt
+    # Nur den eigenen, markierten Block ersetzen; fremder Text und Datenzeilen bleiben stehen.
+    block = [MARKE, *tabelle, MARKE_ENDE]
+    start = next((i for i, z in enumerate(text) if z.strip() == MARKE), None)
+    ende = next((i for i in range(start + 1, len(text)) if text[i].strip() == MARKE_ENDE), None) \
+        if start is not None else None
+    if ende is None:
+        text += ["", "## Auswertung je Rolle", "", *block]
     else:
-        ende = next((i for i in range(start + 1, len(text)) if text[i].startswith("## ")), len(text))
-        text[start:ende] = abschnitt
-    with open(pfad, "w", encoding="utf-8") as f:
-        f.write("\n".join(text).rstrip() + "\n")
+        text[start:ende + 1] = block
+    schreibe(pfad, text)
     print(f"Auswertung geschrieben: {pfad}")
 
 
