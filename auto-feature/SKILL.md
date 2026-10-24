@@ -205,14 +205,14 @@ Letzte Zeile: „Stopp. Bitte prüfen; danach `/pr-review-loop <PR>` je PR.“
   - `python3 $S threads self <weitere local_…-IDs> --subagents --md`: Tokens der Hauptsession, gestarteter Threads und ihrer Subagenten aus den Transkripten, inklusive Cache-Reads und Input-Äquivalent je Modell (Cache-Write 5 min ×1,25, 1 h ×2). Fehlt eine ID, steht sie als Zeile „fehlt“ in der Tabelle, und das Skript endet mit Exit 1. Am Ende des Laufs in den Abschnitt „Threads“, **bevor** Threads archiviert oder gelöscht werden.
   - `python3 $S summarize-all [--seit YYYY-MM-DD]`: Auswertung über alle Dateien unter `~/.claude/agent-stats/` (Grundlage für Regeländerungen wie diese).
 - **Rollen-Namen** einheitlich, denn die Auswertung gruppiert nach dem ersten Wort (bei `Review R1` nach dem Fokus): `Spec-Review R<r>`, `Plan-Review R<r>`, `Impl T<n>`, `Task-Review T<n>`, `Re-Review T<n>`, `Fix T<n>`, `Härtung`, `Design-Pass`, `Builder-Check`; in `pr-review-loop` `Review R1 <Korrektheit|Verträge|Tests|sachlich>` und `Delta-Review R<r>`.
-- **`<usage>` unterschätzt die Kosten:** `subagent_tokens` enthält keine Cache-Reads. Ein Review mit gemeldeten 149k entsprach im Transkript 665k Input-Äquivalent. Vergleiche zwischen Rollen gehen mit `Δ tokens`, Kostenaussagen nur mit `threads`.
+- **`<usage>` misst keinen Verbrauch:** `subagent_tokens` ist die Kontextgröße des letzten API-Aufrufs (Input, Cache-Write und Cache-Read) plus dessen Output, keine Summe über die Aufrufe. `Δ tokens` ist bei Fortsetzungen also Kontextwachstum und taugt nur für grobe Vergleiche zwischen Rollen. Kostenaussagen nur mit dem Input-Äquivalent je Modell aus `threads`.
 
 - **Quelle:** die `<usage>`-Angaben der Task-Notifications (`subagent_tokens`, `duration_ms`, `tool_uses`). Fehlt eine Angabe, steht dort „n/a“, nicht geschätzt.
 - **Spalten:** # | Zeitpunkt | TF | Rolle | Agent-Typ | Modell | Effort | tokens | Δ tokens | duration_ms | tool_uses | B/W/K | angenommen | betriebsrelevant | Fix-Runden | Status
 - **Fortsetzungen per `SendMessage`** (Fix-Runden, Nachträge):
-  - `tokens` = gemeldeter Wert, gekennzeichnet mit „(kum.)“. Annahme, nicht belegt: Der Wert enthält die Vorläufe desselben Agenten.
+  - `tokens` = gemeldeter Wert, gekennzeichnet mit „(kum.)“: Der Endkontext einer Fortsetzung enthält den Kontext der Vorläufe desselben Agenten.
   - `Δ tokens` = gemeldeter Wert minus Vorwert, also minus dem zuletzt gemeldeten Wert desselben Agenten.
-  - Ist der gemeldete Wert kleiner als der Vorwert, trägt die Annahme für diesen Agenten nicht, etwa weil der Wert nach einer Kompaktierung nur noch die Kontextgröße zeigt. Dann gilt `Δ tokens` = `tokens`, ohne „(kum.)“, und die Auswertung hält das fest.
+  - Ist der gemeldete Wert kleiner als der Vorwert, ist der Kontext geschrumpft, etwa durch eine Kompaktierung. Dann gilt `Δ tokens` = `tokens`, ohne „(kum.)“, und die Auswertung hält das fest.
   - Erstläufe: `Δ tokens` = `tokens`.
   - **Summen, Mediane und Ausbeuten rechnen mit `Δ tokens`.**
 - **betriebsrelevant:** Anzahl der angenommenen Befunde, die im Betrieb sichtbar geworden wären (Fehler oder Absturz, Datenverlust, Hänger, falsche Anzeige, Sicherheits- oder Scope-Lücke), Format `n: Stichwort; Stichwort`. Reine Stil-, Test-, Doku- und Benennungsbefunde zählen nicht. Gilt für Reviews und Härtungsläufe (gefundene Lücken je Härtungs-Subagent), sonst „–“.
