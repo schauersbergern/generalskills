@@ -27,9 +27,9 @@ SPALTEN = ["#", "Zeitpunkt", "TF", "Rolle", "Agent-Typ", "Modell", "Effort", "to
            "Fix-Runden", "Status"]
 TYPEN = {"opus-xhigh": ("opus", "xhigh"), "sonnet-xhigh": ("sonnet", "xhigh"),
          "sonnet-high": ("sonnet", "high")}
-# Preisverhältnisse relativ zu frischem Input (Anthropic-Listenpreise, für Opus und Sonnet gleich).
-FAKTOR = {"input_tokens": 1.0, "cache_creation_input_tokens": 1.25,
-          "cache_read_input_tokens": 0.1, "output_tokens": 5.0}
+# Preisverhältnisse relativ zu frischem Input desselben Modells (Anthropic-Listenpreise, für Opus und
+# Sonnet gleich). Cache-Writes: 5-min-Cache ×1,25, 1-h-Cache ×2. Modelle nicht untereinander verrechnen.
+FAKTOR = {"input": 1.0, "cache_write_5m": 1.25, "cache_write_1h": 2.0, "cache_read": 0.1, "output": 5.0}
 MARKE, MARKE_ENDE = "<!-- agent-stats:auswertung -->", "<!-- /agent-stats:auswertung -->"
 APP_SESSIONS =os.path.expanduser("~/Library/Application Support/Claude/claude-code-sessions")
 PROJECTS = os.path.expanduser("~/.claude/projects")
@@ -292,57 +292,78 @@ def summe(pfad):
         m = e.get("message") if isinstance(e, dict) else None
         if not isinstance(m, dict) or not isinstance(m.get("usage"), dict):
             continue
+        if m.get("model") == "<synthetic>":  # lokal erzeugt, kein API-Aufruf
+            continue
         # Gestreamte Antworten stehen mehrfach im Transkript: je Message-ID nur einmal zählen.
-        je_msg[m.get("id") or e.get("uuid")] = (m.get("model", "?"), m["usage"])
+        je_msg[m.get("id") or e.get("uuid")] = (m.get("model", "?"), m["usage"], m.get("stop_reason"))
     s = {k: 0 for k in FAKTOR}
-    modelle = set()
-    for modell, u in je_msg.values():
-        modelle.add(modell)
+    s["je_modell"], s["ohne_stop"] = {}, 0
+    for modell, u, stop in je_msg.values():
+        cc = u.get("cache_creation") if isinstance(u.get("cache_creation"), dict) else {}
+        if "ephemeral_1h_input_tokens" in cc or "ephemeral_5m_input_tokens" in cc:
+            w5m, w1h = cc.get("ephemeral_5m_input_tokens") or 0, cc.get("ephemeral_1h_input_tokens") or 0
+        else:  # ältere Transkripte ohne Aufteilung: als 5-min-Cache werten
+            w5m, w1h = u.get("cache_creation_input_tokens") or 0, 0
+        werte = {"input": u.get("input_tokens") or 0, "cache_write_5m": w5m, "cache_write_1h": w1h,
+                 "cache_read": u.get("cache_read_input_tokens") or 0, "output": u.get("output_tokens") or 0}
         for k in FAKTOR:
-            s[k] += u.get(k) or 0
+            s[k] += werte[k]
+        name = modell.replace("claude-", "")
+        s["je_modell"][name] = s["je_modell"].get(name, 0) + sum(werte[k] * f for k, f in FAKTOR.items())
+        if stop is None:
+            s["ohne_stop"] += 1
     s["aufrufe"] = len(je_msg)
-    s["modell"] = ",".join(sorted(m.replace("claude-", "") for m in modelle if m != "<synthetic>"))
-    s["äquivalent"] = int(sum(s[k] * f for k, f in FAKTOR.items()))
+    s["modell"] = ",".join(sorted(s["je_modell"]))
+    s["äquivalent"] = int(sum(s["je_modell"].values()))
     return s
 
 
 def cmd_threads(a):
-    kopf = ["Thread", "Modell", "API-Aufrufe", "input", "cache_write", "cache_read", "output",
-            "Input-Äquivalent"]
-    zeilen, gesamt = [], 0
+    kopf = ["Thread", "Modell", "API-Aufrufe", "input", "cache_write_5m", "cache_write_1h", "cache_read",
+            "output", "Input-Äquivalent"]
+    zeilen, je_modell, fehlt = [], {}, []
     for ref in a.ids:
         sid, titel = cli_id(ref)
-        if not sid:
-            print(titel, file=sys.stderr)
-            continue
-        dateien = glob.glob(os.path.join(PROJECTS, "*", f"{sid}.jsonl"))
+        dateien = glob.glob(os.path.join(PROJECTS, "*", f"{sid}.jsonl")) if sid else []
         if not dateien:
-            print(f"{ref}: Transkript {sid}.jsonl nicht gefunden", file=sys.stderr)
+            grund = titel if not sid else f"Transkript {sid}.jsonl nicht gefunden"
+            print(grund, file=sys.stderr)
+            fehlt.append(ref)
+            zeilen.append([f"{ref}: fehlt ({grund})"] + ["–"] * (len(kopf) - 1))
             continue
-        teile = [(f"{titel} ({ref})", dateien[0])]
+        # Nach einem Worktree-Wechsel liegt das Transkript in mehreren Projektordnern; die älteren
+        # Kopien sind Präfixe der aktuellen, also die längste nehmen.
+        transkript = max(dateien, key=os.path.getsize)
+        teile = [(f"{titel} ({ref})", transkript)]
         if a.subagents:
-            for p in sorted(glob.glob(os.path.join(os.path.splitext(dateien[0])[0], "subagents", "agent-*.jsonl"))):
+            for p in sorted(glob.glob(os.path.join(os.path.splitext(transkript)[0], "subagents", "agent-*.jsonl"))):
                 meta = os.path.splitext(p)[0] + ".meta.json"
                 m = json.load(open(meta, encoding="utf-8")) if os.path.exists(meta) else {}
                 teile.append((f"  ↳ {m.get('agentType', '?')}: {m.get('description', os.path.basename(p))}", p))
         for name, p in teile:
             s = summe(p)
-            gesamt += s["äquivalent"]
-            zeilen.append([name, s["modell"], s["aufrufe"], s["input_tokens"],
-                           s["cache_creation_input_tokens"], s["cache_read_input_tokens"],
-                           s["output_tokens"], s["äquivalent"]])
-    if not zeilen:
-        sys.exit(1)
+            for modell, x in s["je_modell"].items():
+                je_modell[modell] = je_modell.get(modell, 0) + x
+            if s["ohne_stop"]:
+                print(f"{name.strip()}: {s['ohne_stop']} von {s['aufrufe']} Aufrufen ohne stop_reason "
+                      "(nur Stream-Anfang im Transkript), output dort unterschätzt", file=sys.stderr)
+            zeilen.append([name, s["modell"], s["aufrufe"], *(s[k] for k in FAKTOR), s["äquivalent"]])
+    tausend = lambda x: f"{int(x):,}".replace(",", ".") if isinstance(x, (int, float)) else x
     if a.md:
         print(zeile_md(kopf))
         print(zeile_md(["---"] * len(kopf)))
         for z in zeilen:
-            print(zeile_md([z[0], z[1]] + [f"{x:,}".replace(",", ".") for x in z[2:]]))
+            print(zeile_md([z[0], z[1]] + [tausend(x) for x in z[2:]]))
     else:
         for z in zeilen:
             print("\t".join(str(x) for x in z))
-    gesamt = f"{gesamt:,}".replace(",", ".")
-    print(f"\nΣ Input-Äquivalent {gesamt} (cache_write ×1,25, cache_read ×0,1, output ×5)")
+    print()
+    for modell, x in sorted(je_modell.items()):
+        print(f"Σ Input-Äquivalent {modell}: {tausend(x)}")
+    print("(relativ zum Input-Preis des jeweiligen Modells: cache_write_5m ×1,25, cache_write_1h ×2, "
+          "cache_read ×0,1, output ×5; Modelle nicht addieren)")
+    if fehlt:
+        sys.exit(f"Fehlend: {', '.join(fehlt)}")
 
 
 def main():
