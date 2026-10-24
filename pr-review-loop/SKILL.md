@@ -38,8 +38,9 @@ Ob gemergt wird, entscheidet der User im Chat.
 
 ## Versandregel (gilt für Briefing, Liste und Ende)
 
-Was verschickt wird, entscheidet allein diese Regel, in dieser Reihenfolge. Es gibt zwei Ausnahmen (beide Schritt 6):
+Was verschickt wird, entscheidet allein diese Regel, in dieser Reihenfolge. Es gibt drei Ausnahmen (alle Schritt 6):
 - **Stillstand:** Die nach dieser Regel zusammengestellte Liste wird nicht verschickt, sondern dem User gemeldet.
+- **Heuristik-Schleife:** Ein P2, der dieselbe Heuristik zum zweiten Mal trifft, geht als Entscheidungsfrage an den User statt an den Fixer.
 - **Runde 3 und später nur nach P1/P2:** Hat die Vorrunde keinen P1/P2 verschickt, geht außer CI rot oder Konflikt nichts mehr raus. Nicht überzeugende Ablehnungen werden dann „offen, nicht blockierend“, statt nach Punkt 1 erneut verschickt zu werden.
 
 1. **Immer verschickt**, jeder Schweregrad, unabhängig von Budget und Konvergenz-Bremse:
@@ -60,10 +61,14 @@ Die Art legst du in Schritt 1 anhand der geänderten Dateien fest und nennst sie
 |---|---|---|---|---|---|
 | **Doku/Prosa-only** | nur Markdown, Kommentare, Texte | **1** | keine | nur sachliche Fehler: falsche Zahlen, falsche Aussagen, widersprüchliche Anweisungen. Keine Stil- oder Formulierungsbefunde | **0** |
 | **Ops/Config** | Dockerfile, Compose, CI, Env, Config ohne Programmlogik | **1** | keine | wie Doku, plus Fehler, die Build oder Betrieb brechen | **0** |
-| **Code** | alles mit Programmlogik | **2–3** mit Fokus (Schritt 2) | ja, gezielt | wie unten unter Schweregrade | **2** |
+| **Code klein** | Programmlogik, höchstens etwa 150 geänderte Zeilen Produktivcode (ohne Tests, Doku, Lockfiles), kein Risikobereich | **1** (Korrektheit und Verträge zusammen) | ja, nur für die 1–3 zentralen Behauptungen | wie unten unter Schweregrade | **2** |
+| **Code** | Programmlogik, kein Risikobereich | **2** (Korrektheit, Verträge; Schritt 2) | ja, jeder Reviewer für seine eigenen Behauptungen | wie unten unter Schweregrade | **2** |
+| **Code mit Risiko** | berührt einen Risikobereich: Schema oder Migration, Sperren, Hintergrundjobs, Zustandsautomaten, Raw SQL, Auth oder Mandantengrenze; oder mehr als etwa 800 geänderte Zeilen Produktivcode | **3** (zusätzlich Tests/Mutation) | ja, systematisch im Tests-Fokus | wie unten unter Schweregrade | **2** |
 
-- **Gemischte PRs gelten als Code.**
+- **Gemischte PRs gelten als Code** (Stufe nach dem Code-Anteil).
 - **Doku- und Ops-PRs nach Runde 1:** Die folgenden Runden prüfen nur noch, ob die gemeldeten Fehler behoben sind. Neue Befunde gibt es dort nur, wenn ein Fix selbst etwas falsch macht.
+- **Agent-Statistiken und Lauf-Protokolle** (`agent-stats`, `docs/superpowers/runs/`) prüft niemand. Liegen sie in einem PR, nimmst du sie aus dem Review (`git diff <basis>...<head> -- . ':!<pfad>'`). Ein PR, der nur aus ihnen besteht, ist ohne Reviewer und ohne Fixer „sauber“, sobald CI und Konfliktstatus stimmen.
+- **Herkunft der Stufen** (Statistik 22.–24.10.2026, 127 Läufe): Der eigene Tests-Fokus kostete 13 % aller Subagent-Tokens, war mit 16 min Median der langsamste Prüfer jeder Runde 1 und brachte 0,16 betriebsrelevante Befunde je 100k (Korrektheit 0,72, Verträge 0,54; seit dem 23.10. 0,05 gegen 0,55 und 0,42), fast nur Dubletten der anderen Fokusse. Bei kleinen PRs fanden Korrektheit und Verträge mehrfach denselben Befund (#21 Einzeilen-Fix, #60, #18).
 
 ## Mehrere PRs
 
@@ -85,14 +90,17 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
    - **PR-Art festlegen** (`gh pr diff <n> --name-only`), siehe „Prüftiefe nach PR-Art“.
    - **Fixer sofort starten**, falls kein Fixer-Name angegeben ist, noch vor den Reviewern und im selben Zug. Der Fixer bereitet sich vor, während die Reviewer laufen. Per `mcp__ccd_session__start_session` (Werkzeug ggf. erst per `ToolSearch` laden):
      - `initiation: "user_asked"` (der User hat den Fixer durch das Weglassen des Namens bestellt), `context: "fresh"`, `use_worktree: true`, `name: "fix-<n>"`, Titel „Fixer PR #<n>“
+     - **`model`: die aktuelle Sonnet-ID** (z. B. `claude-sonnet-5-5`), **`effort: "high"`**. Der Fixer setzt verifizierte Befunde um, sein Urteil prüft die nächste Runde. Grund: Fixer-Threads waren der teuerste Thread-Typ der Schleife. Bei Haas Runde 2 entfielen auf die sechs Fixer rund 60 % der Thread-Kosten; allein #174 und #176 kamen auf Opus xhigh auf 150 bzw. 192 API-Aufrufe und 35 bzw. 44 Mio. Cache-Read-Tokens. Kennt die App das Modell nicht, ohne `model` starten und „Fixer auf Opus“ in der Abschlussmeldung vermerken.
      - `background`: Repo, PR-Nummer, Branch und Basis; dass dies der Fixer zu einer Review-Schleife ist und die Listen per Nachricht kommen
      - `prompt`: „Fixer für PR #<n>. Die Befundliste kommt per Nachricht, dann Skill `fix-findings` darauf anwenden. Bis dahin nur vorbereiten: Worktree auf den PR-Branch, Abhängigkeiten installieren, `CLAUDE.md` und PR lesen, dann den Zug beenden.“ **In `prompt` und `background` kommen die Wörter „mergen“ und „deployen“ nicht vor**, `fix-findings` liest sie als Befehlswort.
      - Die `local_…`-ID aus dem Ergebnis merken. Nie einen zweiten Fixer für denselben PR starten; der erste kennt seine Entscheidungen.
      - **Verweigert die App den Start** (z. B. weil der Zug automatisch ausgelöst wurde): nicht fragen, ob du starten darfst. Eine Zeile an den User: „Bitte kurz ‚weiter‘ schreiben, dann starte ich den Fixer.“ In seinem Zug geht der Start. Das Review läuft derweil weiter.
-2. **Runde starten.** Doku- und Ops-PRs: **ein** Reviewer mit dem Auftrag „nur sachliche Fehler“, ohne Mutationsproben. Code-PRs: 2–3 Reviewer **parallel** in einer Nachricht, jeder mit eigenem Fokus:
-   - Korrektheit, Nebenläufigkeit, Absturzfenster
-   - Tests: vakuume Assertions, fehlende Invarianten-Tests, Mutationsproben
-   - Verträge und Konsumenten außerhalb des Diffs, Sicherheit und Mandantengrenze; sachliche Fehler in Prosa immer, Formulierungsbefunde nur, solange das Prosa-Budget reicht (Versandregel)
+2. **Runde starten.** Zahl der Reviewer nach der Stufe aus „Prüftiefe nach PR-Art“. Doku- und Ops-PRs: **ein** Reviewer mit dem Auftrag „nur sachliche Fehler“, ohne Mutationsproben. Code-PRs: die Reviewer **parallel** in einer Nachricht, jeder mit eigenem Fokus:
+   - **Korrektheit:** Nebenläufigkeit, Absturzfenster, Grenzfälle
+   - **Verträge:** Konsumenten außerhalb des Diffs, Sicherheit und Mandantengrenze; sachliche Fehler in Prosa immer, Formulierungsbefunde nur, solange das Prosa-Budget reicht (Versandregel)
+   - **Tests** (nur „Code mit Risiko“): vakuume Assertions, fehlende Invarianten-Tests, systematische Mutationsproben
+   - „Code klein“: ein Reviewer mit Korrektheit und Verträgen zusammen.
+   - Ohne eigenen Tests-Fokus belegt jeder Reviewer seine 1–3 wichtigsten Behauptungen über Tests („Zweig X ist abgedeckt“, „Invariante Y hält“) selbst per Mutation. Eine flächendeckende Mutationsrunde macht er nicht.
 
    Aufruf: `Agent(subagent_type: "opus-xhigh", model: "opus", run_in_background: false, …)`.
    - **`model: "opus"` immer explizit setzen.** Wer stattdessen `prp-core:code-reviewer` nimmt, erbt dessen Frontmatter `model: sonnet` und landet ohne den Parameter still auf Sonnet.
@@ -100,12 +108,14 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
    - **Worktree für Mutationsproben:** Jeder Reviewer bekommt einen eigenen, und nur du legst ihn an: `git worktree add --detach <scratchpad>/rev-<runde>-<i> <head-sha>`. Nach der Runde entfernst du ihn mit `git worktree remove --force`.
    - **Abhängigkeiten nicht neu installieren:** Im Worktree verlinkst du das installierte Abhängigkeitsverzeichnis des Haupt-Checkouts (z. B. `ln -s <repo>/node_modules <worktree>/node_modules`) und kopierst lokale Test-Env-Dateien (z. B. `.env.test`). Ändert der PR Abhängigkeiten oder Quellen von generiertem Code (Lockfile, Prisma-Schema) oder weicht der Haupt-Checkout dort vom PR-Head ab (`git diff <head-sha> -- <lockfile> <schema>` im Haupt-Checkout), gelten Proben, die davon abhängen, als Verdacht.
      - **Ausnahme Workspace-Monorepos:** Bei npm/yarn workspaces zeigen die Paket-Symlinks im verlinkten `node_modules` auf die Pakete des Haupt-Checkouts, nicht des Worktrees, Mutationen in einem Workspace-Paket sehen Tests anderer Pakete also nicht. Bei pnpm liegen die Links in den `node_modules` der einzelnen Pakete und fehlen im Worktree ganz. Hier installierst du statt des Links im Worktree (z. B. `pnpm install --offline`). Geht das nicht, gelten paketübergreifende Proben als Verdacht.
+   - **Eigene Test-DB je Reviewer:** Brauchen die Tests eine Datenbank, die sich Sessions teilen (geteilte Test-DB im Repo-`CLAUDE.md` oder in der Test-Env), legst du vor dem Start je mutierendem Reviewer eine eigene an und lässt die Test-Env seines Worktrees darauf zeigen. Bei PostgreSQL per Kopie einer migrierten Vorlage (`CREATE DATABASE <repo>_rev_<runde>_<i> TEMPLATE <test-db>`, dauert Sekunden; die Vorlage darf dabei keine offenen Verbindungen haben). Bringt der PR Migrationen, wendet der Reviewer sie in seiner Kopie an. Nach der Runde löschst du die Kopien. Grund: Auf der geteilten DB brauchte der Tests-Reviewer von #177 85 min, weil parallele Sessions sie unbrauchbar machten; bei #171 musste er sich selbst eine anlegen.
    - **Mutationsproben gezielt:** nur gegen die Testdateien, die den mutierten Code abdecken (z. B. `pnpm vitest run <pfade>`, `pytest <pfade>`), **nie die ganze Suite**.
    - **Fehlende Abhängigkeiten:** Lassen sich im Worktree keine Tests ausführen, meldet der Reviewer die Mutationsprobe als Verdacht. Er baut keine Umgebung auf.
 3. **Befunde selbst reproduzieren**, bevor irgendetwas weitergeht:
    - die Stelle bei Head-SHA lesen und das Szenario nachvollziehen
    - bei Test-Befunden die Mutation nachstellen, wenn das billig ist (in einem eigenen, danach entfernten Worktree, nie im Arbeitsverzeichnis; Wegwerf-Repos und Messskripte nur nach der Temp-Verzeichnis-Regel aus dem Reviewer-Briefing, Punkt 4)
    - Dubletten zusammenführen
+   - bei Ops- und Betriebsbefunden auch die **Erwartung** prüfen, bevor du eine Fix-Richtung vorgibst: gegen Runbook, Betriebsdoku und den dokumentierten Ist-Zustand der Umgebung. Bei #178 erzeugte eine ungeprüfte Fix-Richtung zwei Folgebefunde in den Runden 2 und 3.
 
    Jeder Befund wird **bestätigt**, **verworfen** (mit Grund) oder als **Verdacht** markiert. Ein Verdacht geht nur mit dieser Kennzeichnung weiter. Zum bestätigten Befund gehören alle Geschwisterstellen derselben Klasse (Klasse statt Instanz).
 4. **Liste ausliefern** im Format unten. Die Werkzeuge ggf. erst per `ToolSearch` laden.
@@ -116,7 +126,19 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
    - **Die Antwort kommt als Nachricht.** Nicht pollen. Bei einem selbst gestarteten Fixer meldet dir die App sein Turn-Ende mit seiner letzten Nachricht; die ist seine Antwort, auch wenn er kein `SendMessage` geschickt hat. Ausnahme: Das Turn-Ende nach dem Vorbereitungsauftrag (Schritt 1, erkennbar daran, dass der Fixer noch auf die Liste wartet) ist keine Antwort, auch wenn die App es erst nach dem Versand der Liste zustellt: weiter warten. Jede andere Fertigmeldung nach dem Versand ist die Antwort; fehlt ihr die Tabelle, gilt der nächste Punkt. In die Zeile „Antwort an:“ schreibst du immer deine `local_…`-ID (`mcp__ccd_session_mgmt__get_session` mit `"self"`, Feld `sessionId`). Fehlt das Werkzeug (CLI), trägt die per `SendMessage` verschickte Liste deine Adresse im `from`.
    - **Fertig gemeldet, aber ohne Entscheidungstabelle:** den Fixer per `SendMessage` an seine `local_…`-ID nach der Tabelle fragen. Die Regel „ohne Tabelle alles angenommen“ (Schritt 5) gilt nur, wenn der User selbst fixt.
    - **Fixer nicht erreichbar, `start_session` fehlt (z. B. CLI) oder der Start wird verweigert:** die Liste als kopierbaren Block in den Chat, den Grund nennen und auf den User warten.
-5. **Re-Review nur des Deltas**, sofort auf dem neuen Head, ohne vorher auf die CI zu warten (die läuft parallel, Schritt 6). **Ein Reviewer:** `Agent(subagent_type: "sonnet-high", model: "sonnet")`, auch bei Code-PRs; fehlt der Typ, `general-purpose` mit `model: "sonnet"` und „Effort nicht garantiert“. Mutiert er, bekommt er einen Worktree wie in Schritt 2. Er bekommt `git diff <alter-head>..<neuer-head>`, die Befundliste der Vorrunde und die Entscheidungstabelle des Fixers. Enthält das Delta einen Merge der Basis (gestapelter PR), enthalten dieser Diff und `git log <alter-head>..<neuer-head>` auch die hereingemergten Basis-Commits. Dann bekommt er statt des Diffs nur die Commits des PRs (`git log --no-merges --first-parent <alter-head>..<neuer-head>`, je Commit `git show`). Fixt der User selbst und gibt es deshalb keine Tabelle, gelten alle Befunde als „angenommen“ (fehlt sie bei einem Fixer-Thread: Schritt 4). Er prüft:
+5. **Re-Review nur des Deltas**, sofort auf dem neuen Head, ohne vorher auf die CI zu warten (die läuft parallel, Schritt 6).
+
+   **Ohne Subagent prüfst du das Delta selbst**, mit denselben Prüffragen wie unten, wenn eins davon zutrifft:
+   - Doku- oder Ops-PR
+   - die Vorrunde hat nur P3 oder Prosa verschickt, und das Delta ändert keine Logik
+   - das Delta hat höchstens etwa 30 geänderte Zeilen ohne neue Verzweigung, Invariante oder Abfrage
+   - das Delta ist nur ein Merge der Basis, siehe nächster Absatz
+
+   Grund: In der Statistik vom 22.–24.10. fanden 30 Delta-Reviews (16 % der Subagent-Tokens, Median 122k) zusammen zwei betriebsrelevante Befunde, in ai_coworker_construction keinen. Ein selbst geprüftes Delta steht in der Runden-Tabelle der Statistik mit „selbst geprüft“.
+
+   **Merge der Basis im Delta** (gestapelter PR, Retarget, Konfliktauflösung): Die hereingemergten Basis-Commits sind schon geprüft. Neu ist nur die Auflösung, und die zeigt `git show --remerge-diff <merge-sha>`. Ist sie leer, gibt es am Merge nichts zu prüfen. Sonst gehört genau diese Ausgabe zum Delta, nicht der volle Diff. Nach diesem Muster liefen #176 R3 (231k), #177 R3 (126k), #60 R4 (96k) und m365 #16 (89k) mit vollem Diff und fanden keinen P1/P2.
+
+   **Sonst ein Reviewer:** `Agent(subagent_type: "sonnet-high", model: "sonnet")`, auch bei Code-PRs; fehlt der Typ, `general-purpose` mit `model: "sonnet"` und „Effort nicht garantiert“. Mutiert er, bekommt er einen Worktree wie in Schritt 2. Er bekommt `git diff <alter-head>..<neuer-head>`, die Befundliste der Vorrunde und die Entscheidungstabelle des Fixers. Enthält das Delta einen Merge der Basis (gestapelter PR), enthalten dieser Diff und `git log <alter-head>..<neuer-head>` auch die hereingemergten Basis-Commits. Dann bekommt er statt des Diffs nur die Commits des PRs (`git log --no-merges --first-parent <alter-head>..<neuer-head>`, je Commit `git show`) und die nicht leere `--remerge-diff`-Ausgabe der Merges. Fixt der User selbst und gibt es deshalb keine Tabelle, gelten alle Befunde als „angenommen“ (fehlt sie bei einem Fixer-Thread: Schritt 4). Er prüft:
    - Ist jeder Befund mit dem Urteil „angenommen“, „angenommen, anders umgesetzt“ oder „erledigt“ (mit genanntem Commit) wirklich behoben, inklusive Geschwisterstellen?
    - Hat der Fix neue Fehler erzeugt?
 
@@ -139,6 +161,7 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
      - Sind CI und Konfliktstatus in Ordnung, gilt der PR als **sauber**. Für „CI läuft noch“, „keine CI“ und `mergeable: UNKNOWN` gelten die Regeln unter „Keine Befunde, aber CI oder Konflikt nicht in Ordnung“. Die Befunde der letzten Liste stehen in der Abschlussmeldung als **gefixt, nicht nachgeprüft (P3)**.
      - Ist die CI rot oder der PR `CONFLICTING`, folgt doch eine Runde, mit diesem P1.
    - **Rundengrenze** (nur mit `runden=<n>`): Ist die letzte erlaubte Runde gelaufen und wurden ihre Befunde verschickt, wartest du auf die Fixer-Antwort. Dann holst du CI- und Konfliktstatus des neuen Heads und meldest „Rundengrenze erreicht“. Ein neues Review startest du nicht.
+   - **Heuristik-Schleife** (gilt immer): Trifft ein P2 dieselbe Heuristik, Fallunterscheidung oder fachliche Annahme, an der in einer früheren Runde dieses PRs schon ein P2 gefixt wurde (nur mit neuem Grenzfall), verschickst du ihn nicht. Er bekommt den Status **offen, User-Entscheidung** mit der Frage, ob die Heuristik bleibt, vereinfacht oder gestrichen wird. Die übrige Liste geht normal raus. Grund: Bei m365 #15 fanden die Runden 2 bis 4 je einen P2 an derselben Terminwahl, vier Opus-Runden lang, bis eine Entscheidung die Heuristik strich.
    - **Stillstand** (gilt immer, ohne `runden=<n>` die einzige Bremse; trifft er in der letzten erlaubten Runde zu, geht er der Rundengrenze vor). Er liegt vor, wenn eins davon zutrifft:
      - Derselbe Befund ist in zwei Runden hintereinander „nicht behoben“ oder „Ablehnung nicht überzeugend“, in beliebiger Kombination.
      - Die Zahl der zu verschickenden Befunde (nach der Versandregel, CI- und Konflikt-Befunde eingeschlossen, Verdachte nicht) ist in zwei Runden hintereinander nicht unter das Minimum aller früheren Runden dieses PRs gesunken, auch wenn es jedes Mal neue sind. Beispiele: 4 → 4 → 5 und 4 → 2 → 3 → 2 sind Stillstand in der dritten bzw. vierten Runde.
@@ -206,10 +229,11 @@ Letzte Zeile, wenn sauber, wörtlich: **„Bereit für deine Merge-Entscheidung.
 ## Agent-Statistik
 
 Jede Schleife führt eine, als Grundlage für spätere Token-Optimierung.
-- **Format:** Skill `auto-feature`, Abschnitt „Agent-Statistik“ (`~/.claude/skills/auto-feature/SKILL.md`). Spalte TF = PR-Nummer. Rollen: `Review R1 <Fokus>`, `Delta-Review R<r>`, `Repro` (falls du für eine Reproduktion einen Subagenten startest).
-- **Ablage:** `~/.claude/agent-stats/<repo>/<YYYY-MM-DD>-pr<n>-review.md`. Ein Koordinator über mehrere PRs schreibt keine eigene Datei, die Reviewer-Threads schreiben je PR.
-- **Kopf:** Repo, PR, Basis, die eigene Session-ID und die des Fixers. Die Tokens der Threads selbst stehen in keiner `<usage>`-Angabe und lassen sich später aus den Transkripten holen. Dazu je Runde Start (Reviewer gestartet) und Ende (Liste verschickt bzw. Ende festgestellt) als Uhrzeit.
-- **Auswertung** am Ende der Schleife je Rolle, wie im Format beschrieben.
+- **Format und Werkzeug:** Skill `auto-feature`, Abschnitt „Agent-Statistik“ (`~/.claude/skills/auto-feature/SKILL.md`), Zeilen per Skript `agent-stats.py add`. Spalte TF = PR-Nummer. Rollen: `Review R1 <Fokus>` mit Fokus `Korrektheit`, `Verträge`, `Tests` oder `sachlich` (bei „Code klein“ `Korrektheit+Verträge`), `Delta-Review R<r>`, `Repro` (falls du für eine Reproduktion einen Subagenten startest).
+- **Ablage:** `~/.claude/agent-stats/<repo>/<YYYY-MM-DD>-pr<n>-review.md`. Bei mehreren PRs schreiben die Reviewer-Threads je PR. Der Koordinator schreibt nur seine eigenen Thread-Tokens (`threads self`) nach `<YYYY-MM-DD>-<anlass>-koordinator.md`, bevor er Threads archiviert. Der Fixer führt eine eigene Datei nur, wenn er Subagenten startet.
+- **Kopf:** Repo, PR, Basis, die eigene Session-ID und die des Fixers. Dazu je Runde Start (Reviewer gestartet), Ende (Liste verschickt bzw. Ende festgestellt) und den Push des Fixers (Eingang seiner Antwort) als Uhrzeit.
+- **Thread-Tokens am Ende**, bevor jemand Threads archiviert oder löscht (danach sind die Transkripte weg): `agent-stats.py threads self <fixer-local-id> --subagents --md` in die Datei, Abschnitt „Threads“. Die Spalte `Input-Äquivalent` zeigt die tatsächlichen Kosten inklusive Cache-Reads, die in den `<usage>`-Werten der Subagenten fehlen.
+- **Auswertung** am Ende der Schleife: `agent-stats.py summarize <datei> --write`.
 
 ## Ausreden und was stimmt
 
@@ -230,4 +254,9 @@ Jede Schleife führt eine, als Grundlage für spätere Token-Optimierung.
 | „Ich prüfe die drei PRs in einem Rutsch und schicke alles zusammen“ | Dann wartet jeder PR auf den langsamsten Prüfer. Je PR eine eigene Schleife, jede Liste sofort raus. |
 | „Ein Doku-PR verdient dieselbe Sorgfalt wie Code“ | Sorgfalt heißt dort: sachliche Fehler finden. Mehrere Opus-Prüfer und Stilbefunde auf eine Notiz kosten Stunden ohne Gewinn. |
 | „Zur Sicherheit die ganze Suite pro Mutation“ | Eine Mutation betrifft wenige Testdateien. |
+| „Zur Sicherheit immer ein eigener Tests-Reviewer“ | Er war der langsamste Prüfer jeder Runde 1 und fand fast nur Dubletten (0,16 betriebsrelevante Befunde je 100k, Korrektheit 0,72). Eigener Fokus nur bei „Code mit Risiko“, sonst belegt jeder Reviewer seine eigenen Behauptungen per Mutation. |
+| „Der Fixer muss urteilen, also Opus“ | Die Befunde sind schon reproduziert, und sein Urteil prüft die nächste Runde. Auf Opus xhigh waren die Fixer der teuerste Thread-Typ der Schleife. |
+| „Das Merge-Delta schicke ich komplett an einen Reviewer“ | Die Basis-Commits sind geprüft. Neu ist nur die Auflösung, `git show --remerge-diff`. |
+| „Noch ein Grenzfall an derselben Heuristik, den fixen wir auch“ | Der zweite P2 an derselben Heuristik ist eine Produktfrage. Sie geht an den User, sonst wiederholt sich das wie bei m365 #15 über vier Runden. |
+| „Die Thread-Tokens hole ich später“ | Nach dem Archivieren oder Löschen sind die Transkripte weg. Vorher `agent-stats.py threads`. |
 | „Ohne `model` erbt der Reviewer schon Opus“ | Agent-Definitionen können ein eigenes Modell im Frontmatter setzen. Immer `model: "opus"` angeben. |
