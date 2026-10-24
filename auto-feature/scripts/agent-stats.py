@@ -11,6 +11,8 @@ Format und Spalten: Skill auto-feature, Abschnitt „Agent-Statistik“. Nur Sta
   agent-stats.py summarize-all [--root ~/.claude/agent-stats] [--seit 2026-10-22] [--nach-version]
   agent-stats.py stamp <datei> [--stand "generalskills@abc1234 (…)"] [--hinweis "…"] [--ersetzen]
   agent-stats.py threads <local_…|cli-uuid|self> … [--subagents] [--md]
+
+Umgebung: AGENT_STATS_GIT_TIMEOUT (Sekunden je git-Aufruf für den Skill-Stand, Standard 10).
 """
 import argparse
 import datetime as dt
@@ -140,6 +142,12 @@ def skills_stand():
     return f"{name}@{sha}{'-dirty' if dirty else ''} ({datum}, {'detached' if zweig == 'HEAD' else zweig})"
 
 
+def stand_kern(stand):
+    """Repo@SHA(-dirty) und Branch ohne Commit-Zeit: derselbe Stand mit und ohne Uhrzeit im Stempel."""
+    m = re.match(r"^(\S+@\S+) \([^,]*, (.*)\)$", stand)
+    return m.groups() if m else stand
+
+
 def staende(zeilen):
     """[(ab_zeile, stand)] aus dem Kopf, nach Zeilennummer sortiert; Hinweise hinter „ · “ bleiben weg."""
     out = []
@@ -240,7 +248,7 @@ def cmd_add(a):
         zeilen += ["## Agenten", "", zeile_md(SPALTEN), zeile_md(["---"] * len(SPALTEN)), neu]
     bisher = staende(zeilen)
     jetzt = stand or "unbekannt"
-    if (bisher and bisher[-1][1] != jetzt) or (not bisher and stand):
+    if (bisher and stand_kern(bisher[-1][1]) != stand_kern(jetzt)) or (not bisher and stand):
         # Wechsel mitten im Lauf (oder Datei aus der Zeit vor dem Stempel): ab dieser Zeile gilt der neue
         # Stand, auch „unbekannt“, damit die Zeile nicht unter dem vorigen Stand zählt.
         stand_einfuegen(zeilen, f"- Skills ab #{nr}: {jetzt}")
@@ -374,7 +382,8 @@ def cmd_summarize_all(a):
         for r in rows:
             je_stand.setdefault(r["stand"], []).append(r)
         # Nach Commit-Zeit im Stand sortieren, „unbekannt“ zuerst. Ältere Stempel haben nur das Datum;
-        # bei gleicher Minute entscheidet die SHA, also zufällig.
+        # bei gleicher Minute entscheidet die SHA, also zufällig; ein nur datierter Stempel steht vor jedem
+        # Stempel mit Uhrzeit desselben Tages.
         def datum(t):
             m = re.search(r"\((\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2})?)", t)
             return m.group(1) if m else ""

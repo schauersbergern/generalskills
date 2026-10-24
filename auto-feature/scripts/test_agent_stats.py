@@ -302,6 +302,34 @@ class SkillStand(Basis):
         self.assertEqual(len(open(log, encoding="utf-8").read().splitlines()), 1)
         self.assertEqual(self.kopf(), [])
 
+    def test_hang_bei_spaeterem_aufruf_liefert_keinen_teilstand(self):  # R2-1
+        _, skript, _ = self.checkout()
+        for befehl, aufrufe in (("remote", 5), ("status", 3)):
+            with self.subTest(befehl=befehl):
+                if os.path.exists(self.datei):
+                    os.remove(self.datei)
+                log = os.path.join(self.d, f"git-{befehl}.log")
+                env = self.fake_git(f'echo "$@" >> "{log}"; for a in "$@"; do [ "$a" = {befehl} ] && exec sleep 5; done')
+                env["AGENT_STATS_GIT_TIMEOUT"] = "1"
+                r = self.add_skript(skript, "Impl T1", env_extra=env)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(self.kopf(), [], self.text())  # kein Teilstand mit Ordnernamen als Repo
+                with open(log, encoding="utf-8") as f:
+                    gerufen = f.read().splitlines()
+                self.assertEqual(len(gerufen), aufrufe, gerufen)  # der hängende Aufruf war der letzte
+                self.assertIn(befehl, gerufen[-1])
+
+    def test_gleicher_stand_mit_und_ohne_uhrzeit_ist_kein_wechsel(self):  # R2-2
+        alt = "generalskills@aaaaaaa (2026-10-24, main)"
+        neu = "generalskills@aaaaaaa (2026-10-24 10:00, main)"
+        with open(self.datei, "w", encoding="utf-8") as f:
+            f.write(f"# Alt\n\n- Skills: {alt} · nachgetragen\n\n## Agenten\n\n")
+        self.add_mit(neu)
+        self.assertEqual(self.kopf(), [f"- Skills: {alt} · nachgetragen"])
+        self.add_mit("generalskills@aaaaaaa-dirty (2026-10-24 10:00, main)")  # -dirty und Branch zählen
+        self.add_mit("generalskills@aaaaaaa-dirty (2026-10-24 10:00, andere)")
+        self.assertEqual(len(self.kopf()), 3, self.text())
+
     def test_sortierung_nach_commit_zeit_nicht_alphabetisch(self):  # R1-3
         staende = ["generalskills@9999999 (2026-10-20, main)",            # älter, aber alphabetisch zuletzt
                    "generalskills@1111111 (2026-10-24 14:08, main)",
