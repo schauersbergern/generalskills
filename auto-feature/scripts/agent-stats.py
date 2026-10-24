@@ -396,7 +396,7 @@ def main():
 
     s = sub.add_parser("summarize", help="Auswertung je Rolle einer Datei")
     s.add_argument("datei")
-    s.add_argument("--write", action="store_true", help="Abschnitt „Auswertung je Rolle“ ersetzen")
+    s.add_argument("--write", action="store_true", help="eigenen markierten Block schreiben bzw. ersetzen; ein alter, unmarkierter Abschnitt bleibt stehen")
     s.set_defaults(fn=cmd_summarize)
 
     s = sub.add_parser("summarize-all", help="Auswertung über alle Dateien")
