@@ -8,8 +8,11 @@ Format und Spalten: Skill auto-feature, Abschnitt „Agent-Statistik“. Nur Sta
       [--betrieb "1: Stichwort"] [--fix-runden 1] [--status fertig] [--fortsetzung-von 3] \
       [--kopf "Repo: …" --kopf "PR: …"]
   agent-stats.py summarize <datei> [--write]
-  agent-stats.py summarize-all [--root ~/.claude/agent-stats] [--seit 2026-10-22]
+  agent-stats.py summarize-all [--root ~/.claude/agent-stats] [--seit 2026-10-22] [--nach-version]
+  agent-stats.py stamp <datei> [--stand "generalskills@abc1234 (…)"] [--hinweis "…"] [--ersetzen]
   agent-stats.py threads <local_…|cli-uuid|self> … [--subagents] [--md]
+
+Umgebung: AGENT_STATS_GIT_TIMEOUT (Sekunden je git-Aufruf für den Skill-Stand, Standard 10).
 """
 import argparse
 import datetime as dt
@@ -19,6 +22,7 @@ import os
 import re
 import stat
 import statistics
+import subprocess
 import sys
 import tempfile
 
@@ -36,6 +40,8 @@ PROJECTS = os.path.expanduser("~/.claude/projects")
 
 
 FORTS = re.compile(r"\(Forts\. #(\d+)\)")
+# Kopfzeilen des Skill-Stands: „- Skills: …“ gilt ab der ersten Zeile, „- Skills ab #n: …“ ab Zeile n.
+STAND = re.compile(r"^- Skills(?: ab #(\d+))?: (.+)$")
 
 
 def zellen(zeile):
@@ -93,6 +99,97 @@ def zeile_md(werte):
     return "| " + " | ".join(str(w).replace("|", "\\|") for w in werte) + " |"
 
 
+# ---------- Skill-Stand ----------
+
+class GitAusfall(Exception):
+    """git fehlt oder hängt: weitere Aufrufe lohnen nicht."""
+
+
+def git(ordner, *args):
+    """Ausgabe des Aufrufs, None bei Exit != 0; wirft GitAusfall, wenn git fehlt oder hängt."""
+    try:
+        timeout = float(os.environ.get("AGENT_STATS_GIT_TIMEOUT", 10))
+        r = subprocess.run(["git", "-C", ordner, *args], capture_output=True, text=True, timeout=timeout)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+        raise GitAusfall(str(e)) from e
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def skills_stand():
+    """Stand des Checkouts, aus dem dieses Skript läuft (Symlinks aufgelöst), z. B.
+    „generalskills@99dafea (2026-10-24 14:08, main)“; uncommittete Änderungen an versionierten Dateien
+    als „-dirty“ (unversionierte zählen nicht). Scheitert ein dafür nötiger git-Aufruf, ist der ganze
+    Stand unbekannt (None), nie ein Teilstand; nach dem ersten Ausfall (git fehlt, Timeout) folgt kein
+    weiterer Aufruf."""
+    if os.environ.get("AGENT_STATS_SKILLS_STAND"):  # Tests und Sonderfälle
+        return os.environ["AGENT_STATS_SKILLS_STAND"]
+    ordner = os.path.dirname(os.path.realpath(__file__))
+    try:
+        wurzel = git(ordner, "rev-parse", "--show-toplevel")
+        log = git(wurzel, "log", "-1", "--format=%h %cd", "--date=format-local:%Y-%m-%d %H:%M") if wurzel else None
+        if not log:
+            return None
+        dirty = git(wurzel, "status", "--porcelain", "--untracked-files=no")
+        zweig = git(wurzel, "rev-parse", "--abbrev-ref", "HEAD")
+        if dirty is None or not zweig:
+            return None
+        url = git(wurzel, "remote", "get-url", "origin") or wurzel  # ohne origin: Ordnername
+    except GitAusfall:
+        return None
+    sha, datum = log.split(" ", 1)
+    name = os.path.basename(url.rstrip("/"))
+    name = name[:-4] if name.endswith(".git") else name
+    return f"{name}@{sha}{'-dirty' if dirty else ''} ({datum}, {'detached' if zweig == 'HEAD' else zweig})"
+
+
+def stand_kern(stand):
+    """Repo@SHA(-dirty) und Branch ohne Commit-Zeit: derselbe Stand mit und ohne Uhrzeit im Stempel."""
+    m = re.match(r"^(\S+@\S+) \([^,]*, (.*)\)$", stand)
+    return m.groups() if m else stand
+
+
+def staende(zeilen):
+    """[(ab_zeile, stand)] aus dem Kopf, nach Zeilennummer sortiert; Hinweise hinter „ · “ bleiben weg."""
+    out = []
+    for z in zeilen:
+        m = STAND.match(z.strip())
+        if m:
+            out.append((int(m.group(1) or 1), m.group(2).split(" · ")[0].strip()))
+    return sorted(out, key=lambda x: x[0])
+
+
+def listenende(zeilen, i):
+    """Index der letzten Zeile des Listenblocks, der in Zeile i beginnt (samt eingerückter Unterpunkte)."""
+    while i + 1 < len(zeilen) and (zeilen[i + 1].startswith("- ")
+                                   or (zeilen[i + 1][:1] in (" ", "\t") and zeilen[i + 1].strip())):
+        i += 1
+    return i
+
+
+def stand_einfuegen(zeilen, text):
+    """Stand-Zeile hinter die letzte vorhandene, sonst ans Ende der ersten Kopf-Liste (die erste
+    „- “-Liste vor der ersten Überschrift oder Tabelle). Gibt es keine, steht sie mit Leerzeile
+    als eigener Kopf vor dem Dateiinhalt, hinter einem Titel („# …“) in Zeile 0."""
+    idx = [i for i, z in enumerate(zeilen) if STAND.match(z.strip())]
+    if idx:
+        pos = listenende(zeilen, idx[-1]) + 1
+    else:
+        titel = 1 if zeilen and zeilen[0].startswith("# ") else 0
+        start = next((i for i in range(titel, len(zeilen))
+                      if zeilen[i].startswith(("#", "|")) or zeilen[i].startswith("- ")), None)
+        if start is not None and zeilen[start].startswith("- "):
+            pos = listenende(zeilen, start) + 1
+        else:
+            pos = titel
+            while pos < len(zeilen) and not zeilen[pos].strip():
+                pos += 1
+            zeilen[pos:pos] = ["", text, ""] if titel and pos == titel else [text, ""]
+            return
+    zeilen.insert(pos, text)
+    if pos + 1 < len(zeilen) and zeilen[pos + 1].strip() and not zeilen[pos + 1].startswith(("- ", " ", "\t")):
+        zeilen.insert(pos + 1, "")  # Fließtext nicht an die Listenzeile kleben
+
+
 # ---------- add ----------
 
 def cmd_add(a):
@@ -127,6 +224,10 @@ def cmd_add(a):
             tokens, delta = f"{a.tokens} (kum.)", a.tokens - werte[-1]
 
     nr = max([int(z[0]) for _, z in daten], default=0) + 1
+    stand = skills_stand()
+    if stand is None:
+        print("Skill-Stand nicht ermittelbar (kein git-Checkout, git fehlt oder ein git-Aufruf scheiterte).",
+              file=sys.stderr)
     rolle = a.rolle + (f" (Forts. #{erst})" if erst is not None else "")
     neu = zeile_md([nr, a.zeit or dt.datetime.now().strftime("%Y-%m-%d %H:%M"), a.tf, rolle, a.typ,
                     modell, effort or "n/a", tokens, delta,
@@ -140,10 +241,18 @@ def cmd_add(a):
     else:
         if not zeilen:
             zeilen = [f"# Agent-Statistik · {os.path.splitext(os.path.basename(pfad))[0]}", ""]
-            zeilen += [f"- {k}" for k in a.kopf] + ([""] if a.kopf else [])
+            kopf = [f"- {k}" for k in a.kopf] + ([f"- Skills: {stand}"] if stand else [])
+            zeilen += kopf + ([""] if kopf else [])
         else:
             zeilen.append("")
         zeilen += ["## Agenten", "", zeile_md(SPALTEN), zeile_md(["---"] * len(SPALTEN)), neu]
+    bisher = staende(zeilen)
+    jetzt = stand or "unbekannt"
+    if (bisher and stand_kern(bisher[-1][1]) != stand_kern(jetzt)) or (not bisher and stand):
+        # Wechsel mitten im Lauf (oder Datei aus der Zeit vor dem Stempel): ab dieser Zeile gilt der neue
+        # Stand, auch „unbekannt“, damit die Zeile nicht unter dem vorigen Stand zählt.
+        stand_einfuegen(zeilen, f"- Skills ab #{nr}: {jetzt}")
+        print(f"Skill-Stand ab #{nr}: {jetzt}", file=sys.stderr)
     schreibe(pfad, zeilen)
     print(f"#{nr} eingetragen: {rolle} · {a.typ} · Δ {delta}")
 
@@ -172,7 +281,7 @@ def lies_zeilen(pfad, uebersprungen=None):
                 continue
             bwk = re.search(r"(\d+)/(\d+)/(\d+)", c[11])
             betr = re.match(r"\s*(\d+)", c[13])  # „–“ = nicht erhoben
-            out.append({"gruppe": gruppe(c[3]), "typ": c[4], "delta": delta,
+            out.append({"nr": int(c[0]), "gruppe": gruppe(c[3]), "typ": c[4], "delta": delta,
                         "ms": zahl(c[9]), "bwk": tuple(map(int, bwk.groups())) if bwk else None,
                         "betr": int(betr.group(1)) if betr else None})
     return out
@@ -248,6 +357,10 @@ def cmd_summarize_all(a):
         uebersprungen = []
         r = lies_zeilen(pfad, uebersprungen)
         weg += len(uebersprungen)
+        with open(pfad, encoding="utf-8") as f:
+            st = staende(f.read().splitlines())
+        for x in r:
+            x["stand"] = next((t for ab, t in reversed(st) if x["nr"] >= ab), "unbekannt")
         if r:
             dateien += 1
             repo = os.path.relpath(pfad, root).split(os.sep)[0]
@@ -264,10 +377,43 @@ def cmd_summarize_all(a):
         sys.exit("Keine auswertbaren Zeilen gefunden.")
     gesamt = f"{sum(r['delta'] for r in rows):,}".replace(",", ".")
     print(f"{dateien} Dateien, {len(rows)} Läufe, Σ Δ tokens {gesamt}\n")
-    print("\n".join(auswertung(rows)))
+    if a.nach_version:
+        je_stand = {}
+        for r in rows:
+            je_stand.setdefault(r["stand"], []).append(r)
+        # Nach Commit-Zeit im Stand sortieren, „unbekannt“ zuerst. Ältere Stempel haben nur das Datum;
+        # bei gleicher Minute entscheidet die SHA, also zufällig; ein nur datierter Stempel steht vor jedem
+        # Stempel mit Uhrzeit desselben Tages.
+        def datum(t):
+            m = re.search(r"\((\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2})?)", t)
+            return m.group(1) if m else ""
+        for t in sorted(je_stand, key=lambda t: (t != "unbekannt", datum(t), t)):
+            print(f"### Skills: {t} ({len(je_stand[t])} Läufe)\n")
+            print("\n".join(auswertung(je_stand[t])) + "\n")
+    else:
+        print("\n".join(auswertung(rows)))
     print("\n| Repo | Σ Δ tokens |\n| --- | --- |")
     for repo, s in sorted(je_repo.items(), key=lambda kv: -kv[1]):
         print(f"| {repo} | {s:,} |".replace(",", "."))
+
+
+def cmd_stamp(a):
+    pfad = os.path.expanduser(a.datei)
+    if not os.path.isfile(pfad):
+        sys.exit(f"{pfad}: keine Datei.")
+    zeilen = open(pfad, encoding="utf-8").read().splitlines()
+    stand = a.stand or skills_stand()
+    if not stand:
+        sys.exit("Skill-Stand unbekannt: --stand angeben.")
+    text = f"- Skills: {stand}" + (f" · {a.hinweis}" if a.hinweis else "")
+    vorhanden = [i for i, z in enumerate(zeilen) if STAND.match(z.strip())]
+    if vorhanden and not a.ersetzen:
+        sys.exit(f"{pfad}: hat schon einen Skill-Stand (Zeile {vorhanden[0] + 1}); --ersetzen zum Überschreiben.")
+    for i in reversed(vorhanden):
+        del zeilen[i]
+    stand_einfuegen(zeilen, text)
+    schreibe(pfad, zeilen)
+    print(f"{pfad}: {text}")
 
 
 # ---------- threads ----------
@@ -402,7 +548,15 @@ def main():
     s = sub.add_parser("summarize-all", help="Auswertung über alle Dateien")
     s.add_argument("--root", default="~/.claude/agent-stats")
     s.add_argument("--seit", help="nur Dateien ab diesem Datum (Dateiname YYYY-MM-DD-…)")
+    s.add_argument("--nach-version", action="store_true", help="je Skill-Stand eine eigene Auswertung")
     s.set_defaults(fn=cmd_summarize_all)
+
+    s = sub.add_parser("stamp", help="Skill-Stand in den Kopf schreiben (Nachtrag, Handdateien)")
+    s.add_argument("datei")
+    s.add_argument("--stand", help="Stand-Text; ohne Angabe der aktuelle Checkout")
+    s.add_argument("--hinweis", help="Zusatz hinter „ · “, z. B. „nachgetragen aus dem Reflog“")
+    s.add_argument("--ersetzen", action="store_true", help="vorhandene Stand-Zeilen ersetzen")
+    s.set_defaults(fn=cmd_stamp)
 
     s = sub.add_parser("threads", help="Tokens von Threads aus ihren Transkripten")
     s.add_argument("ids", nargs="+", help="local_…-ID der Desktop-App, CLI-Session-UUID oder self")
