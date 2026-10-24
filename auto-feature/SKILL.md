@@ -217,7 +217,7 @@ Letzte Zeile: „Stopp. Bitte prüfen; danach `/pr-review-loop <PR>` je PR.“
   - **Summen, Mediane und Ausbeuten rechnen mit `Δ tokens`.**
 - **betriebsrelevant:** Anzahl der angenommenen Befunde, die im Betrieb sichtbar geworden wären (Fehler oder Absturz, Datenverlust, Hänger, falsche Anzeige, Sicherheits- oder Scope-Lücke), Format `n: Stichwort; Stichwort`. Reine Stil-, Test-, Doku- und Benennungsbefunde zählen nicht. Gilt für Reviews und Härtungsläufe (gefundene Lücken je Härtungs-Subagent), sonst „–“.
 - **Auswertung je Rolle:** Läufe, Summe und Median `Δ tokens`, Dauer-Median, B/W/K, Blocker+Wichtig je 100k, betriebsrelevant je 100k. `sonnet-high` und `sonnet-xhigh` getrennt ausweisen, damit sich die Effort-Regel überprüfen lässt (`summarize` trennt nach Agent-Typ).
-- **Stand 22.–24.10.2026** (`summarize-all`, 116 Läufe im Standardformat): Die Härtung brachte mit 1,05 betriebsrelevanten Befunden je 100k die höchste Ausbeute, vor Task-Reviews (0,81) und PR-Reviews Runde 1 (0,16–0,72 je Fokus). Frei werdende Tokens gehören eher in E2 als in zusätzliche Review-Runden.
+- **Stand 24.10.2026** (`summarize-all --seit 2026-10-22`, 120 Läufe im Standardformat, Raten nur über Läufe mit erhobenem Wert): Unter den Rollen mit mehreren Läufen brachte die Härtung mit 1,06 betriebsrelevanten Befunden je 100k die höchste Ausbeute, vor Task-Reviews (0,81) und PR-Reviews Runde 1 (0,29–0,80 je Fokus). Frei werdende Tokens gehören eher in E2 als in zusätzliche Review-Runden.
 
 ## Ausreden und was stimmt
 

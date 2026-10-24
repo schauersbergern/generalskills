@@ -159,13 +159,16 @@ def gruppe(rolle):
     return r.split()[0] if r else "?"
 
 
-def lies_zeilen(pfad):
+def lies_zeilen(pfad, uebersprungen=None):
+    """Datenzeilen mit Δ als Zahl; die übrigen landen als „#n“ in uebersprungen."""
     out = []
     for z in open(pfad, encoding="utf-8"):
         if ist_datenzeile(z):
             c = zellen(z)
             delta = zahl(c[8])
             if delta is None:
+                if uebersprungen is not None:
+                    uebersprungen.append(f"#{c[0]} (Δ {c[8]})")
                 continue
             bwk = re.search(r"(\d+)/(\d+)/(\d+)", c[11])
             betr = re.match(r"\s*(\d+)", c[13])  # „–“ = nicht erhoben
@@ -179,27 +182,38 @@ def auswertung(rows):
     gruppen = {}
     for r in rows:
         gruppen.setdefault((r["gruppe"], r["typ"]), []).append(r)
+    # Raten je 100k nur über Läufe mit erhobenem Wert („–“ = nicht erhoben, nicht 0); dahinter
+    # steht, wie viele Läufe der Gruppe erhoben sind.
     kopf = ["Rolle", "Agent-Typ", "Läufe", "Σ Δ tokens", "Median Δ tokens", "Dauer-Median",
-            "B/W/K", "B+W je 100k", "betriebsrelevant je 100k"]
+            "B/W/K", "B+W je 100k (erhoben)", "betriebsrelevant je 100k (erhoben)"]
     out = [zeile_md(kopf), zeile_md(["---"] * len(kopf))]
     for (g, t), v in sorted(gruppen.items(), key=lambda kv: -sum(r["delta"] for r in kv[1])):
         s = sum(r["delta"] for r in v)
         ms = [r["ms"] for r in v if r["ms"]]
-        bwk = [r["bwk"] for r in v if r["bwk"]]
-        b, w, k = (sum(x[i] for x in bwk) for i in range(3)) if bwk else (None, None, None)
-        betr = [r["betr"] for r in v if r["betr"] is not None]
-        je = lambda n: f"{100000 * n / s:.2f}".replace(".", ",") if s and n is not None else "–"
+        mit_bwk = [r for r in v if r["bwk"]]
+        b, w, k = (sum(r["bwk"][i] for r in mit_bwk) for i in range(3))
+        mit_betr = [r for r in v if r["betr"] is not None]
+
+        def je(n, erhoben):
+            nenner = sum(r["delta"] for r in erhoben)
+            if not nenner:
+                return "–"
+            return f"{100000 * n / nenner:.2f}".replace(".", ",") + f" ({len(erhoben)} von {len(v)})"
+
         out.append(zeile_md([g, t, len(v), f"{s:,}".replace(",", "."),
                              f"{int(statistics.median(r['delta'] for r in v)):,}".replace(",", "."),
                              f"{int(statistics.median(ms) / 1000)} s" if ms else "n/a",
-                             f"{b}/{w}/{k}" if bwk else "–",
-                             je(b + w) if bwk else "–", je(sum(betr)) if betr else "–"]))
+                             f"{b}/{w}/{k}" if mit_bwk else "–",
+                             je(b + w, mit_bwk), je(sum(r["betr"] for r in mit_betr), mit_betr)]))
     return out
 
 
 def cmd_summarize(a):
     pfad = os.path.expanduser(a.datei)
-    rows = lies_zeilen(pfad)
+    weg = []
+    rows = lies_zeilen(pfad, weg)
+    if weg:
+        print(f"Nicht ausgewertet: {', '.join(weg)}", file=sys.stderr)
     if not rows:
         sys.exit("Keine auswertbaren Zeilen (Spalten wie im Format, Δ tokens als Zahl).")
     tabelle = auswertung(rows)
@@ -222,22 +236,30 @@ def cmd_summarize(a):
 
 def cmd_summarize_all(a):
     root = os.path.expanduser(a.root)
-    rows, je_repo, dateien = [], {}, 0
+    rows, je_repo, dateien, ohne, weg = [], {}, 0, [], 0
     for pfad in sorted(glob.glob(os.path.join(root, "**", "*.md"), recursive=True)):
         name = os.path.basename(pfad)
         if a.seit and name[:10] < a.seit:
             continue
-        r = lies_zeilen(pfad)
+        uebersprungen = []
+        r = lies_zeilen(pfad, uebersprungen)
+        weg += len(uebersprungen)
         if r:
             dateien += 1
             repo = os.path.relpath(pfad, root).split(os.sep)[0]
             je_repo[repo] = je_repo.get(repo, 0) + sum(x["delta"] for x in r)
             rows += r
+        else:
+            ohne.append(os.path.relpath(pfad, root))
+    if ohne:
+        print(f"Ohne auswertbare Zeilen (nicht im Standardformat?), {len(ohne)} Dateien: {', '.join(ohne)}",
+              file=sys.stderr)
+    if weg:
+        print(f"{weg} Datenzeilen ohne Δ als Zahl nicht ausgewertet.", file=sys.stderr)
     if not rows:
         sys.exit("Keine auswertbaren Zeilen gefunden.")
     gesamt = f"{sum(r['delta'] for r in rows):,}".replace(",", ".")
-    print(f"{dateien} Dateien, {len(rows)} Läufe, Σ Δ tokens {gesamt}")
-    print("Nicht im Standardformat geführte Tabellen fehlen hier.\n")
+    print(f"{dateien} Dateien, {len(rows)} Läufe, Σ Δ tokens {gesamt}\n")
     print("\n".join(auswertung(rows)))
     print("\n| Repo | Σ Δ tokens |\n| --- | --- |")
     for repo, s in sorted(je_repo.items(), key=lambda kv: -kv[1]):

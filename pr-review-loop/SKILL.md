@@ -68,7 +68,7 @@ Die Art legst du in Schritt 1 anhand der geänderten Dateien fest und nennst sie
 - **Gemischte PRs gelten als Code** (Stufe nach dem Code-Anteil).
 - **Doku- und Ops-PRs nach Runde 1:** Die folgenden Runden prüfen nur noch, ob die gemeldeten Fehler behoben sind. Neue Befunde gibt es dort nur, wenn ein Fix selbst etwas falsch macht.
 - **Agent-Statistiken und Lauf-Protokolle** (`agent-stats`, `docs/superpowers/runs/`) prüft niemand. Liegen sie in einem PR, nimmst du sie aus dem Review (`git diff <basis>...<head> -- . ':!<pfad>'`). Ein PR, der nur aus ihnen besteht, ist ohne Reviewer und ohne Fixer „sauber“, sobald CI und Konfliktstatus stimmen.
-- **Herkunft der Stufen** (Statistik 22.–24.10.2026, 127 Läufe): Der eigene Tests-Fokus kostete 13 % aller Subagent-Tokens, war mit 16 min Median der langsamste Prüfer jeder Runde 1 und brachte 0,16 betriebsrelevante Befunde je 100k (Korrektheit 0,72, Verträge 0,54; seit dem 23.10. 0,05 gegen 0,55 und 0,42), fast nur Dubletten der anderen Fokusse. Bei kleinen PRs fanden Korrektheit und Verträge mehrfach denselben Befund (#21 Einzeilen-Fix, #60, #18).
+- **Herkunft der Stufen** (`agent-stats.py summarize-all --seit 2026-10-22`, Stand 24.10.2026, 120 Läufe im Standardformat; Raten nur über Läufe mit erhobenem Wert): Der eigene Tests-Fokus kostete rund 11 % der Subagent-Tokens, war mit 14 min Median der langsamste Fokus der Runde 1 und brachte 0,29 betriebsrelevante Befunde je 100k (Korrektheit 0,80, Verträge 0,69; seit dem 23.10. 0,08 gegen 0,64 und 0,48). Blocker und Wichtige fand er etwa gleich viele wie die anderen (0,99 je 100k, Korrektheit 0,94, Verträge 0,80), überwiegend zur Testqualität. Bei kleinen PRs fanden Korrektheit und Verträge mehrfach denselben Befund (#21 Einzeilen-Fix, #60, #18).
 
 ## Mehrere PRs
 
@@ -134,7 +134,7 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
    - das Delta hat höchstens etwa 30 geänderte Zeilen ohne neue Verzweigung, Invariante oder Abfrage
    - das Delta ist nur ein Merge der Basis, siehe nächster Absatz
 
-   Grund: In der Statistik vom 22.–24.10. fanden 30 Delta-Reviews (16 % der Subagent-Tokens, Median 122k) zusammen zwei betriebsrelevante Befunde, in ai_coworker_construction keinen. Ein selbst geprüftes Delta steht in der Runden-Tabelle der Statistik mit „selbst geprüft“.
+   Grund: In der Statistik ab 22.10. (Stand 24.10.) fanden 31 Delta-Reviews (17 % der Subagent-Tokens, Median 124k) zusammen zwei betriebsrelevante Befunde, in ai_coworker_construction keinen. Erhoben ist der Wert nur bei 12 der 31, die Zahl ist also eine Untergrenze. Ein selbst geprüftes Delta steht in der Runden-Tabelle der Statistik mit „selbst geprüft“.
 
    **Merge der Basis im Delta** (gestapelter PR, Retarget, Konfliktauflösung): Die hereingemergten Basis-Commits sind schon geprüft. Neu ist nur die Auflösung, und die zeigt `git show --remerge-diff <merge-sha>`. Ist sie leer, gibt es am Merge nichts zu prüfen. Sonst gehört genau diese Ausgabe zum Delta, nicht der volle Diff. Nach diesem Muster liefen #176 R3 (231k), #177 R3 (126k), #60 R4 (96k) und m365 #16 (89k) mit vollem Diff und fanden keinen P1/P2.
 
@@ -254,7 +254,7 @@ Jede Schleife führt eine, als Grundlage für spätere Token-Optimierung.
 | „Ich prüfe die drei PRs in einem Rutsch und schicke alles zusammen“ | Dann wartet jeder PR auf den langsamsten Prüfer. Je PR eine eigene Schleife, jede Liste sofort raus. |
 | „Ein Doku-PR verdient dieselbe Sorgfalt wie Code“ | Sorgfalt heißt dort: sachliche Fehler finden. Mehrere Opus-Prüfer und Stilbefunde auf eine Notiz kosten Stunden ohne Gewinn. |
 | „Zur Sicherheit die ganze Suite pro Mutation“ | Eine Mutation betrifft wenige Testdateien. |
-| „Zur Sicherheit immer ein eigener Tests-Reviewer“ | Er war der langsamste Prüfer jeder Runde 1 und fand fast nur Dubletten (0,16 betriebsrelevante Befunde je 100k, Korrektheit 0,72). Eigener Fokus nur bei „Code mit Risiko“, sonst belegt jeder Reviewer seine eigenen Behauptungen per Mutation. |
+| „Zur Sicherheit immer ein eigener Tests-Reviewer“ | Er war im Median der langsamste Fokus der Runde 1 und brachte die wenigsten betriebsrelevanten Befunde (0,29 je 100k, Korrektheit 0,80). Eigener Fokus nur bei „Code mit Risiko“, sonst belegt jeder Reviewer seine eigenen Behauptungen per Mutation. |
 | „Der Fixer muss urteilen, also Opus“ | Die Befunde sind schon reproduziert, und sein Urteil prüft die nächste Runde. Auf Opus xhigh waren die Fixer der teuerste Thread-Typ der Schleife. |
 | „Das Merge-Delta schicke ich komplett an einen Reviewer“ | Die Basis-Commits sind geprüft. Neu ist nur die Auflösung, `git show --remerge-diff`. |
 | „Noch ein Grenzfall an derselben Heuristik, den fixen wir auch“ | Der zweite P2 an derselben Heuristik ist eine Produktfrage. Sie geht an den User, sonst wiederholt sich das wie bei m365 #15 über vier Runden. |
