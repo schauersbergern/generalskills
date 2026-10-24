@@ -230,11 +230,11 @@ Letzte Zeile, wenn sauber, wörtlich: **„Bereit für deine Merge-Entscheidung.
 ## Agent-Statistik
 
 Jede Schleife führt eine, als Grundlage für spätere Token-Optimierung.
-- **Format und Werkzeug:** Skill `auto-feature`, Abschnitt „Agent-Statistik“ (`~/.claude/skills/auto-feature/SKILL.md`), Zeilen per Skript `agent-stats.py add`. Spalte TF = PR-Nummer. Rollen: `Review R1 <Fokus>` mit Fokus `Korrektheit`, `Verträge`, `Tests` oder `sachlich` (bei „Code klein“ `Korrektheit+Verträge`), `Delta-Review R<r>`, `Repro` (falls du für eine Reproduktion einen Subagenten startest).
+- **Format und Werkzeug:** Skill `auto-feature`, Abschnitt „Agent-Statistik“ (`~/.claude/skills/auto-feature/SKILL.md`), Zeilen per `python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py add`, auch die übrigen Aufrufe mit vollem Pfad. Spalte TF = PR-Nummer. Rollen: `Review R1 <Fokus>` mit Fokus `Korrektheit`, `Verträge`, `Tests` oder `sachlich` (bei „Code klein“ `Korrektheit+Verträge`), `Delta-Review R<r>`, `Repro` (falls du für eine Reproduktion einen Subagenten startest).
 - **Ablage:** `~/.claude/agent-stats/<repo>/<YYYY-MM-DD>-pr<n>-review.md`. Bei mehreren PRs schreiben die Reviewer-Threads je PR. Der Koordinator schreibt nur seine eigenen Thread-Tokens (`threads self`) nach `<YYYY-MM-DD>-<anlass>-koordinator.md`, bevor er Threads archiviert. Der Fixer führt eine eigene Datei nur, wenn er Subagenten startet.
 - **Kopf:** Repo, PR, Basis, die eigene Session-ID und die des Fixers. Dazu je Runde Start (Reviewer gestartet), Ende (Liste verschickt bzw. Ende festgestellt) und den Push des Fixers (Eingang seiner Antwort) als Uhrzeit.
-- **Thread-Tokens am Ende**, bevor jemand Threads archiviert oder löscht (danach können die Transkripte fehlen, etwa nach Löschen oder Worktree-Aufräumen): `agent-stats.py threads self <fixer-local-id> --subagents --md` in die Datei, Abschnitt „Threads“. Die Spalte `Input-Äquivalent` rechnet alle Token-Arten auf den Input-Preis des jeweiligen Modells um (Cache-Write 5 min ×1,25, 1 h ×2, Cache-Read ×0,1, Output ×5). Die Summen stehen je Modell und werden nicht addiert.
-- **Auswertung** am Ende der Schleife: `agent-stats.py summarize <datei> --write`.
+- **Thread-Tokens am Ende**, bevor jemand Threads archiviert oder löscht (danach können die Transkripte fehlen, etwa nach Löschen oder Worktree-Aufräumen): `python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py threads self <fixer-local-id> --subagents --md` in die Datei, Abschnitt „Threads“. Die Spalte `Input-Äquivalent` rechnet alle Token-Arten auf den Input-Preis des jeweiligen Modells um (Cache-Write 5 min ×1,25, 1 h ×2, Cache-Read ×0,1, Output ×5). Die Summen stehen je Modell und werden nicht addiert.
+- **Auswertung** am Ende der Schleife: `python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py summarize <datei> --write`.
 
 ## Ausreden und was stimmt
 

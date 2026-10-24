@@ -72,9 +72,9 @@ Die teuersten Fixer-Threads von Haas Runde 2 (#174, #176) kamen auf 150 bzw. 192
 
 ## Agent-Statistik
 
-Startest du Subagenten (Umsetzung, Prüfung), führst du eine Agent-Statistik, als Grundlage für spätere Token-Optimierung. Format: Skill `auto-feature`, Abschnitt „Agent-Statistik“ (`~/.claude/skills/auto-feature/SKILL.md`), Zeilen per Skript `agent-stats.py add`, Spalte TF = PR-Nummer, Rolle z. B. `Fix R<r>`. Ablage `~/.claude/agent-stats/<repo>/<YYYY-MM-DD>-pr<n>-fix.md`, Kopf mit Repo, PR und der eigenen Session-ID.
+Startest du Subagenten (Umsetzung, Prüfung), führst du eine Agent-Statistik, als Grundlage für spätere Token-Optimierung. Format: Skill `auto-feature`, Abschnitt „Agent-Statistik“ (`~/.claude/skills/auto-feature/SKILL.md`), Zeilen per `python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py add`, Spalte TF = PR-Nummer, Rolle z. B. `Fix R<r>`. Ablage `~/.claude/agent-stats/<repo>/<YYYY-MM-DD>-pr<n>-fix.md`, Kopf mit Repo, PR und der eigenen Session-ID.
 
-Ohne Subagenten führst du keine Datei. Die Rundenzeiten (Eingang der Liste, Push) hält der Reviewer-Thread fest, und deine Thread-Tokens holt er am Ende per `agent-stats.py threads` aus deinem Transkript. Fixt du ohne Reviewer-Thread (Liste vom User), genügt am Ende `agent-stats.py threads self --md` in `<YYYY-MM-DD>-pr<n>-fix.md`.
+Ohne Subagenten führst du keine Agenten-Tabelle. Die Rundenzeiten (Eingang der Liste, Push) hält der Reviewer-Thread fest, und deine Thread-Tokens holt er am Ende per `agent-stats.py threads` aus deinem Transkript. Fixt du ohne Reviewer-Thread (Liste vom User), schreibst du am Ende nur die Threads-Zeile: `python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py threads self --md >> ~/.claude/agent-stats/<repo>/<YYYY-MM-DD>-pr<n>-fix.md`.
 
 ## Abschlusstabelle
 
