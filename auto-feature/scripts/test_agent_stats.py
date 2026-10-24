@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests für agent-stats.py. Aufruf: python3 -m unittest auto-feature/scripts/test_agent_stats.py"""
+"""Tests für agent-stats.py. Aufruf: python3 auto-feature/scripts/test_agent_stats.py"""
 import json
 import os
 import subprocess

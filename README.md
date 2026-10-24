@@ -60,6 +60,7 @@ nikskills/
     SKILL.md
     scripts/
       agent-stats.py
+      test_agent_stats.py
   agents/
     opus-xhigh.md
     sonnet-xhigh.md
