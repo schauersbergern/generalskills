@@ -2,7 +2,7 @@
 name: fix-findings
 description: Use when the user pastes a list of review findings (P1/P2/P3 with file:line, e.g. from a reviewer thread or /pr-review-loop) to be fixed on the current PR branch, or when a reviewer thread sends such a list via message.
 argument-hint: <eingefügte Befundliste> [mergen] [deployen]
-effort: xhigh
+effort: high
 ---
 
 # Review-Befunde abarbeiten
@@ -17,6 +17,12 @@ Die Eingabe ist die Befundliste, eventuell gefolgt von den Befehlswörtern „me
 - Gemergt und deployt wird nur auf Befehlswort (siehe unten).
 
 **REQUIRED SUB-SKILL:** `superpowers:receiving-code-review` (Strenge beim Prüfen), `superpowers:test-driven-development` (pro Befund).
+
+**Modell und Kontext:** `pr-review-loop` startet Fixer-Threads mit Sonnet und Effort high. Die Befunde sind dort schon reproduziert, und dein Urteil prüft die nächste Runde. Jeder API-Aufruf liest den ganzen Thread-Kontext erneut, deshalb:
+- zusammengehörige Befehle in einem Aufruf bündeln (Typecheck und gezielte Tests in einer `&&`-Kette)
+- Testausgaben kürzen (knapper Reporter, `| tail -n 40`), Dateien gezielt lesen (Zeilenbereich statt ganzer Datei)
+
+Die teuersten Fixer-Threads von Haas Runde 2 (#174, #176) kamen auf 150 bzw. 192 API-Aufrufe und 35 bzw. 44 Mio. Cache-Read-Tokens.
 
 ## Merge und Deploy
 
@@ -50,6 +56,7 @@ Die Eingabe ist die Befundliste, eventuell gefolgt von den Befehlswörtern „me
    - **Ohne Test:** Prosa-Befunde (Kommentar, Docstring, Doku) und reine Benennung.
    - **Steht in `CLAUDE.md` eine Teststrategie,** schränkt sie ein, welche Verhaltens-Befunde einen Test bekommen.
    - **Prosa: streichen statt umformulieren**, das verhindert Folgebefunde.
+   - **Probe-Änderungen nie per `git checkout -- <datei>` oder `git restore` zurücknehmen**, solange eigene Fixes in derselben Datei uncommittet sind. Das löscht den Fix mit (so geschehen im Bundle-Lauf Passwort-Login). Erst den Fix committen, dann proben, oder die Probe von Hand zurücknehmen.
 5. **Verifikation:** die Prüfbefehle aus `CLAUDE.md`. Fehlen sie, die aus `package.json`, `Makefile`, `pyproject.toml` oder der CI-Konfiguration ableiten und sagen, woher sie stammen. Ausgabe zeigen (`superpowers:verification-before-completion`).
    - **Je Befund nur gezielte Tests** (die betroffenen Testdateien, z. B. `pnpm vitest run <pfade>`), nicht die ganze Suite.
    - **Vor dem Push keine ganze Suite** (Ausnahmen im übernächsten Punkt), sondern:
@@ -65,7 +72,9 @@ Die Eingabe ist die Befundliste, eventuell gefolgt von den Befehlswörtern „me
 
 ## Agent-Statistik
 
-Startest du Subagenten (Umsetzung, Prüfung), führst du eine Agent-Statistik, als Grundlage für spätere Token-Optimierung. Format: Skill `auto-feature`, Abschnitt „Agent-Statistik“ (`~/.claude/skills/auto-feature/SKILL.md`), Spalte TF = PR-Nummer, Rolle z. B. `Fix R<r>`. Ablage `~/.claude/agent-stats/<repo>/<YYYY-MM-DD>-pr<n>-fix.md`, Kopf mit Repo, PR und der eigenen Session-ID. Ohne Subagenten genügt der Kopf mit einer Zeile je Liste (Uhrzeit Eingang, Uhrzeit Push), damit sich die Rundenzeiten später zuordnen lassen.
+Startest du Subagenten (Umsetzung, Prüfung), führst du eine Agent-Statistik, als Grundlage für spätere Token-Optimierung. Format: Skill `auto-feature`, Abschnitt „Agent-Statistik“ (`~/.claude/skills/auto-feature/SKILL.md`), Zeilen per Skript `agent-stats.py add`, Spalte TF = PR-Nummer, Rolle z. B. `Fix R<r>`. Ablage `~/.claude/agent-stats/<repo>/<YYYY-MM-DD>-pr<n>-fix.md`, Kopf mit Repo, PR und der eigenen Session-ID.
+
+Ohne Subagenten führst du keine Datei. Die Rundenzeiten (Eingang der Liste, Push) hält der Reviewer-Thread fest, und deine Thread-Tokens holt er am Ende per `agent-stats.py threads` aus deinem Transkript. Fixt du ohne Reviewer-Thread (Liste vom User), genügt am Ende `agent-stats.py threads self --md` in `<YYYY-MM-DD>-pr<n>-fix.md`.
 
 ## Abschlusstabelle
 
@@ -94,4 +103,6 @@ Die letzte Zeile entfällt nur, wenn mit Befehlswort gemergt bzw. deployt wurde.
 | „Ich fixe nur die gemeldete Stelle“ | Die Geschwisterstelle kommt in der nächsten Runde als neuer Befund zurück. Klasse statt Instanz. |
 | „Abgelehnte Befunde lasse ich einfach weg“ | Ohne begründete Ablehnung in der Tabelle meldet der Reviewer sie erneut. |
 | „Zur Sicherheit nochmal die ganze Suite“ | Subagent, Orchestrator und CI dreimal je Runde kostet bei großen Suiten eine Viertelstunde pro Runde. Vor dem Push Typecheck und die abhängigen Tests, die ganze Suite läuft in der CI (ohne CI einmal vor dem Push). |
+| „Probe schnell per `git checkout --` zurücksetzen“ | Bei uncommittetem Fix in derselben Datei ist der Fix dann auch weg. Erst committen. |
+| „Ich lese zur Sicherheit die ganze Datei und den ganzen Testlauf“ | Jeder weitere Aufruf liest den angewachsenen Kontext erneut. Gezielt lesen, Ausgaben kürzen, Befehle bündeln. |
 | „Soll ich pushen?“ | Auf dem PR-Branch nach Commit ohne Rückfrage pushen. |
