@@ -28,7 +28,7 @@ Ob gemergt wird, entscheidet der User im Chat.
 
 ## Begriffe
 
-- **Runde** = ein Review-Durchgang. Runde 1 prüft den ganzen PR mit Opus, jede weitere nur das Delta seit der Vorrunde mit einem `sonnet-high`-Reviewer (Schritt 5). Ab Runde 3 gibt es eine Runde nur nach einem P1/P2 der Vorrunde (Schritt 6).
+- **Runde** = ein Review-Durchgang. Runde 1 prüft den ganzen PR mit Opus, jede weitere nur das Delta seit der Vorrunde, mit einem `sonnet-high`-Reviewer oder in den Fällen aus Schritt 5 von dir selbst. Eine selbst geprüfte Runde zählt wie jede andere, auch für `runden=<n>`. Ab Runde 3 gibt es eine Runde nur nach einem P1/P2 der Vorrunde (Schritt 6).
 - **Max. Runden** (nur mit `runden=<n>`) begrenzt die Durchgänge. Ist die letzte erlaubte Runde gelaufen, wird nicht mehr geprüft, auch kein Fix-Delta. Ohne `runden=<n>` gibt es keine Rundengrenze.
 - **Code-Befund** ändert das Programmverhalten.
 - **Prosa-Befund** ändert nur, was jemand liest: Kommentar, Docstring, Doku, Fehlermeldungstext, PR-Text.
@@ -135,7 +135,7 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
    - das Delta hat höchstens etwa 30 geänderte Zeilen ohne neue Verzweigung, Invariante oder Abfrage
    - das Delta ist nur ein Merge der Basis, siehe nächster Absatz
 
-   Grund: In der Statistik ab 22.10. (Stand 24.10.) fanden 31 Delta-Reviews (17 % der Subagent-Tokens, Median 124k) zusammen zwei betriebsrelevante Befunde, in ai_coworker_construction keinen. Erhoben ist der Wert nur bei 12 der 31, die Zahl ist also eine Untergrenze. Ein selbst geprüftes Delta steht in der Runden-Tabelle der Statistik mit „selbst geprüft“.
+   Grund: In der Statistik ab 22.10. (Stand 24.10.) fanden 31 Delta-Reviews (17 % der Subagent-Tokens, Median 124k) zusammen zwei betriebsrelevante Befunde, in ai_coworker_construction keinen. Erhoben ist der Wert nur bei 12 der 31, die Zahl ist also eine Untergrenze. Ein selbst geprüftes Delta steht in der Statistik nur in der Rundenzeile des Kopfs („R<r> selbst geprüft“), nicht in der Agenten-Tabelle.
 
    **Merge der Basis im Delta** (gestapelter PR, Retarget, Konfliktauflösung): Die hereingemergten Basis-Commits sind schon geprüft. Die Konfliktauflösung zeigt `git show --remerge-diff <merge-sha>`; steht unter dem Commit-Kopf ein Diff, gehört genau dieser zum Delta, nicht der volle Diff. Semantische Wechselwirkungen (die Basis benennt eine Funktion um, die der PR nutzt) zeigt er nicht. Dafür prüfst du, ob die Basis Dateien geändert hat, die der PR ebenfalls ändert oder aufruft (`git diff --name-only <merge-sha>^1 <merge-sha>` gegen `gh pr diff <n> --name-only`), und überlässt den Rest der CI. Nach diesem Muster liefen #176 R3 (231k), #177 R3 (126k), #60 R4 (96k) und m365 #16 (89k) mit vollem Diff und fanden keinen P1/P2.
 
