@@ -2,16 +2,20 @@
 """Tests für agent-stats.py. Aufruf: python3 auto-feature/scripts/test_agent_stats.py"""
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 SKRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent-stats.py")
 
 
-def lauf(*args, home=None, stand=None, skript=SKRIPT):
+def lauf(*args, home=None, stand=None, skript=SKRIPT, env_extra=None):
     env = dict(os.environ)
+    env.update(env_extra or {})
     if home:
         env["HOME"] = home
     env.pop("CLAUDE_CODE_HOST_SESSION_ID", None)
@@ -218,7 +222,8 @@ class SkillStand(Basis):
         r = lauf("summarize-all", "--root", self.d, "--nach-version")
         self.assertIn(f"### Skills: {self.B} (1 Läufe)", r.stdout)  # Hinweis gehört nicht zum Stand
 
-    def test_stand_aus_dem_git_checkout_des_skripts(self):
+    def checkout(self):
+        """Skript in einem echten git-Checkout hinter einem Symlink; liefert (repo, skript-pfad, sha)."""
         repo = os.path.join(self.d, "generalskills")
         os.makedirs(os.path.join(repo, "auto-feature", "scripts"))
         ziel = os.path.join(repo, "auto-feature", "scripts", "agent-stats.py")
@@ -228,19 +233,115 @@ class SkillStand(Basis):
         g("init", "-q", "-b", "main")
         g("add", ".")
         g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init")
-        sha = g("log", "-1", "--format=%h").strip()
         link = os.path.join(self.d, "skills-link")
         os.symlink(os.path.join(repo, "auto-feature"), link)  # wie ~/.claude/skills/auto-feature
-        r = lauf("add", self.datei, "--rolle", "Impl T1", "--typ", "sonnet-xhigh", "--tokens", "1",
-                 skript=os.path.join(link, "scripts", "agent-stats.py"))
+        return repo, os.path.join(link, "scripts", "agent-stats.py"), g("log", "-1", "--format=%h").strip()
+
+    def fake_git(self, koerper):
+        """Verzeichnis mit einem `git`, das vor dem echten im PATH liegt; $@ steht als Argumente bereit."""
+        echt = shutil.which("git")
+        bin_ = os.path.join(self.d, "fakebin")
+        os.makedirs(bin_, exist_ok=True)
+        pfad = os.path.join(bin_, "git")
+        with open(pfad, "w", encoding="utf-8") as f:
+            f.write(f'#!/bin/sh\n{koerper}\nexec "{echt}" "$@"\n')
+        os.chmod(pfad, 0o755)
+        return {"PATH": bin_ + os.pathsep + os.environ["PATH"]}
+
+    def add_skript(self, skript, rolle, **kw):
+        return lauf("add", self.datei, "--rolle", rolle, "--typ", "sonnet-xhigh", "--tokens", "1",
+                    "--zeit", "2026-10-24 10:00", skript=skript, **kw)
+
+    def test_stand_aus_dem_git_checkout_des_skripts(self):
+        repo, skript, sha = self.checkout()
+        r = self.add_skript(skript, "Impl T1")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertRegex(self.kopf()[0], rf"^- Skills: generalskills@{sha} \(\d{{4}}-\d{{2}}-\d{{2}}, main\)$")
-        with open(ziel, "a", encoding="utf-8") as z:
+        self.assertRegex(self.kopf()[0], rf"^- Skills: generalskills@{sha} \(\d{{4}}-\d{{2}}-\d{{2}} \d{{2}}:\d{{2}}, main\)$")
+        with open(os.path.join(repo, "neu.txt"), "w", encoding="utf-8") as f:  # unversioniert: kein -dirty  # R1-4
+            f.write("x\n")
+        self.assertEqual(self.add_skript(skript, "Impl T2").returncode, 0)
+        self.assertEqual(len(self.kopf()), 1, self.text())
+        with open(os.path.join(repo, "auto-feature", "scripts", "agent-stats.py"), "a", encoding="utf-8") as z:
             z.write("# lokal geändert\n")
-        r = lauf("add", self.datei, "--rolle", "Impl T2", "--typ", "sonnet-xhigh", "--tokens", "1",
-                 skript=os.path.join(link, "scripts", "agent-stats.py"))
+        r = self.add_skript(skript, "Impl T3")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertRegex(self.kopf()[1], rf"^- Skills ab #2: generalskills@{sha}-dirty ")
+        self.assertRegex(self.kopf()[1], rf"^- Skills ab #3: generalskills@{sha}-dirty ")
+
+    def test_scheiternder_git_aufruf_stempelt_keinen_teilstand(self):  # R1-2 a, b
+        _, skript, _ = self.checkout()
+        for befehl in ("rev-parse", "log", "status"):
+            with self.subTest(befehl=befehl):
+                if os.path.exists(self.datei):
+                    os.remove(self.datei)
+                env = self.fake_git(f'for a in "$@"; do [ "$a" = {befehl} ] && exit 128; done')
+                r = self.add_skript(skript, "Impl T1", env_extra=env)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertIn("nicht ermittelbar", r.stderr)
+                self.assertEqual(self.kopf(), [], self.text())
+
+    def test_stand_unbekannt_nach_bekanntem_schreibt_ab_zeile(self):  # R1-2 c
+        _, skript, _ = self.checkout()
+        self.assertEqual(self.add_skript(skript, "Impl T1", stand=self.A).returncode, 0)
+        env = self.fake_git('[ "$1" = "-C" ] && exit 128')
+        self.assertEqual(self.add_skript(skript, "Impl T2", env_extra=env).returncode, 0)
+        self.assertEqual(self.add_skript(skript, "Impl T3", env_extra=env).returncode, 0)  # bleibt eine Zeile
+        self.assertEqual(self.kopf(), [f"- Skills: {self.A}", "- Skills ab #2: unbekannt"])
+        r = lauf("summarize-all", "--root", self.d, "--nach-version")
+        self.assertIn("### Skills: unbekannt (2 Läufe)", r.stdout)
+        self.assertIn(f"### Skills: {self.A} (1 Läufe)", r.stdout)
+
+    def test_nach_timeout_kein_weiterer_git_aufruf(self):  # R1-2 Klasse
+        _, skript, _ = self.checkout()
+        log = os.path.join(self.d, "git.log")
+        env = self.fake_git(f'echo "$@" >> "{log}"; exec sleep 5')
+        env["AGENT_STATS_GIT_TIMEOUT"] = "1"
+        t0 = time.monotonic()
+        r = self.add_skript(skript, "Impl T1", env_extra=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertLess(time.monotonic() - t0, 4)
+        self.assertEqual(len(open(log, encoding="utf-8").read().splitlines()), 1)
+        self.assertEqual(self.kopf(), [])
+
+    def test_sortierung_nach_commit_zeit_nicht_alphabetisch(self):  # R1-3
+        staende = ["generalskills@9999999 (2026-10-20, main)",            # älter, aber alphabetisch zuletzt
+                   "generalskills@1111111 (2026-10-24 14:08, main)",
+                   "generalskills@5555555 (2026-10-24 09:00, main)"]      # selber Tag, früher
+        for st in staende:
+            self.add_mit(st)
+        r = lauf("summarize-all", "--root", self.d, "--nach-version")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        reihe = [m for m in re.findall(r"### Skills: generalskills@(\w+)", r.stdout)]
+        self.assertEqual(reihe, ["9999999", "5555555", "1111111"], r.stdout)
+
+
+class Stempel(Basis):
+    S = "generalskills@aaaaaaa (2026-10-24 10:00, main)"
+
+    def stamp(self, inhalt):
+        with open(self.datei, "w", encoding="utf-8") as f:
+            f.write(inhalt)
+        r = lauf("stamp", self.datei, "--stand", self.S)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(self.datei, encoding="utf-8") as f:
+            return f.read().splitlines()
+
+    def test_datei_die_mit_tabelle_beginnt(self):  # R1-1
+        tabelle = ["| Thread | Modell |", "| --- | --- |", "| a | opus |"]
+        z = self.stamp("\n".join(tabelle) + "\n")
+        self.assertEqual(z, [f"- Skills: {self.S}", ""] + tabelle)
+
+    def test_verschachtelte_kopfliste(self):  # R1-1 Klasse
+        z = self.stamp("# T\n\n- Runden:\n  - R1 x\n  - R2 y\n\n## Threads\n")
+        self.assertEqual(z, ["# T", "", "- Runden:", "  - R1 x", "  - R2 y", f"- Skills: {self.S}", "",
+                             "## Threads"])
+
+    def test_kopf_ohne_leerzeile_vor_fliesstext(self):  # R1-1 Klasse
+        z = self.stamp("# T\n- Repo: x\nFließtext\n")
+        self.assertEqual(z, ["# T", "- Repo: x", f"- Skills: {self.S}", "", "Fließtext"])
+
+    def test_titel_ohne_liste_bekommt_eigenen_kopf(self):  # R1-1 Klasse
+        self.assertEqual(self.stamp("# T\nFließtext\n"), ["# T", "", f"- Skills: {self.S}", "", "Fließtext"])
+        self.assertEqual(self.stamp(""), [f"- Skills: {self.S}"])
 
 
 class Threads(unittest.TestCase):
