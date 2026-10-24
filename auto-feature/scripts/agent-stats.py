@@ -32,8 +32,17 @@ APP_SESSIONS = os.path.expanduser("~/Library/Application Support/Claude/claude-c
 PROJECTS = os.path.expanduser("~/.claude/projects")
 
 
+FORTS = re.compile(r"\(Forts\. #(\d+)\)")
+
+
 def zellen(zeile):
-    return [z.strip() for z in zeile.strip().strip("|").split("|")]
+    # „\|“ ist ein Strich im Zelltext, kein Spaltentrenner.
+    return [z.strip().replace("\\|", "|") for z in re.split(r"(?<!\\)\|", zeile.strip().strip("|"))]
+
+
+def forts_von(rolle):
+    m = FORTS.search(rolle)
+    return int(m.group(1)) if m else None
 
 
 def ist_datenzeile(zeile):
@@ -49,7 +58,7 @@ def zahl(text):
 
 
 def zeile_md(werte):
-    return "| " + " | ".join(str(w) for w in werte) + " |"
+    return "| " + " | ".join(str(w).replace("|", "\\|") for w in werte) + " |"
 
 
 # ---------- add ----------
@@ -64,25 +73,29 @@ def cmd_add(a):
     if not modell:
         sys.exit(f"Agent-Typ {a.typ!r} unbekannt: --modell angeben (und --effort, sonst „n/a“).")
 
-    if not a.tokens.isdigit():
+    if a.tokens == "n/a":
         tokens = delta = "n/a"  # fehlende <usage>-Angabe: nicht schätzen
     else:
-        a.tokens = int(a.tokens)
+        a.tokens = zahl(a.tokens)
+        if a.tokens is None:
+            sys.exit("--tokens: keine Zahl. Fehlt die <usage>-Angabe, „n/a“ angeben.")
         tokens, delta = str(a.tokens), a.tokens
-    if a.fortsetzung_von is not None and delta != "n/a":
-        vor = [z for _, z in daten if z[0] == str(a.fortsetzung_von)]
+    erst = a.fortsetzung_von
+    if erst is not None:
+        vor = [z for _, z in daten if z[0] == str(erst)]
         if not vor:
-            sys.exit(f"Zeile #{a.fortsetzung_von} nicht gefunden.")
-        vorwert = zahl(vor[-1][7])
-        # Vorwert = zuletzt gemeldeter Wert desselben Agenten (auch aus späteren Fortsetzungen).
-        for _, z in daten:
-            if f"Forts. #{a.fortsetzung_von}" in z[3] and zahl(z[7]) is not None:
-                vorwert = zahl(z[7])
-        if vorwert is not None and a.tokens >= vorwert:
-            tokens, delta = f"{a.tokens} (kum.)", a.tokens - vorwert
+            sys.exit(f"Zeile #{erst} nicht gefunden.")
+        # Fortsetzung einer Fortsetzung: auf die Erstzeile des Agenten normalisieren.
+        erst = forts_von(vor[-1][3]) or erst
+    if erst is not None and delta != "n/a":
+        # Vorwert = zuletzt gemeldeter Wert desselben Agenten (Erstzeile oder eine ihrer Fortsetzungen).
+        werte = [zahl(z[7]) for _, z in daten if z[0] == str(erst) or forts_von(z[3]) == erst]
+        werte = [w for w in werte if w is not None]
+        if werte and a.tokens >= werte[-1]:
+            tokens, delta = f"{a.tokens} (kum.)", a.tokens - werte[-1]
 
     nr = max([int(z[0]) for _, z in daten], default=0) + 1
-    rolle = a.rolle + (f" (Forts. #{a.fortsetzung_von})" if a.fortsetzung_von is not None else "")
+    rolle = a.rolle + (f" (Forts. #{erst})" if erst is not None else "")
     neu = zeile_md([nr, a.zeit or dt.datetime.now().strftime("%Y-%m-%d %H:%M"), a.tf, rolle, a.typ,
                     modell, effort or "n/a", tokens, delta,
                     a.dauer if a.dauer is not None else "n/a",
