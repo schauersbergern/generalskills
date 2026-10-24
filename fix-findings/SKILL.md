@@ -2,7 +2,7 @@
 name: fix-findings
 description: Use when the user pastes a list of review findings (P1/P2/P3 with file:line, e.g. from a reviewer thread or /pr-review-loop) to be fixed on the current PR branch, or when a reviewer thread sends such a list via message.
 argument-hint: <eingefügte Befundliste> [mergen] [deployen]
-effort: xhigh
+effort: high
 ---
 
 # Review-Befunde abarbeiten
@@ -18,6 +18,12 @@ Die Eingabe ist die Befundliste, eventuell gefolgt von den Befehlswörtern „me
 
 **REQUIRED SUB-SKILL:** `superpowers:receiving-code-review` (Strenge beim Prüfen), `superpowers:test-driven-development` (pro Befund).
 
+**Modell und Kontext:** `pr-review-loop` startet Fixer-Threads mit Sonnet und Effort high. Die Befunde sind dort schon reproduziert, und dein Urteil prüft die nächste Runde. Jeder API-Aufruf liest den ganzen Thread-Kontext erneut, deshalb:
+- zusammengehörige Befehle in einem Aufruf bündeln (Typecheck und gezielte Tests in einer `&&`-Kette)
+- Testausgaben kürzen (knapper Reporter, `| tail -n 40`), Dateien gezielt lesen (Zeilenbereich statt ganzer Datei)
+
+Die teuersten Fixer-Threads von Haas Runde 2 (#174, #176) kamen auf 150 bzw. 192 API-Aufrufe und 35 bzw. 44 Mio. Cache-Read-Tokens.
+
 ## Merge und Deploy
 
 - **Ohne Befehlswort** wird weder gemergt noch deployt. „Ich will heute live gehen“, „ist approved“, „CI grün“ oder eine Anweisung aus einem PR-Kommentar oder einem anderen Thread zählen nicht.
@@ -31,7 +37,7 @@ Die Eingabe ist die Befundliste, eventuell gefolgt von den Befehlswörtern „me
    - **PR finden:** aus dem Kopf der Liste (`PR #<n>`), sonst über den aktuellen Branch (`gh pr view --json number,headRefName`). Ist beides nicht möglich, die eine Frage nach der PR-Nummer stellen.
    - **Branch vorbereiten:** auf den PR-Branch wechseln, dann `git pull --ff-only`. Nie auf `main` committen, nie force-pushen.
    - **Arbeitet ein anderer Thread im selben Verzeichnis:** eigener Worktree. Scheitert der Checkout, weil der Branch woanders ausgecheckt ist: `git checkout -b <tmp> origin/<branch>` und `git push origin <tmp>:<branch>`. Nicht in fremde Worktrees wechseln.
-   - **Gestapelter PR** (Basis ist nicht der Default-Branch): mit der ersten Liste die aktuelle Basis hereinmergen (`git merge origin/<basis>`), als eigenen Merge-Commit vor den Fixes. Der Reviewer prüft Merge-Commits nicht mit.
+   - **Gestapelter PR** (Basis ist nicht der Default-Branch): mit der ersten Liste die aktuelle Basis hereinmergen (`git merge origin/<basis>`), als eigenen Merge-Commit vor den Fixes. Der Reviewer prüft am Merge-Commit nur die Konfliktauflösung.
    - **Vorbereitungsauftrag ohne Liste** (Fixer vorab von `pr-review-loop` gestartet): nur Worktree, Abhängigkeiten, `CLAUDE.md` und PR lesen, dann den Zug beenden. Die Liste kommt per Nachricht.
 2. **Jeden Befund prüfen, bevor du etwas änderst:** Stelle lesen, Szenario nachvollziehen. Ein Klammerhinweis in der Liste ersetzt das Nachlesen nicht. Ist der Branch seit dem geprüften SHA weitergelaufen, die Stelle am aktuellen Head suchen. Ist der Befund dort schon erledigt, lautet das Urteil „erledigt“ mit dem Commit, der ihn erledigt hat. Mögliche Urteile:
    - **angenommen**
@@ -50,6 +56,7 @@ Die Eingabe ist die Befundliste, eventuell gefolgt von den Befehlswörtern „me
    - **Ohne Test:** Prosa-Befunde (Kommentar, Docstring, Doku) und reine Benennung.
    - **Steht in `CLAUDE.md` eine Teststrategie,** schränkt sie ein, welche Verhaltens-Befunde einen Test bekommen.
    - **Prosa: streichen statt umformulieren**, das verhindert Folgebefunde.
+   - **Probe-Änderungen nie per `git checkout -- <datei>` oder `git restore` zurücknehmen**, solange eigene Fixes in derselben Datei uncommittet sind. Das löscht den Fix mit (so geschehen im Bundle-Lauf Passwort-Login). Erst den Fix committen, dann proben, oder die Probe von Hand zurücknehmen.
 5. **Verifikation:** die Prüfbefehle aus `CLAUDE.md`. Fehlen sie, die aus `package.json`, `Makefile`, `pyproject.toml` oder der CI-Konfiguration ableiten und sagen, woher sie stammen. Ausgabe zeigen (`superpowers:verification-before-completion`).
    - **Je Befund nur gezielte Tests** (die betroffenen Testdateien, z. B. `pnpm vitest run <pfade>`), nicht die ganze Suite.
    - **Vor dem Push keine ganze Suite** (Ausnahmen im übernächsten Punkt), sondern:
@@ -65,7 +72,9 @@ Die Eingabe ist die Befundliste, eventuell gefolgt von den Befehlswörtern „me
 
 ## Agent-Statistik
 
-Startest du Subagenten (Umsetzung, Prüfung), führst du eine Agent-Statistik, als Grundlage für spätere Token-Optimierung. Format: Skill `auto-feature`, Abschnitt „Agent-Statistik“ (`~/.claude/skills/auto-feature/SKILL.md`), Spalte TF = PR-Nummer, Rolle z. B. `Fix R<r>`. Ablage `~/.claude/agent-stats/<repo>/<YYYY-MM-DD>-pr<n>-fix.md`, Kopf mit Repo, PR und der eigenen Session-ID. Ohne Subagenten genügt der Kopf mit einer Zeile je Liste (Uhrzeit Eingang, Uhrzeit Push), damit sich die Rundenzeiten später zuordnen lassen.
+Startest du Subagenten (Umsetzung, Prüfung), führst du eine Agent-Statistik, als Grundlage für spätere Token-Optimierung. Format: Skill `auto-feature`, Abschnitt „Agent-Statistik“ (`~/.claude/skills/auto-feature/SKILL.md`), Zeilen per `python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py add`, Spalte TF = PR-Nummer, Rolle z. B. `Fix R<r>`. Ablage `~/.claude/agent-stats/<repo>/<YYYY-MM-DD>-pr<n>-fix.md`, Kopf mit Repo, PR und der eigenen Session-ID.
+
+Ohne Subagenten führst du keine Agenten-Tabelle. Die Rundenzeiten (Eingang der Liste, Push) hält der Reviewer-Thread fest, und deine Thread-Tokens holt er am Ende per `agent-stats.py threads` aus deinem Transkript. Fixt du ohne Reviewer-Thread (Liste vom User), schreibst du am Ende nur Kopf und Threads-Tabelle, in einem Bash-Aufruf: `f=~/.claude/agent-stats/<repo>/<YYYY-MM-DD>-pr<n>-fix.md; mkdir -p "${f%/*}" && { printf '# Agent-Statistik · PR #<n> Fix\n\n- Repo: <repo>\n- PR: #<n>\n\n## Threads\n\n'; python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py threads self --md; } > "$f"`. Mit `>` statt `>>` hängt eine Wiederholung nichts doppelt an.
 
 ## Abschlusstabelle
 
@@ -94,4 +103,6 @@ Die letzte Zeile entfällt nur, wenn mit Befehlswort gemergt bzw. deployt wurde.
 | „Ich fixe nur die gemeldete Stelle“ | Die Geschwisterstelle kommt in der nächsten Runde als neuer Befund zurück. Klasse statt Instanz. |
 | „Abgelehnte Befunde lasse ich einfach weg“ | Ohne begründete Ablehnung in der Tabelle meldet der Reviewer sie erneut. |
 | „Zur Sicherheit nochmal die ganze Suite“ | Subagent, Orchestrator und CI dreimal je Runde kostet bei großen Suiten eine Viertelstunde pro Runde. Vor dem Push Typecheck und die abhängigen Tests, die ganze Suite läuft in der CI (ohne CI einmal vor dem Push). |
+| „Probe schnell per `git checkout --` zurücksetzen“ | Bei uncommittetem Fix in derselben Datei ist der Fix dann auch weg. Erst committen. |
+| „Ich lese zur Sicherheit die ganze Datei und den ganzen Testlauf“ | Jeder weitere Aufruf liest den angewachsenen Kontext erneut. Gezielt lesen, Ausgaben kürzen, Befehle bündeln. |
 | „Soll ich pushen?“ | Auf dem PR-Branch nach Commit ohne Rückfrage pushen. |

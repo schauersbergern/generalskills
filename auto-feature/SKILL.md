@@ -197,19 +197,28 @@ Letzte Zeile: „Stopp. Bitte prüfen; danach `/pr-review-loop <PR>` je PR.“
 
 **Jeder Lauf führt eine Agent-Statistik**, als Grundlage für spätere Token-Optimierung. Dieses Format gilt auch für `pr-review-loop`, `fix-findings` und jede andere Session, die Subagenten startet. Ablage nach Repo-Konvention, sonst `docs/superpowers/runs/<YYYY-MM-DD>-<lauf>-agent-stats.md`. Außerhalb von `auto-feature` liegt sie unter `~/.claude/agent-stats/<repo>/`.
 
-- **Kopf:** Repo, Lauf, Session-ID der Hauptsession. Deren eigene Tokens stehen in keiner `<usage>`-Angabe und lassen sich später aus dem Transkript holen.
+- **Kopf:** Repo, Lauf, Session-ID der Hauptsession.
 - **Fortschreiben** nach jeder Task-Notification, nicht erst am Ende. Nach einer Kompaktierung fehlen sonst die Werte.
+- **Werkzeug:** `~/.claude/skills/auto-feature/scripts/agent-stats.py` (nur Python-Standardbibliothek), in jedem Aufruf mit vollem Pfad, denn eine Shell-Variable überlebt den Bash-Aufruf nicht. Es hält das Format ein, damit sich die Dateien über Läufe hinweg auswerten lassen:
+  - `python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py add <datei> --rolle "<Rolle>" --typ <agent-typ> --tokens <subagent_tokens> --dauer <duration_ms> --tool-uses <n> [--tf …] [--bwk 0/1/3] [--angenommen …] [--betrieb "n: …"] [--fix-runden …] [--status …]`, bei einer `SendMessage`-Fortsetzung zusätzlich `--fortsetzung-von <#>` mit der Nummer der Erstzeile des Agenten (eine angegebene Fortsetzungszeile lenkt es auf deren Erstzeile um), dann rechnet es `(kum.)` und `Δ tokens` selbst. Eine neue Datei legt es an, Kopfzeilen per `--kopf "Repo: …"`. Befunde nachtragen: Zelle von Hand ändern.
+  - `python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py summarize <datei> --write`: am Ende des Laufs. Schreibt die Auswertung als markierten Block, beim ersten Mal unter eine neue Überschrift „Auswertung je Rolle“ am Dateiende, danach ersetzt es nur diesen Block. Ein älterer, unmarkierter Abschnitt gleichen Namens bleibt stehen und wird von Hand entfernt.
+  - `python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py threads self <weitere local_…-IDs> --subagents --md`: Tokens der Hauptsession, gestarteter Threads und ihrer Subagenten aus den Transkripten, inklusive Cache-Reads und Input-Äquivalent je Modell (Cache-Write 5 min ×1,25, 1 h ×2). Fehlt eine ID, steht sie als Zeile „fehlt“ in der Tabelle, und das Skript endet mit Exit 1. Am Ende des Laufs in den Abschnitt „Threads“, **bevor** Threads archiviert oder gelöscht werden.
+  - `python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py summarize-all [--seit YYYY-MM-DD]`: Auswertung über alle Dateien unter `~/.claude/agent-stats/` (Grundlage für Regeländerungen wie diese).
+  - Tests nach Änderungen am Skript: `python3 ~/.claude/skills/auto-feature/scripts/test_agent_stats.py`.
+- **Rollen-Namen** einheitlich, denn die Auswertung gruppiert nach dem ersten Wort (bei `Review R1` nach dem Fokus): `Spec-Review R<r>`, `Plan-Review R<r>`, `Impl T<n>`, `Task-Review T<n>`, `Re-Review T<n>`, `Fix T<n>`, `Härtung`, `Design-Pass`, `Builder-Check`; in `pr-review-loop` `Review R1 <Korrektheit|Verträge|Korrektheit+Verträge|Tests|sachlich>` und `Delta-Review R<r>`.
+- **`<usage>` misst keinen Verbrauch:** `subagent_tokens` ist die Kontextgröße des letzten API-Aufrufs (Input, Cache-Write und Cache-Read) plus dessen Output, keine Summe über die Aufrufe. `Δ tokens` ist bei Fortsetzungen also Kontextwachstum und taugt nur für grobe Vergleiche zwischen Rollen. Kostenaussagen nur mit dem Input-Äquivalent je Modell aus `threads`.
 
 - **Quelle:** die `<usage>`-Angaben der Task-Notifications (`subagent_tokens`, `duration_ms`, `tool_uses`). Fehlt eine Angabe, steht dort „n/a“, nicht geschätzt.
 - **Spalten:** # | Zeitpunkt | TF | Rolle | Agent-Typ | Modell | Effort | tokens | Δ tokens | duration_ms | tool_uses | B/W/K | angenommen | betriebsrelevant | Fix-Runden | Status
 - **Fortsetzungen per `SendMessage`** (Fix-Runden, Nachträge):
-  - `tokens` = gemeldeter Wert, gekennzeichnet mit „(kum.)“. Annahme, nicht belegt: Der Wert enthält die Vorläufe desselben Agenten.
+  - `tokens` = gemeldeter Wert, gekennzeichnet mit „(kum.)“: Der Endkontext einer Fortsetzung enthält den Kontext der Vorläufe desselben Agenten.
   - `Δ tokens` = gemeldeter Wert minus Vorwert, also minus dem zuletzt gemeldeten Wert desselben Agenten.
-  - Ist der gemeldete Wert kleiner als der Vorwert, trägt die Annahme für diesen Agenten nicht, etwa weil der Wert nach einer Kompaktierung nur noch die Kontextgröße zeigt. Dann gilt `Δ tokens` = `tokens`, ohne „(kum.)“, und die Auswertung hält das fest.
+  - Ist der gemeldete Wert kleiner als der Vorwert, ist der Kontext geschrumpft, etwa durch eine Kompaktierung. Dann gilt `Δ tokens` = `tokens`, ohne „(kum.)“, und die Auswertung hält das fest.
   - Erstläufe: `Δ tokens` = `tokens`.
   - **Summen, Mediane und Ausbeuten rechnen mit `Δ tokens`.**
 - **betriebsrelevant:** Anzahl der angenommenen Befunde, die im Betrieb sichtbar geworden wären (Fehler oder Absturz, Datenverlust, Hänger, falsche Anzeige, Sicherheits- oder Scope-Lücke), Format `n: Stichwort; Stichwort`. Reine Stil-, Test-, Doku- und Benennungsbefunde zählen nicht. Gilt für Reviews und Härtungsläufe (gefundene Lücken je Härtungs-Subagent), sonst „–“.
-- **Auswertung je Rolle:** Läufe, Summe und Median `Δ tokens`, Dauer-Median, B/W/K, Blocker+Wichtig je 100k, betriebsrelevant je 100k. `sonnet-high` und `sonnet-xhigh` getrennt ausweisen, damit sich die Effort-Regel überprüfen lässt.
+- **Auswertung je Rolle:** Läufe, Summe und Median `Δ tokens`, Dauer-Median, B/W/K, Blocker+Wichtig je 100k, betriebsrelevant je 100k. `sonnet-high` und `sonnet-xhigh` getrennt ausweisen, damit sich die Effort-Regel überprüfen lässt (`summarize` trennt nach Agent-Typ).
+- **Stand 24.10.2026** (`summarize-all --seit 2026-10-22`, 120 Läufe im Standardformat, Raten nur über Läufe mit erhobenem Wert): Unter den Rollen mit mehreren Läufen brachte die Härtung mit 1,06 betriebsrelevanten Befunden je 100k die höchste Ausbeute, vor Task-Reviews (0,81) und PR-Reviews Runde 1 (0,29–0,80 je Fokus). Frei werdende Tokens gehören eher in E2 als in zusätzliche Review-Runden.
 
 ## Ausreden und was stimmt
 
@@ -218,7 +227,8 @@ Letzte Zeile: „Stopp. Bitte prüfen; danach `/pr-review-loop <PR>` je PR.“
 | „Runde 2 hat noch Wichtiges, eine dritte schadet nicht“ | Genau so entstehen Endlosschleifen. Offenes kommt in „Offene Review-Punkte“, dann weiter. |
 | „Vier Zeilen schreibe ich schneller selbst“ | Die Hauptsession orchestriert und prüft. Implementiert wird nur von Sonnet. |
 | „Zur Sicherheit nach jedem Task die ganze Suite“ | Die läuft einmal je TF in der Verifikation und dann in der CI. Je Task Typecheck und die abhängigen Tests. |
-| „Die Statistik schreibe ich am Ende zusammen“ | Nach einer Kompaktierung sind die `<usage>`-Werte weg. Nach jeder Notification fortschreiben. |
+| „Die Statistik schreibe ich am Ende zusammen“ | Nach einer Kompaktierung sind die `<usage>`-Werte weg. Nach jeder Notification fortschreiben, per `agent-stats.py add`. |
+| „Die Tabelle tippe ich schneller von Hand“ | Handtabellen drifteten (eigene Spalten, fehlendes Δ, fehlende Uhrzeiten) und fielen aus der Auswertung über alle Läufe. |
 | „Tests grün, also PR“ | Grüne Tests finden keine Absturzfenster. Erst kommt die Härtung. |
 | „Die Tests decken den neuen Zweig ab, steht ja im Namen“ | Erst eine Mutation zeigt, ob ein Test rot wird. Ohne Probe bleibt die Lücke bis zum Review. |
 | „Der Task ist klein, Review lesend reicht“ | Hat er Logik, wird mutiert. Lesend nur reine Refactor-/UI-Tasks. |
