@@ -37,7 +37,7 @@ Die teuersten Fixer-Threads von Haas Runde 2 (#174, #176) kamen auf 150 bzw. 192
    - **PR finden:** aus dem Kopf der Liste (`PR #<n>`), sonst über den aktuellen Branch (`gh pr view --json number,headRefName`). Ist beides nicht möglich, die eine Frage nach der PR-Nummer stellen.
    - **Branch vorbereiten:** auf den PR-Branch wechseln, dann `git pull --ff-only`. Nie auf `main` committen, nie force-pushen.
    - **Arbeitet ein anderer Thread im selben Verzeichnis:** eigener Worktree. Scheitert der Checkout, weil der Branch woanders ausgecheckt ist: `git checkout -b <tmp> origin/<branch>` und `git push origin <tmp>:<branch>`. Nicht in fremde Worktrees wechseln.
-   - **Gestapelter PR** (Basis ist nicht der Default-Branch): mit der ersten Liste die aktuelle Basis hereinmergen (`git merge origin/<basis>`), als eigenen Merge-Commit vor den Fixes. Der Reviewer prüft Merge-Commits nicht mit.
+   - **Gestapelter PR** (Basis ist nicht der Default-Branch): mit der ersten Liste die aktuelle Basis hereinmergen (`git merge origin/<basis>`), als eigenen Merge-Commit vor den Fixes. Der Reviewer prüft am Merge-Commit nur die Konfliktauflösung.
    - **Vorbereitungsauftrag ohne Liste** (Fixer vorab von `pr-review-loop` gestartet): nur Worktree, Abhängigkeiten, `CLAUDE.md` und PR lesen, dann den Zug beenden. Die Liste kommt per Nachricht.
 2. **Jeden Befund prüfen, bevor du etwas änderst:** Stelle lesen, Szenario nachvollziehen. Ein Klammerhinweis in der Liste ersetzt das Nachlesen nicht. Ist der Branch seit dem geprüften SHA weitergelaufen, die Stelle am aktuellen Head suchen. Ist der Befund dort schon erledigt, lautet das Urteil „erledigt“ mit dem Commit, der ihn erledigt hat. Mögliche Urteile:
    - **angenommen**
