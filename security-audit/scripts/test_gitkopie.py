@@ -5,6 +5,7 @@ Alle Repos und Marker liegen in tmp_path; nichts wird außerhalb angelegt.
 """
 import os
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -41,9 +42,9 @@ def roh(repo, *args, eingabe=None):
     return r.stdout
 
 
-def neues_repo(pfad):
+def neues_repo(pfad, *optionen):
     pfad.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", "-q", str(pfad)], check=True)
+    subprocess.run(["git", "init", "-q", *optionen, str(pfad)], check=True)
     return pfad
 
 
@@ -233,17 +234,17 @@ def test_symlink_auf_ordner_oder_ins_leere_wird_gemeldet(tmp_path):
 
 
 def baum_commit(repo, wurzel_eintraege):
-    """Commit mit Baum aus `git mktree` (erlaubt Namen, die update-index ablehnt, z. B. `.git`).
-    wurzel_eintraege: Name -> ("blob", Mode, Bytes) | ("tree", {…})."""
+    """Commit mit Baum aus `git mktree -z` (erlaubt Namen, die update-index ablehnt, z. B. `.git`, Newline).
+    wurzel_eintraege: Name -> ("blob", Mode, Bytes) | ("tree", {…}). Der Arbeitsbaum bleibt leer."""
     def mk(eintraege):
-        zeilen = ""
+        zeilen = b""
         for name, wert in eintraege.items():
             if wert[0] == "tree":
-                zeilen += f"040000 tree {mk(wert[1])}\t{name}\n"
+                zeilen += f"040000 tree {mk(wert[1])}\t{name}".encode() + b"\0"
             else:
                 sha = roh(repo, "hash-object", "-w", "--stdin", eingabe=wert[2]).decode().strip()
-                zeilen += f"{wert[1]} blob {sha}\t{name}\n"
-        return roh(repo, "mktree", eingabe=zeilen.encode()).decode().strip()
+                zeilen += f"{wert[1]} blob {sha}\t{name}".encode() + b"\0"
+        return roh(repo, "mktree", "-z", eingabe=zeilen).decode().strip()
     commit = roh(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit-tree", mk(wurzel_eintraege),
                  "-m", "x").decode().strip()
     roh(repo, "update-ref", "HEAD", commit)
@@ -438,24 +439,282 @@ def test_git_wirft_giterror_und_liefert_bytes(tmp_path):
         gitkopie.git(str(tmp_path / "kein-repo"), "status")
 
 
+# ---------------------------------------------------------------- Aufrufform von git() (Shim im PATH)
+
+ERLAUBTE_GIT_VARIABLEN = {"GIT_OPTIONAL_LOCKS", "GIT_TERMINAL_PROMPT", "GIT_NO_LAZY_FETCH", "GIT_EXEC_PATH"}
+GEERBT = {"GIT_CONFIG_PARAMETERS": "'core.fsmonitor=boese'", "GIT_CONFIG_COUNT": "1",
+          "GIT_CONFIG_KEY_0": "core.fsmonitor", "GIT_CONFIG_VALUE_0": "boese", "GIT_EXTERNAL_DIFF": "boese",
+          "GIT_INDEX_FILE": "boese-index", "GIT_ALTERNATE_OBJECT_DIRECTORIES": "boese-alt",
+          "GIT_DIR": "boese-dir", "GIT_WORK_TREE": "boese-wt", "GIT_ASKPASS": "boese",
+          "GIT_SSH_COMMAND": "boese", "GIT_CONFIG_GLOBAL": "boese", "GIT_NAMESPACE": "boese"}
+
+
+def shim_git(tmp_path, monkeypatch, durchreichen=True, vorab=""):
+    """Legt ein `git`-Shim in den PATH. Es protokolliert Argumente und GIT_*-Umgebung je Aufruf und
+    reicht dann an das echte git durch (oder beendet sich ohne es). `vorab` läuft vor dem Durchreichen."""
+    ordner = tmp_path / "shim"
+    ohne_shim = os.pathsep.join(d for d in os.environ["PATH"].split(os.pathsep) if d != str(ordner))
+    echtes = shutil.which("git", path=ohne_shim)      # nie ein früher installiertes Shim als "echtes" git
+    ordner.mkdir(exist_ok=True)
+    log = tmp_path / "git-protokoll.txt"
+    ende = f'exec {shlex.quote(echtes)} "$@"' if durchreichen else "exit 0"
+    skript = ordner / "git"
+    skript.write_text(f"#!/bin/sh\n{{ echo \"ARGS: $*\"; env | grep '^GIT_' | sort; echo '--'; }} >> "
+                      f"{shlex.quote(str(log))}\n{vorab}\n{ende}\n")
+    skript.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{ordner}{os.pathsep}{ohne_shim}")
+    return log
+
+
+def protokoll(log):
+    """Liste von (argumentzeile, {variablenname: wert}) je git-Aufruf."""
+    aufrufe = []
+    for block in log.read_text().split("--\n"):
+        zeilen = [z for z in block.splitlines() if z]
+        if not zeilen:
+            continue
+        assert zeilen[0].startswith("ARGS: ")
+        umgebung = dict(z.split("=", 1) for z in zeilen[1:])
+        aufrufe.append((zeilen[0], umgebung))
+    return aufrufe
+
+
+def pruefe_aufrufe(aufrufe):
+    assert aufrufe
+    for args, umgebung in aufrufe:
+        assert "-c core.fsmonitor=false -c core.hooksPath=/dev/null" in args, args
+        assert set(umgebung) <= ERLAUBTE_GIT_VARIABLEN, (args, sorted(umgebung))
+        assert umgebung["GIT_OPTIONAL_LOCKS"] == "0"
+        assert umgebung["GIT_TERMINAL_PROMPT"] == "0"
+        assert umgebung["GIT_NO_LAZY_FETCH"] == "1"
+
+
 def test_git_setzt_sicherheitsoptionen(tmp_path, monkeypatch):
-    """Die Aufrufform selbst: -c-Optionen und Umgebung (über einen Shim-git im PATH)."""
-    shim_dir = tmp_path / "shim"
-    shim_dir.mkdir()
-    protokoll = tmp_path / "protokoll.txt"
-    shim = shim_dir / "git"
-    shim.write_text(f"#!/bin/sh\n{{ echo \"ARGS: $*\"; env | grep '^GIT_' | sort; }} > {shlex.quote(str(protokoll))}\n")
-    shim.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{shim_dir}{os.pathsep}{os.environ['PATH']}")
-    monkeypatch.setenv("GIT_ASKPASS", "boese")
-    monkeypatch.setenv("GIT_SSH_COMMAND", "boese")
+    log = shim_git(tmp_path, monkeypatch, durchreichen=False)
+    for name, wert in GEERBT.items():
+        monkeypatch.setenv(name, wert)
     monkeypatch.setenv("GIT_EXEC_PATH", "/opt/git-exec")
     gitkopie.git(str(tmp_path), "rev-parse", "HEAD")
-    text = protokoll.read_text()
-    assert "core.fsmonitor=false" in text and "core.hooksPath=/dev/null" in text
-    assert "GIT_OPTIONAL_LOCKS=0" in text and "GIT_TERMINAL_PROMPT=0" in text and "GIT_NO_LAZY_FETCH=1" in text
-    assert "GIT_EXEC_PATH=/opt/git-exec" in text
-    assert "boese" not in text
+    aufrufe = protokoll(log)
+    assert len(aufrufe) == 1
+    pruefe_aufrufe(aufrufe)
+    assert aufrufe[0][1]["GIT_EXEC_PATH"] == "/opt/git-exec"
+    assert "rev-parse HEAD" in aufrufe[0][0]
+
+
+def test_alle_git_aufrufe_der_funktionen_sind_gesichert(tmp_path, monkeypatch):
+    """Auch der cat-file-Batch-Prozess (eigenes Popen) und alle Aufrufe von repo_hinweise/repo_konfiguration."""
+    repo = repo_mit(tmp_path, {"a.txt": b"a\n", "l": (SYMLINK, b"a.txt"), "p.bin": LFS})
+    (repo / "a.txt").write_bytes(b"x\n")
+    log = shim_git(tmp_path, monkeypatch)
+    for name, wert in GEERBT.items():
+        if name not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_CONFIG_GLOBAL"):   # würden auch das echte git stören
+            monkeypatch.setenv(name, wert)
+    gitkopie.arbeitskopie(str(repo), str(tmp_path / "ziel"))
+    gitkopie.repo_hinweise(str(repo))
+    gitkopie.repo_konfiguration(str(repo))
+    aufrufe = protokoll(log)
+    pruefe_aufrufe(aufrufe)
+    befehle = " | ".join(a for a, _ in aufrufe)
+    for erwartet in ("cat-file --batch", "ls-tree", "ls-files", "rev-parse --show-object-format"):
+        assert erwartet in befehle, erwartet
+
+
+# ---------------------------------------------------------------- Fehlerpfade von git()
+
+def test_git_timeout_wird_giterror(tmp_path, monkeypatch):
+    repo = repo_mit(tmp_path, {"a.txt": b"a"})
+    shim_git(tmp_path, monkeypatch, durchreichen=False, vorab="exec sleep 10")
+    with pytest.raises(gitkopie.GitFehler, match="Timeout"):
+        gitkopie.git(str(repo), "status", timeout=1)
+
+
+def test_git_exit_ungleich_null_traegt_returncode_und_stderr(tmp_path, monkeypatch):
+    shim_git(tmp_path, monkeypatch, durchreichen=False, vorab="echo boom >&2; exit 1")
+    with pytest.raises(gitkopie.GitFehler) as info:
+        gitkopie.git(str(tmp_path), "status")
+    assert info.value.returncode == 1
+    assert b"boom" in info.value.stderr and "boom" in str(info.value)
+
+
+def test_git_nicht_startbar_wird_giterror(tmp_path, monkeypatch):
+    leer = tmp_path / "leer"
+    leer.mkdir()
+    monkeypatch.setenv("PATH", str(leer))
+    with pytest.raises(gitkopie.GitFehler, match="nicht startbar"):
+        gitkopie.git(str(tmp_path), "status")
+
+
+@pytest.mark.parametrize("scheitert, erwartet", [
+    ("ls-tree", "Kein HEAD lesbar"),
+    ("cat-file", "Symlinks und LFS-Pointern nicht möglich"),
+    ("ls-files", "Index nicht lesbar"),
+    ("rev-parse", "Objektformat nicht ermittelbar"),
+])
+def test_repo_hinweise_git_fehler_werden_hinweise(tmp_path, monkeypatch, scheitert, erwartet):
+    repo = repo_mit(tmp_path, {"a.txt": b"a\n", "l": (SYMLINK, b"a.txt")})
+    shim_git(tmp_path, monkeypatch, vorab='case " $* " in *" $SHIM_FAIL "*) echo kaputt >&2; exit 1;; esac')
+    monkeypatch.setenv("SHIM_FAIL", scheitert)
+    hinweise = gitkopie.repo_hinweise(str(repo))
+    assert any(erwartet in h for h in hinweise), hinweise
+
+
+# ---------------------------------------------------------------- Fehlerpfade des Batch-Prozesses
+
+def test_batch_muellantwort_und_abgeschnitten_sind_meldungen(tmp_path, monkeypatch):
+    repo = repo_mit(tmp_path, {"a.txt": b"a\n", "b.txt": b"b\n"})
+    vorab = {
+        "muell": 'case " $* " in *" cat-file "*) read x; echo garbage; cat >/dev/null; exit 0;; esac',
+        "abgeschnitten": 'case " $* " in *" cat-file "*) read x; printf "%s blob 10\\n" "$x"; printf abc; exit 0;; esac',
+    }
+    for name, skript in vorab.items():
+        shim_git(tmp_path, monkeypatch, vorab=skript)
+        meldungen = gitkopie.arbeitskopie(str(repo), str(tmp_path / f"ziel-{name}"))
+        assert any("Arbeitskopie unvollständig" in m for m in meldungen), (name, meldungen)
+        assert alle_dateien(tmp_path / f"ziel-{name}") == []   # nichts aus einem unzuverlässigen Strom geschrieben
+
+
+def test_fehlendes_objekt_wird_gemeldet(tmp_path):
+    repo = repo_mit(tmp_path, {"src/a.js": b"einmalig-a\n", "ln": (SYMLINK, b"src/a.js"), "ok.txt": b"ok\n"})
+    sha = roh(repo, "rev-parse", "HEAD:src/a.js").decode().strip()
+    os.unlink(repo / ".git" / "objects" / sha[:2] / sha[2:])
+    ziel, meldungen = kopie(tmp_path, repo)
+    assert any(m.startswith("Objekt fehlt") and "src/a.js" in m for m in meldungen), meldungen
+    assert any("ln" in m and "Ziel-Objekt fehlt" in m for m in meldungen), meldungen
+    assert alle_dateien(ziel) == ["ok.txt"]
+
+
+# ---------------------------------------------------------------- Schreiben ins Ziel
+
+def test_vorhandene_dateien_und_blatt_symlinks_im_ziel_werden_nicht_durchschrieben(tmp_path):
+    aussen = tmp_path / "aussen"
+    aussen.mkdir()
+    (aussen / "x").write_text("unberuehrt")
+    ziel = tmp_path / "ziel"
+    ziel.mkdir()
+    os.symlink(aussen / "x", ziel / "f")              # Blatt-Symlink auf vorhandene Datei
+    os.symlink(aussen / "neu", ziel / "d")            # hängender Blatt-Symlink
+    (ziel / "g").write_text("vorhanden")              # vorhandene normale Datei
+    repo = repo_mit(tmp_path, {"f": b"neu", "d": b"neu", "g": b"neu2", "h": b"h"})
+    meldungen = gitkopie.arbeitskopie(str(repo), str(ziel))
+    assert (aussen / "x").read_text() == "unberuehrt"
+    assert not (aussen / "neu").exists()
+    assert os.path.islink(ziel / "f") and os.path.islink(ziel / "d")
+    assert (ziel / "g").read_text() == "vorhanden"
+    assert (ziel / "h").read_bytes() == b"h"
+    for pfad in ("f", "d", "g"):
+        assert any(m.startswith(f"Schreiben fehlgeschlagen: {pfad} ") for m in meldungen), (pfad, meldungen)
+
+
+# ---------------------------------------------------------------- Symlink-Randfälle
+
+def test_symlink_randfaelle_werden_abgelehnt(tmp_path):
+    repo = repo_mit(tmp_path, {
+        "src/a.js": b"A\n",
+        "abs2": (SYMLINK, b"/src/a.js"),                # absolut, obwohl relativ im Baum vorhanden
+        "top": (SYMLINK, b"../src/a.js"),               # am Wurzelrand
+        "d/e": (SYMLINK, b"../../src/a.js"),
+        "lnk": (SYMLINK, b"nope/../src/a.js"),          # Zwischenkomponente existiert nicht
+        "ok": (SYMLINK, b"src/../src/a.js"),            # Kontrolle: gültig
+    })
+    ziel, meldungen = kopie(tmp_path, repo)
+    for abgelehnt, grund in (("abs2", "absolutes Ziel"), ("top", "verlässt das Repo"),
+                             ("d/e", "verlässt das Repo"), ("lnk", "existiert nicht")):
+        assert not os.path.lexists(ziel / abgelehnt), abgelehnt
+        assert any(m.startswith(f"Symlink übersprungen: {abgelehnt} ") and grund in m for m in meldungen), \
+            (abgelehnt, meldungen)
+    assert (ziel / "ok").read_bytes() == b"A\n"
+
+
+def test_symlink_kettengrenze_exakt(tmp_path):
+    eintraege = {"src/a.js": b"A\n"}
+    for i in range(7):
+        eintraege[f"c{i}"] = (SYMLINK, f"c{i + 1}".encode())
+    eintraege["c7"] = (SYMLINK, b"src/a.js")           # c0: 8 Symlinks
+    for i in range(8):
+        eintraege[f"d{i}"] = (SYMLINK, f"d{i + 1}".encode())
+    eintraege["d8"] = (SYMLINK, b"src/a.js")           # d0: 9 Symlinks
+    repo = repo_mit(tmp_path, eintraege)
+    ziel, meldungen = kopie(tmp_path, repo)
+    assert (ziel / "c0").read_bytes() == b"A\n"
+    assert (ziel / "d1").read_bytes() == b"A\n"        # 8 Symlinks
+    assert not os.path.lexists(ziel / "d0")
+    assert any(m.startswith("Symlink übersprungen: d0 ") and "tiefer als 8" in m for m in meldungen)
+
+
+def test_symlink_blob_groesse_grenze(tmp_path):
+    repo = baum_commit(neues_repo(tmp_path / "repo"), {
+        "src": ("tree", {"a.js": ("blob", DATEI, b"A\n")}),
+        "lang": ("blob", SYMLINK, b"x" * 4097),
+        "grenze": ("blob", SYMLINK, b"x" * 4096),
+        "kette": ("blob", SYMLINK, b"lang"),
+    })
+    ziel, meldungen = kopie(tmp_path, repo)
+    lang = [m for m in meldungen if m.startswith("Symlink übersprungen: lang ")]
+    assert len(lang) == 1 and "zu lang" in lang[0] and "xxxx" not in lang[0]
+    grenze = [m for m in meldungen if m.startswith("Symlink übersprungen: grenze ")]
+    assert len(grenze) == 1 and "zu lang" not in grenze[0] and "nicht im HEAD-Baum" in grenze[0]
+    kette = [m for m in meldungen if m.startswith("Symlink übersprungen: kette ")]
+    assert len(kette) == 1 and "zu lang" in kette[0]
+    assert any("Symlink: lang" in h and "zu lang" in h and "xxxx" not in h
+               for h in gitkopie.repo_hinweise(str(repo)))
+
+
+# ---------------------------------------------------------------- .git-Sperre, Kollision Ordner/Datei
+
+def test_git_komponenten_werden_gesperrt(tmp_path):
+    datei = ("tree", {"x": ("blob", DATEI, b"boese")})
+    repo = baum_commit(neues_repo(tmp_path / "repo"), {
+        ".GIT": datei, ".g​it": datei, "GIT~1": datei, ".gitignore": ("blob", DATEI, b"ok"),
+        "ok.txt": ("blob", DATEI, b"ok"),
+    })
+    ziel, meldungen = kopie(tmp_path, repo)
+    assert alle_dateien(ziel) == [".gitignore", "ok.txt"]
+    gesperrt = [m for m in meldungen if m.startswith("Pfad übersprungen") and "Komponente .git" in m]
+    assert len(gesperrt) == 3, meldungen
+    assert any(".GIT/x" in m for m in gesperrt) and any("GIT~1/x" in m for m in gesperrt)
+    assert any("\\u200b" in m for m in gesperrt)       # Zero-Width-Space sichtbar escaped
+
+
+def test_namenskollision_ordner_zuerst_dann_datei(tmp_path):
+    repo = baum_commit(neues_repo(tmp_path / "repo"), {
+        "B": ("tree", {"x": ("blob", DATEI, b"1")}), "b": ("blob", DATEI, b"2")})
+    ziel, meldungen = kopie(tmp_path, repo)
+    assert alle_dateien(ziel) == ["B", "B/x"]
+    assert any(m.startswith("Namenskollision: b ") and "kollidiert mit B;" in m for m in meldungen)
+
+
+# ---------------------------------------------------------------- Meldungen entschärfen
+
+def test_t_escaped_und_kappt():
+    assert gitkopie._t("a\nb\r\tc") == "a\\nb\\r\\tc"
+    assert gitkopie._t("\x1b[31mrot") == "\\x1b[31mrot"
+    assert gitkopie._t("‮​ ") == "\\u202e\\u200b\\u2028"
+    assert gitkopie._t(os.fsdecode(b"\xff")) == "\\xff"
+    assert gitkopie._t("ä b.js") == "ä b.js"
+    kurz = gitkopie._t("a" * 301)
+    assert kurz == "a" * 300 + "…"
+    assert gitkopie._t("a" * 300) == "a" * 300
+
+
+def test_meldungen_sind_einzeilig_ohne_steuerzeichen(tmp_path):
+    boese_name = ".env\n\x1b[31mROT‮"
+    lang = ".env" + "a" * 400
+    repo = baum_commit(neues_repo(tmp_path / "repo"), {
+        boese_name: ("blob", DATEI, b"x"),
+        lang: ("blob", DATEI, b"x"),
+        "l\nink": ("blob", SYMLINK, b"ziel\n\x1b[31m"),
+        "ok.txt": ("blob", DATEI, b"ok"),
+    })
+    ziel, meldungen = kopie(tmp_path, repo)
+    hinweise = gitkopie.repo_hinweise(str(repo))
+    for text in meldungen + hinweise:
+        assert "\n" not in text and "\x1b" not in text and "‮" not in text, repr(text)
+    assert any("\\n\\x1b[31mROT\\u202e" in m for m in meldungen)
+    assert any("l\\nink -> ziel\\n\\x1b[31m" in m for m in meldungen)
+    assert any("l\\nink -> ziel\\n\\x1b[31m" in h for h in hinweise)
+    gekappt = [m for m in meldungen if "aaaa" in m]
+    assert len(gekappt) == 1 and "…" in gekappt[0] and len(gekappt[0]) < 400
 
 
 # ---------------------------------------------------------------- repo_konfiguration
@@ -573,3 +832,66 @@ def test_arbeitskopie_ohne_head_wirft_giterror(tmp_path):
     repo = neues_repo(tmp_path / "leer")
     with pytest.raises(gitkopie.GitFehler):
         gitkopie.arbeitskopie(str(repo), str(tmp_path / "ziel"))
+
+
+# ---------------------------------------------------------------- repo_hinweise: weitere Fälle
+
+def test_repo_hinweise_unlesbare_datei(tmp_path):
+    repo = repo_mit(tmp_path, {"geheim.txt": b"x\n", "ok.txt": b"ok\n"})
+    os.chmod(repo / "geheim.txt", 0)
+    try:
+        hinweise = gitkopie.repo_hinweise(str(repo))
+    finally:
+        os.chmod(repo / "geheim.txt", 0o644)
+    assert any("geheim.txt" in h and "nicht prüfbar" in h for h in hinweise), hinweise
+    assert not any("ok.txt" in h for h in hinweise)
+
+
+def test_repo_hinweise_merge_konflikt(tmp_path):
+    repo = repo_mit(tmp_path, {"f.txt": b"base\n", "g.txt": b"g\n"})
+    shas = [roh(repo, "hash-object", "-w", "--stdin", eingabe=t).decode().strip()
+            for t in (b"base\n", b"ours\n", b"theirs\n")]
+    index_info = "".join(f"100644 {sha} {stufe}\tf.txt\n" for stufe, sha in enumerate(shas, 1))
+    roh(repo, "update-index", "--index-info", eingabe=index_info.encode())
+    hinweise = gitkopie.repo_hinweise(str(repo))
+    assert any("Merge-Konflikt" in h and "f.txt" in h for h in hinweise), hinweise
+
+
+@pytest.mark.parametrize("groesse, gemeldet", [(1023, True), (1024, True), (1025, False)])
+def test_lfs_pointer_groessenlimit(tmp_path, groesse, gemeldet):
+    inhalt = LFS + b"#" * (groesse - len(LFS))
+    assert len(inhalt) == groesse
+    repo = repo_mit(tmp_path, {"p.bin": inhalt})
+    hinweise = gitkopie.repo_hinweise(str(repo))
+    assert any("LFS-Pointer" in h and "p.bin" in h for h in hinweise) == gemeldet
+
+
+def test_blob_hash_laengenpruefung_und_formate(tmp_path):
+    datei = tmp_path / "f"
+    datei.write_bytes(b"hallo")
+    for algo in ("sha1", "sha256"):
+        fd = os.open(datei, os.O_RDONLY)
+        try:
+            assert gitkopie._blob_hash(algo, fd, 5) is not None
+            os.lseek(fd, 0, os.SEEK_SET)
+            assert gitkopie._blob_hash(algo, fd, 7) is None    # Datei kürzer als angekündigt
+            os.lseek(fd, 0, os.SEEK_SET)
+            assert gitkopie._blob_hash(algo, fd, 3) is None    # Datei länger als angekündigt
+        finally:
+            os.close(fd)
+    echt = subprocess.run(["git", "hash-object", "--no-filters", str(datei)], capture_output=True,
+                          text=True).stdout.strip()
+    fd = os.open(datei, os.O_RDONLY)
+    try:
+        assert gitkopie._blob_hash("sha1", fd, 5) == echt
+    finally:
+        os.close(fd)
+
+
+def test_repo_hinweise_sha256_repo(tmp_path):
+    repo = bauen(neues_repo(tmp_path / "repo", "--object-format=sha256"), {"a.txt": b"alt\n", "b.txt": b"b\n"})
+    roh(repo, "reset", "-q", "--hard")
+    assert gitkopie.repo_hinweise(str(repo)) == []
+    (repo / "a.txt").write_bytes(b"neu\n")
+    hinweise = gitkopie.repo_hinweise(str(repo))
+    assert len(hinweise) == 1 and "a.txt" in hinweise[0]
