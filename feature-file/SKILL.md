@@ -59,7 +59,7 @@ Eingang: `$ARGUMENTS`
 | Recherche-Ergebnisse als `Entschieden` | Recherche ist immer `Default` mit Quelle |
 | DoD „funktioniert zuverlässig“, „ist sicher“ | beobachtbares Verhalten mit ID und `[Test]`/`[Durchklick]`/`[Ops]` |
 | Offene Frage im File stehen lassen | `Default` mit `offen: …`, der Lauf berichtet sie |
-| Andockpunkte, Härtungsschwerpunkte, Review Focus, Effort, Tasks im File | genau die Abschnitte der Vorlage, der Rest entsteht in Spec und Plan des Laufs |
+| Andockpunkte, Härtungsschwerpunkte, Review Focus, Effort, Prüfbefehle, Tasks im File | genau die Abschnitte der Vorlage, der Rest entsteht in Spec und Plan des Laufs, Prüfbefehle liest der Lauf aus `CLAUDE.md` |
 | Sichtbare Produktentscheidung selbst getroffen („per Skript statt Oberfläche“) | Frage an den User mit Vorschlag |
 | Bugfix mit zwanzig Kriterien | Größe passend zum Problem |
 | Freigabe-Zeile vorab ausfüllen | erst nach ausdrücklichem OK |

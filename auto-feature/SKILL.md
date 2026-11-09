@@ -22,8 +22,8 @@ Feature-File: `$ARGUMENTS`
 ## Start
 
 1. Das Feature-File und `CLAUDE.md` vollständig lesen. Format und Regeln des Feature-Files: `~/.claude/skills/auto-feature/references/feature-file.md`. In Teilfeatures (TF) zerlegen. Reihenfolge und Abhängigkeiten aus dem File übernehmen. Ein TF ergibt einen PR.
-   - **DoD-IDs:** Hat das File keine `TF<n>-D<m>`-IDs (ältere Files), vergibt die Spec sie in der Reihenfolge des Files und vermerkt das im Abschlussbericht.
-   - **Schreibgeschützt:** Das Feature-File bleibt im Lauf unverändert, außer im Abschnitt „Offene Review-Punkte“. Abweichungen stehen in Spec, PR und Abschlussbericht.
+   - **DoD-IDs und Nachweis-Art:** Hat das File keine `TF<n>-D<m>`-IDs oder keine Nachweis-Art (ältere Files), vergibt die Spec beides: IDs in der Reihenfolge des Files, Nachweis-Art je Punkt, im Zweifel `[Test]`. Das steht im Abschlussbericht.
+   - **Schreibgeschützt:** Das Feature-File bleibt im Lauf unverändert, auch ein vorhandener Abschnitt „Offene Review-Punkte“ (parallele TF-Branches würden sonst kollidieren). Abweichungen und offene Punkte stehen in Spec, Plan, PR-Body und Abschlussbericht.
 2. Voraussetzungen prüfen:
    - `gh auth status` und ein Remote vorhanden.
    - Prüfbefehle bekannt: aus `CLAUDE.md`, ergänzt um Typecheck/Build, falls `package.json`/`Makefile`/`pyproject.toml`/CI-Konfiguration sie haben.

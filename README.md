@@ -17,7 +17,7 @@ Der aktuelle Stand des Repos umfasst neun produktiv nutzbare Skills plus drei Ag
 | `fix-findings` | Fixer-Thread (Effort high, von `pr-review-loop` mit Sonnet gestartet): prueft eingefuegte Review-Befunde, setzt angenommene per Test → Fix → Commit um, vor dem Push nur Typecheck und abhaengige Tests (ganze Suite in der CI, ohne CI einmal vor dem Push), pusht, liefert Entscheidungstabelle; Merge/Deploy nur auf Befehlswort | `fix-findings/SKILL.md` |
 | `auto-feature` | Autonomer Feature-Workflow aus einem Feature-File ohne Zwischenhalt: Spec (Opus 5.5) → Opus-Review max. 2 → Plan (Opus 5.5) → Opus-Review max. 2 → Sonnet-5.5-Umsetzung → Haertung → PRs → harter Stopp (HITL); Effort xhigh, nur Re-Reviews, lesende Refactor-/UI-Reviews und mechanische Tasks mit `sonnet-high`; ganze Suite einmal je TF; Agent-Statistik Pflicht (Format gilt fuer alle Skills, Skript `scripts/agent-stats.py` fuer Eintrag, Auswertung (auch je Skill-Stand), Thread-Tokens aus Transkripten und den Stempel `Skills: generalskills@<sha>` im Kopf jeder Statistik); kein PR-Review-Loop, kein Merge; Format des Feature-Files mit DoD-IDs und Nachweis-Art in `references/feature-file.md` | `auto-feature/SKILL.md`, `auto-feature/references/feature-file.md`, `auto-feature/scripts/agent-stats.py` |
 | `feature-file` | Macht aus Kundenwunsch, Call-Notiz oder Idee ein Feature-File fuer `auto-feature`: Ist-Stand im Code zuerst, Interview nur fuer Entscheidungen von User oder Kunde, Recherche nur als Default mit Quelle, Builder-Check durch einen frischen `opus-xhigh`, Freigabe-Zeile erst nach OK | `feature-file/SKILL.md` |
-| `agents/opus-xhigh`, `agents/sonnet-xhigh`, `agents/sonnet-high` | Subagent-Definitionen mit `effort: xhigh` fuer Reviews bzw. Umsetzung, genutzt von `pr-review-loop` und `auto-feature`; `sonnet-high` (`effort: high`) fuer die Delta-Reviews in `pr-review-loop` und die Abschlaege nach der Effort-Regel in `auto-feature` | `agents/*.md` |
+| `agents/opus-xhigh`, `agents/sonnet-xhigh`, `agents/sonnet-high` | Subagent-Definitionen mit `effort: xhigh` fuer Reviews bzw. Umsetzung, genutzt von `pr-review-loop`, `auto-feature` und `feature-file` (Builder-Check); `sonnet-high` (`effort: high`) fuer die Delta-Reviews in `pr-review-loop` und die Abschlaege nach der Effort-Regel in `auto-feature` | `agents/*.md` |
 
 ## Repository-Struktur
 
@@ -268,7 +268,7 @@ for s in pr-review-loop fix-findings auto-feature feature-file; do ln -sfn ~/Pro
 for a in opus-xhigh sonnet-xhigh sonnet-high; do ln -sfn ~/Projects/skillz/nikskills/agents/$a.md ~/.claude/agents/$a.md; done
 ```
 
-`pr-review-loop` und `auto-feature` setzen `effort: xhigh` im Frontmatter, `auto-feature` zusaetzlich `model: opus`; `fix-findings` setzt `effort: high`.
+`pr-review-loop`, `auto-feature` und `feature-file` setzen `effort: xhigh` im Frontmatter, `auto-feature` und `feature-file` zusaetzlich `model: opus`; `fix-findings` setzt `effort: high`.
 Die Subagenten bekommen Effort ueber die Agent-Typen `opus-xhigh`/`sonnet-xhigh`/`sonnet-high`; fehlen sie,
 weichen die Skills auf `general-purpose` mit explizitem `model` aus und melden „Effort nicht garantiert“.
 
@@ -278,7 +278,7 @@ stehen im jeweiligen Repo-`CLAUDE.md`, nicht in den Skills.
 
 Gemeinsame harte Regel: Kein Skill merged oder deployt von sich aus. `fix-findings` tut es
 nur auf ausdrückliches Befehlswort des Users (in den Argumenten oder im eigenen Begleitsatz,
-bzw. ein „ja“ auf die Rückfrage, wenn der Merge automatisch deployt); die anderen beiden nie.
+bzw. ein „ja“ auf die Rückfrage, wenn der Merge automatisch deployt); die anderen nie.
 
 ## Laufzeitannahmen
 
