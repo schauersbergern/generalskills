@@ -21,7 +21,9 @@ Feature-File: `$ARGUMENTS`
 
 ## Start
 
-1. Das Feature-File und `CLAUDE.md` vollständig lesen. In Teilfeatures (TF) zerlegen. Reihenfolge und Abhängigkeiten aus dem File übernehmen. Ein TF ergibt einen PR.
+1. Das Feature-File und `CLAUDE.md` vollständig lesen. Format und Regeln des Feature-Files: `~/.claude/skills/auto-feature/references/feature-file.md`. In Teilfeatures (TF) zerlegen. Reihenfolge und Abhängigkeiten aus dem File übernehmen. Ein TF ergibt einen PR.
+   - **DoD-IDs und Nachweis-Art:** Hat das File keine `TF<n>-D<m>`-IDs oder keine Nachweis-Art (ältere Files), vergibt die Spec beides: IDs in der Reihenfolge des Files, Nachweis-Art je Punkt, im Zweifel `[Test]`. Das steht im Abschlussbericht.
+   - **Schreibgeschützt:** Das Feature-File bleibt im Lauf unverändert, auch ein vorhandener Abschnitt „Offene Review-Punkte“ (parallele TF-Branches würden sonst kollidieren). Abweichungen und offene Punkte stehen in Spec, Plan, PR-Body und Abschlussbericht.
 2. Voraussetzungen prüfen:
    - `gh auth status` und ein Remote vorhanden.
    - Prüfbefehle bekannt: aus `CLAUDE.md`, ergänzt um Typecheck/Build, falls `package.json`/`Makefile`/`pyproject.toml`/CI-Konfiguration sie haben.
@@ -38,7 +40,7 @@ Feature-File: `$ARGUMENTS`
 
 | Phase | Wer | Regel |
 |---|---|---|
-| A Spec | Hauptsession (**Opus 5.5**) · `superpowers:brainstorming` im Autonom-Modus | Repo-Konvention, sonst `docs/superpowers/specs/<YYYY-MM-DD>-<tf>-design.md` (Ordner ggf. anlegen); Ziel, Andockpunkte mit Pfaden, Abnahmekriterien aus der DoD; Commit auf dem TF-Branch |
+| A Spec | Hauptsession (**Opus 5.5**) · `superpowers:brainstorming` im Autonom-Modus | Repo-Konvention, sonst `docs/superpowers/specs/<YYYY-MM-DD>-<tf>-design.md` (Ordner ggf. anlegen); Ziel, Andockpunkte mit Pfaden, Abnahmekriterien = DoD-Punkte mit ihren IDs; „Entschieden“ ist bindend, von „Default“ nur mit Begründung unter „Entscheidungen/Annahmen“ abweichen; Commit auf dem TF-Branch |
 | B Spec-Review | frischer `opus-xhigh`-Subagent je Runde | **max. 2 Runden** |
 | C Plan | Hauptsession (**Opus 5.5**) · `superpowers:writing-plans` | Repo-Konvention, sonst `docs/superpowers/plans/<YYYY-MM-DD>-<tf>.md`; TDD-Tasks mit exakten Pfaden; Abschnitt „Review Focus“ mit fester Checkliste (siehe „Plan (C)“); Commit auf dem TF-Branch |
 | D Plan-Review | frischer `opus-xhigh`-Subagent je Runde | **max. 2 Runden** |
@@ -55,6 +57,8 @@ Feature-File: `$ARGUMENTS`
 - `finishing-a-development-branch`: Die Antwort ist immer „PR öffnen“.
 
 ## Plan (C): Review Focus
+
+**DoD-Abdeckung:** Jeder DoD-Punkt mit Nachweis `[Test]` steht im Plan mit Task und Test (`TF1-D2 → Task 3, Test <Name>`). `[Durchklick]`- und `[Ops]`-Punkte kommen in die PR-Checkliste. Ein `[Test]`-Punkt ohne Task und Test ist ein Plan-Fehler.
 
 Jeder Plan hat einen Abschnitt **„Review Focus“**. Er beginnt mit der folgenden festen Checkliste wiederkehrender Fehlerklassen, danach folgen TF-spezifische Punkte. Je Punkt steht im Plan entweder „trifft zu → Task <n>, Test <Name>“ oder „trifft nicht zu“ mit einem Satz Begründung. Ein zutreffender Punkt ohne Task und Test ist ein Plan-Fehler.
 
@@ -77,7 +81,7 @@ Jeder Plan hat einen Abschnitt **„Review Focus“**. Er beginnt mit der folgen
 - Pro Runde ein **neuer** `Agent(subagent_type: "opus-xhigh", model: "opus")`, ohne Wissen aus der Vorrunde. **`model: "opus"` explizit setzen.**
 - **Briefing:**
   - Pfad der Spec bzw. des Plans, Feature-File, Hinweis auf `CLAUDE.md`
-  - Auftrag „als Design prüfen“: fehlende Anforderungen, Widersprüche, falsche Datei-/Typ-Annahmen gegen den echten Code, Sicherheits- und Betriebsrisiken, Testbarkeit; beim Plan zusätzlich: deckt er die Spec vollständig ab, und ist jeder Punkt der „Review Focus“-Checkliste gegen den echten Code richtig als zutreffend/nicht zutreffend eingestuft und mit Task und Test hinterlegt?
+  - Auftrag „als Design prüfen“: fehlende Anforderungen, Widersprüche, falsche Datei-/Typ-Annahmen gegen den echten Code, Sicherheits- und Betriebsrisiken, Testbarkeit; beim Plan zusätzlich: deckt er die Spec und jeden DoD-Punkt per ID vollständig ab, und ist jeder Punkt der „Review Focus“-Checkliste gegen den echten Code richtig als zutreffend/nicht zutreffend eingestuft und mit Task und Test hinterlegt?
   - Ausgabe Blocker / Wichtig / Klein mit Datei-/Zeilenbeleg
   - **ändert nichts** im Repo, kein `git checkout`/`switch`/`stash`/`reset`, keine Subagenten (im eigenen Wegwerf-Repo, nächster Punkt, sind Edits und git-Befehle erlaubt)
   - Wegwerf-Repos und Messskripte nur in einem frischen Temp-Verzeichnis: `d=$(mktemp -d) && cd "$d" || exit 1`, alle weiteren Befehle in derselben `&&`-Kette oder mit absoluten Pfaden unter `$d`. `$d` gilt nur im selben Bash-Aufruf, in Folgeaufrufen den ausgegebenen Pfad wörtlich einsetzen (`git -C /…/tmp.XXXX …`), nie `$d` (`cd ""` gelingt und bleibt im Repo). Nie `rm` als ersten Schritt einer Kette, nie ein Skript ohne geprüftes `cd`.
@@ -162,7 +166,7 @@ Vor dem PR den gebauten Code systematisch durchgehen und diese acht Fragen **sch
 - **Body:**
   - was gebaut wurde
   - Links zu Spec und Plan
-  - DoD als Haken
+  - DoD als Haken mit IDs, `[Durchklick]`-Punkte als Checkliste für den User
   - Härtungsdurchgang
   - Offene Review-Punkte
   - Verifikations-Output
