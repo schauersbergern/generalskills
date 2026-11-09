@@ -40,7 +40,7 @@ Feature-File: `$ARGUMENTS`
 
 | Phase | Wer | Regel |
 |---|---|---|
-| A Spec | Hauptsession (**Opus 5.5**) · `superpowers:brainstorming` im Autonom-Modus | Repo-Konvention, sonst `docs/superpowers/specs/<YYYY-MM-DD>-<tf>-design.md` (Ordner ggf. anlegen); Ziel, Andockpunkte mit Pfaden, Abnahmekriterien = DoD-Punkte mit ihren IDs; „Entschieden“ ist bindend, von „Default“ nur mit Begründung unter „Entscheidungen/Annahmen“ abweichen; Commit auf dem TF-Branch |
+| A Spec | Hauptsession (**Opus 5.5**) · `superpowers:brainstorming` im Autonom-Modus | Repo-Konvention, sonst `docs/superpowers/specs/<YYYY-MM-DD>-<tf>-design.md` (Ordner ggf. anlegen); Ziel, Andockpunkte mit Pfaden, Abnahmekriterien = DoD-Punkte mit ihren IDs; „Entschieden“ ist bindend, von „Default“ nur mit Begründung unter „Entscheidungen/Annahmen“ abweichen; offene Code-/Betriebsentscheidung, die ein Revert nicht zurücknimmt (Bestandsdaten-Migration, Vertrag nach außen, Auth/Rechte, Datenhaltung): erst `architektur-rat`, beide Voten unter „Entscheidungen/Annahmen“; Commit auf dem TF-Branch |
 | B Spec-Review | frischer `opus-xhigh`-Subagent je Runde | **max. 2 Runden** |
 | C Plan | Hauptsession (**Opus 5.5**) · `superpowers:writing-plans` | Repo-Konvention, sonst `docs/superpowers/plans/<YYYY-MM-DD>-<tf>.md`; TDD-Tasks mit exakten Pfaden; Abschnitt „Review Focus“ mit fester Checkliste (siehe „Plan (C)“); Commit auf dem TF-Branch |
 | D Plan-Review | frischer `opus-xhigh`-Subagent je Runde | **max. 2 Runden** |
