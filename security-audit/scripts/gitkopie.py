@@ -24,6 +24,8 @@ import unicodedata
 from typing import NamedTuple
 
 MAX_SYMLINK_KETTE = 8
+MAX_SYMLINK_GROESSE = 4096
+MAX_TEXT = 300
 BATCH_TIMEOUT = 600
 LFS_PREFIX = b"version https://git-lfs"
 LFS_MAX_GROESSE = 1024
@@ -148,6 +150,25 @@ def _baum(repo: str) -> list[Eintrag]:
     return eintraege
 
 
+def _t(text: object, grenze: int = MAX_TEXT) -> str:
+    """Repo-stämmigen Text für Meldungen entschärfen: Steuer-/Formatzeichen (Newline, ESC, Bidi, Zero-Width)
+    als Escape-Sequenz, Länge auf `grenze` Zeichen kappen. Meldungen fließen in den LLM-Kontext."""
+    kurz = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+    aus = []
+    for ch in str(text):
+        o = ord(ch)
+        if ch in kurz:
+            aus.append(kurz[ch])
+        elif 0xDC80 <= o <= 0xDCFF:                      # surrogateescape: ungültiges UTF-8 im Namen
+            aus.append(f"\\x{o - 0xDC00:02x}")
+        elif unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Zl", "Zp"):
+            aus.append(f"\\x{o:02x}" if o < 0x100 else f"\\u{o:04x}" if o < 0x10000 else f"\\U{o:08x}")
+        else:
+            aus.append(ch)
+    ergebnis = "".join(aus)
+    return ergebnis if len(ergebnis) <= grenze else ergebnis[:grenze] + "…"
+
+
 def _schluessel(text: str) -> str:
     return unicodedata.normalize("NFC", text).casefold()
 
@@ -244,6 +265,8 @@ def _symlink_ziel(pfad: str, text: str, eintraege: dict[str, Eintrag], ordner: s
             return e, ""
         if e.modus != "120000":
             return None, "Ziel ist weder Datei noch Symlink"
+        if e.groesse > MAX_SYMLINK_GROESSE:
+            return None, "Symlink-Ziel zu lang"
         inhalt = batch.lies(e.sha)
         if inhalt is None:
             return None, "Ziel-Objekt fehlt"
@@ -293,56 +316,66 @@ def arbeitskopie(repo: str, ziel: str) -> list[str]:
     with _Batch(repo) as batch:
         for e in baum:
             pfad = e.pfad
+            p = _t(pfad)
             grund = _pfad_problem(pfad)
             if grund:
-                meldungen.append(f"Pfad übersprungen: {pfad} ({grund})")
+                meldungen.append(f"Pfad übersprungen: {p} ({grund})")
                 continue
             if e.art == "commit" or e.modus == "160000":
-                meldungen.append(f"Submodul nicht kopiert: {pfad}")
+                meldungen.append(f"Submodul nicht kopiert: {p}")
                 continue
             if _env_datei(pfad):
-                meldungen.append(f"Übersprungen (.env-Datei): {pfad}")
+                meldungen.append(f"Übersprungen (.env-Datei): {p}")
+                continue
+            if e.modus == "120000" and e.groesse > MAX_SYMLINK_GROESSE:
+                meldungen.append(f"Symlink übersprungen: {p} (Symlink-Ziel zu lang: {e.groesse} Bytes)")
                 continue
             try:
                 inhalt = batch.lies(e.sha)
                 if inhalt is None:
-                    meldungen.append(f"Objekt fehlt, übersprungen: {pfad}")
+                    meldungen.append(f"Objekt fehlt, übersprungen: {p}")
                     continue
                 herkunft = ""
                 if e.modus == "120000":
                     text = os.fsdecode(inhalt)
+                    t = _t(text)
                     ziel_blob, grund = _symlink_ziel(pfad, text, eintraege, ordner, batch)
                     if ziel_blob is None:
-                        meldungen.append(f"Symlink übersprungen: {pfad} -> {text} ({grund})")
+                        meldungen.append(f"Symlink übersprungen: {p} -> {t} ({grund})")
                         continue
-                    ziel_grund = _pfad_problem(ziel_blob.pfad)
-                    if ziel_grund or _env_datei(ziel_blob.pfad):
-                        meldungen.append(f"Symlink übersprungen: {pfad} -> {text} "
-                                         f"(Ziel {ziel_blob.pfad} ist gesperrt)")
+                    if _pfad_problem(ziel_blob.pfad) or _env_datei(ziel_blob.pfad):
+                        meldungen.append(f"Symlink übersprungen: {p} -> {t} "
+                                         f"(Ziel {_t(ziel_blob.pfad)} ist gesperrt)")
                         continue
                     inhalt = batch.lies(ziel_blob.sha)
                     if inhalt is None:
-                        meldungen.append(f"Symlink übersprungen: {pfad} -> {text} (Ziel-Objekt fehlt)")
+                        meldungen.append(f"Symlink übersprungen: {p} -> {t} (Ziel-Objekt fehlt)")
                         continue
-                    herkunft = f"Symlink {pfad} -> {text} als normale Datei kopiert (Inhalt von {ziel_blob.pfad})"
+                    herkunft = (f"Symlink {p} -> {t} als normale Datei kopiert "
+                                f"(Inhalt von {_t(ziel_blob.pfad)})")
                     ausfuehrbar = False
                 elif e.art == "blob":
                     ausfuehrbar = bool(int(e.modus, 8) & 0o100)
                 else:
-                    meldungen.append(f"Eintrag übersprungen: {pfad} (Typ {e.art})")
+                    meldungen.append(f"Eintrag übersprungen: {p} (Typ {_t(e.art)})")
                     continue
                 erster = namen.kollision(pfad)
                 if erster:
-                    meldungen.append(f"Namenskollision: {pfad} kollidiert mit {erster}; übersprungen")
+                    meldungen.append(f"Namenskollision: {p} kollidiert mit {_t(erster)}; übersprungen")
                     continue
                 _schreibe(wurzel, pfad, inhalt, ausfuehrbar)
                 namen.belege(pfad)
                 if herkunft:
                     meldungen.append(herkunft)
                 if inhalt.startswith(LFS_PREFIX):
-                    meldungen.append(f"LFS-Pointer: {pfad} (nur der Pointer wurde kopiert, nicht der Inhalt)")
+                    meldungen.append(f"LFS-Pointer: {p} (nur der Pointer wurde kopiert, nicht der Inhalt)")
             except OSError as err:
-                meldungen.append(f"Schreiben fehlgeschlagen: {pfad} ({err})")
+                meldungen.append(f"Schreiben fehlgeschlagen: {p} ({_t(err)})")
+            except GitFehler as err:
+                # Der Batch-Strom ist nach einem Fehler nicht mehr verlässlich: abbrechen, nicht raten.
+                meldungen.append(f"Arbeitskopie unvollständig: git cat-file abgebrochen bei {p} ({_t(err)}); "
+                                 f"alle weiteren Dateien fehlen")
+                break
     return meldungen
 
 
@@ -409,17 +442,17 @@ def repo_hinweise(repo: str) -> list[str]:
     try:
         baum = _baum(repo)
     except GitFehler as e:
-        return [f"Kein HEAD lesbar, Prüfung nicht möglich: {e}"]
+        return [f"Kein HEAD lesbar, Prüfung nicht möglich: {_t(e)}"]
 
     eintraege = {e.pfad: e for e in baum}
     namen = _Namensraum()
     for e in baum:
         if e.art == "commit" or e.modus == "160000":
-            hinweise.append(f"Submodul: {e.pfad} (nicht in der Arbeitskopie)")
+            hinweise.append(f"Submodul: {_t(e.pfad)} (nicht in der Arbeitskopie)")
             continue
         erster = namen.kollision(e.pfad)
         if erster:
-            hinweise.append(f"Namenskollision: {e.pfad} und {erster} (gleicher Name nach NFC/casefold)")
+            hinweise.append(f"Namenskollision: {_t(e.pfad)} und {_t(erster)} (gleicher Name nach NFC/casefold)")
         else:
             namen.belege(e.pfad)
 
@@ -427,38 +460,41 @@ def repo_hinweise(repo: str) -> list[str]:
         with _Batch(repo) as batch:
             for e in baum:
                 if e.modus == "120000":
+                    if e.groesse > MAX_SYMLINK_GROESSE:
+                        hinweise.append(f"Symlink: {_t(e.pfad)} (Symlink-Ziel zu lang: {e.groesse} Bytes)")
+                        continue
                     inhalt = batch.lies(e.sha)
-                    ziel = os.fsdecode(inhalt) if inhalt is not None else "?"
-                    hinweise.append(f"Symlink: {e.pfad} -> {ziel}")
+                    ziel = _t(os.fsdecode(inhalt)) if inhalt is not None else "?"
+                    hinweise.append(f"Symlink: {_t(e.pfad)} -> {ziel}")
                 elif e.art == "blob" and e.groesse <= LFS_MAX_GROESSE:
                     inhalt = batch.lies(e.sha)
                     if inhalt is not None and inhalt.startswith(LFS_PREFIX):
-                        hinweise.append(f"LFS-Pointer: {e.pfad} (Inhalt liegt nicht im Repo)")
+                        hinweise.append(f"LFS-Pointer: {_t(e.pfad)} (Inhalt liegt nicht im Repo)")
     except (GitFehler, OSError) as err:
-        hinweise.append(f"Prüfung von Symlinks und LFS-Pointern nicht möglich: {err}")
+        hinweise.append(f"Prüfung von Symlinks und LFS-Pointern nicht möglich: {_t(err)}")
 
     try:
         index, konflikte = _index(repo)
     except GitFehler as err:
-        hinweise.append(f"Index nicht lesbar, Prüfung auf Änderungen nicht möglich: {err}")
+        hinweise.append(f"Index nicht lesbar, Prüfung auf Änderungen nicht möglich: {_t(err)}")
         return hinweise
     for pfad in konflikte:
-        hinweise.append(f"Merge-Konflikt im Index: {pfad}")
+        hinweise.append(f"Merge-Konflikt im Index: {_t(pfad)}")
     for pfad, (modus, sha) in sorted(index.items()):
         kopf = eintraege.get(pfad)
         if kopf is None:
-            hinweise.append(f"Gestagt hinzugefügt (nicht in HEAD): {pfad}")
+            hinweise.append(f"Gestagt hinzugefügt (nicht in HEAD): {_t(pfad)}")
         elif (kopf.modus, kopf.sha) != (modus, sha):
-            hinweise.append(f"Gestagte Änderung gegenüber HEAD: {pfad}")
+            hinweise.append(f"Gestagte Änderung gegenüber HEAD: {_t(pfad)}")
     for pfad in sorted(eintraege):
         if pfad not in index and eintraege[pfad].art == "blob":
-            hinweise.append(f"Gestagt gelöscht (in HEAD, nicht im Index): {pfad}")
+            hinweise.append(f"Gestagt gelöscht (in HEAD, nicht im Index): {_t(pfad)}")
 
     try:
         algo = "sha256" if git(repo, "rev-parse", "--show-object-format").stdout.strip() == b"sha256" else "sha1"
     except GitFehler as err:
         hinweise.append(f"Objektformat nicht ermittelbar, Prüfung auf Änderungen im Arbeitsbaum "
-                        f"nicht möglich: {err}")
+                        f"nicht möglich: {_t(err)}")
         return hinweise
 
     wurzel = os.path.realpath(repo)
@@ -472,29 +508,29 @@ def repo_hinweise(repo: str) -> list[str]:
             real = os.path.realpath(eltern)
             ordner_ok[eltern] = os.path.commonpath([real, wurzel]) == wurzel
         if not ordner_ok[eltern]:
-            hinweise.append(f"Typ im Arbeitsbaum geändert (Elternordner führt aus dem Repo): {pfad}")
+            hinweise.append(f"Typ im Arbeitsbaum geändert (Elternordner führt aus dem Repo): {_t(pfad)}")
             continue
         try:
             st = os.lstat(voll)
             if not stat.S_ISREG(st.st_mode):
-                hinweise.append(f"Typ im Arbeitsbaum geändert (keine normale Datei mehr): {pfad}")
+                hinweise.append(f"Typ im Arbeitsbaum geändert (keine normale Datei mehr): {_t(pfad)}")
                 continue
             fd = os.open(voll, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
                          | getattr(os, "O_CLOEXEC", 0))
             try:
                 fst = os.fstat(fd)
                 if not stat.S_ISREG(fst.st_mode):
-                    hinweise.append(f"Typ im Arbeitsbaum geändert (keine normale Datei mehr): {pfad}")
+                    hinweise.append(f"Typ im Arbeitsbaum geändert (keine normale Datei mehr): {_t(pfad)}")
                     continue
                 aktuell = _blob_hash(algo, fd, fst.st_size)
             finally:
                 os.close(fd)
         except FileNotFoundError:
-            hinweise.append(f"Im Arbeitsbaum gelöscht: {pfad}")
+            hinweise.append(f"Im Arbeitsbaum gelöscht: {_t(pfad)}")
             continue
         except OSError as err:
-            hinweise.append(f"Datei im Arbeitsbaum nicht prüfbar: {pfad} ({err})")
+            hinweise.append(f"Datei im Arbeitsbaum nicht prüfbar: {_t(pfad)} ({_t(err)})")
             continue
         if aktuell != sha:
-            hinweise.append(f"Uncommittete Änderung im Arbeitsbaum: {pfad}")
+            hinweise.append(f"Uncommittete Änderung im Arbeitsbaum: {_t(pfad)}")
     return hinweise
