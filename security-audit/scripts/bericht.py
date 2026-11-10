@@ -3,6 +3,8 @@
   bericht.py kontext [--teilpfad P] [--repo R]   JSON mit Repo-Kontext auf stdout (Exit 3: kein Repo/HEAD,
                                                   ungültiger Teilpfad; das Argument nach `--teilpfad` ist immer der
                                                   Wert, auch `-x`, oder `--teilpfad=-x`)
+  bericht.py repo [--repo R]                      Repo-Name (genau `kontext`-Feld `repo`) auf stdout, ohne Seiteneffekte
+                                                  (Exit 3: kein Repo)
   bericht.py rendern <json>                       Schema prüfen, <basisname>.md neben das JSON schreiben
                                                   (Exit 2 mit Fehlerliste auf stderr)
 
@@ -101,6 +103,18 @@ def _teilpfad(wurzel: str, teilpfad: str, sha: str = "HEAD") -> str:
 def _zeitbudget_meldung(e: Exception) -> str:
     return (f"Zeitbudget von bericht.py kontext erschöpft ({_t(e)}). Größere Repos: SECURITY_AUDIT_KONTEXT_TIMEOUT "
             f"(Sekunden, Standard {KONTEXT_BUDGET}) erhöhen; Bash-Limit des Skills sind 600 s.")
+
+
+def repo_name_von(repo: str) -> str:
+    """Name des Repos unter dem Pfad `repo` wie im `kontext`-Feld `repo`, ohne HEAD-Prüfung und ohne Dateien anzulegen;
+    wirft KontextFehler (CLI: Exit 3), wenn dort kein git-Repository liegt."""
+    try:
+        wurzel = os.fsdecode(git(repo, "rev-parse", "--show-toplevel").stdout).rstrip("\n")
+    except ZeitbudgetFehler as e:
+        raise KontextFehler(_zeitbudget_meldung(e)) from e
+    except GitFehler as e:
+        raise KontextFehler(f"Kein git-Repository unter {_t(repo)}: {_t(e)}") from e
+    return _repo_name(wurzel)
 
 
 def _slug(teilpfad: str) -> str:
@@ -512,11 +526,21 @@ def main(argv: list[str]) -> int:
     k = sub.add_parser("kontext")
     k.add_argument("--teilpfad")
     k.add_argument("--repo", default=".")
+    rp = sub.add_parser("repo")
+    rp.add_argument("--repo", default=".")
     r = sub.add_parser("rendern")
     r.add_argument("json")
     args = ap.parse_args(_argv_mit_werten(argv))
     if args.befehl == "rendern":
         return _rendern(args.json)
+    if args.befehl == "repo":
+        try:
+            name = repo_name_von(args.repo)
+        except KontextFehler as e:
+            print(str(e), file=sys.stderr)
+            return 3
+        print(name)
+        return 0
     try:
         gitkopie.frist_setzen(time.monotonic() + _kontext_budget())
         ergebnis = kontext(args.repo, args.teilpfad)

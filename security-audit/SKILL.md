@@ -124,7 +124,7 @@ Beim Ausweichtyp `--typ general-purpose --modell opus`. Fehlt `<usage>`, setze `
 
 ## Schlussmeldung
 
-Pfade von `.md` und `.json`, Zahl der Befunde je Stufe und Status, Zahl der Verworfenen und Verdachtsfälle, die Hinweise mit Kategorie (z. B. `docker-fehlt`: keine PoCs, alle P1/P2 nur `unbestätigt`), Zahl der Subagenten. Danach die Befundliste (Codeblock aus der `.md`, unverändert) für `/fix-findings`.
+Pfade von `.md` und `.json`, Zahl der Befunde je Stufe und Status, Zahl der Verworfenen und Verdachtsfälle, die Hinweise mit Kategorie (z. B. `docker-fehlt`: keine PoCs, alle P1/P2 nur `unbestätigt`), Zahl der Subagenten. Danach die Befundliste (Codeblock aus der `.md`, unverändert) für `/fix-findings`. `/fix-findings` gleicht das Repo der Liste mit `python3 -I ${CLAUDE_SKILL_DIR}/scripts/bericht.py repo --repo <pfad>` ab (nur Name auf stdout, legt nichts an; Exit 3: kein Repo).
 
 ## Typische Fehler
 

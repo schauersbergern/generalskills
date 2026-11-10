@@ -282,6 +282,63 @@ def test_kontext_cli_json(tmp_path):
     assert k["repo"] == "kunde-portal"
 
 
+# ------------------------------------------------------------------------------------ repo (TF5)
+
+def test_repo_befehl_aus_origin(tmp_path):
+    r = neues_repo(tmp_path / "ordner", origin="https://x/a/kunde-portal.git")
+    p = lauf("repo", "--repo", str(r))
+    assert p.returncode == 0, p.stderr
+    assert p.stdout == "kunde-portal\n"
+
+
+def test_repo_befehl_ohne_origin_worktree(tmp_path):
+    r = neues_repo(tmp_path / "haupt-repo")
+    wt = tmp_path / "anderer-name"
+    roh(r, "worktree", "add", "-q", str(wt), "-b", "feature")
+    p = lauf("repo", cwd=str(wt))                                       # Default: cwd
+    assert p.returncode == 0, p.stderr
+    assert p.stdout == "haupt-repo\n"
+
+
+def test_repo_befehl_ohne_git(tmp_path):
+    leer = tmp_path / "leer"
+    leer.mkdir()
+    for argumente in (("--repo", str(leer)), ("--repo", str(tmp_path / "gibt-es-nicht"))):
+        p = lauf("repo", *argumente)
+        assert p.returncode == 3, p.stderr
+        assert p.stdout == "" and p.stderr.strip() and "Traceback" not in p.stderr
+
+
+def _inhalt(wurzel):
+    return sorted(os.path.join(d, n) for d, ds, fs in os.walk(wurzel) for n in ds + fs)
+
+
+def test_repo_befehl_ohne_seiteneffekte(tmp_path):
+    r = neues_repo(tmp_path / "kunde-portal", origin="https://x/a/kunde-portal.git")
+    vorher = (_inhalt(tmp_path / "home"), _inhalt(tmp_path / "ausgabe"), _inhalt(r))
+    p = lauf("repo", "--repo", str(r))
+    assert p.returncode == 0, p.stderr
+    nachher = (_inhalt(tmp_path / "home"), _inhalt(tmp_path / "ausgabe"), _inhalt(r))
+    assert nachher == vorher, "repo darf nichts anlegen (kein Ausgabeordner, keine .reserviert-Datei)"
+
+
+@pytest.mark.parametrize("fall", ["https", "scp", "ohne-origin", "worktree"])
+def test_repo_befehl_gleich_kontext(tmp_path, fall):
+    if fall == "https":
+        r = neues_repo(tmp_path / "ordner", origin="https://github.com/a/kunde-portal.git")
+    elif fall == "scp":
+        r = neues_repo(tmp_path / "ordner", origin="git@github.com:o/n.git")
+    elif fall == "ohne-origin":
+        r = neues_repo(tmp_path / "mein-ordner")
+    else:
+        haupt = neues_repo(tmp_path / "haupt-repo")
+        r = tmp_path / "anderer-name"
+        roh(haupt, "worktree", "add", "-q", str(r), "-b", "feature")
+    p = lauf("repo", "--repo", str(r))
+    assert p.returncode == 0, p.stderr
+    assert p.stdout == bericht.kontext(str(r), None, JETZT)["repo"] + "\n"
+
+
 # ------------------------------------------------------------------------------------ Schema
 
 def befund(**kw):
