@@ -15,7 +15,6 @@ Nur Standardbibliothek.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import fcntl
 import fnmatch
 import json
@@ -45,6 +44,7 @@ SMOKE_TIMEOUT = 300
 DOCKER_TIMEOUT = 60
 KILL_WARTEN = 10
 FORTSCHRITT_SEKUNDEN = 30
+ABBRUCH_TAKT = 0.2                                         # Wartetakt, in dem das Abbruch-Flag geprüft wird
 KOPIE_AUSSCHLUSS = ("__pycache__", ".pytest_cache", ".DS_Store")
 
 
@@ -340,22 +340,6 @@ def _gruppe_beenden(p: subprocess.Popen, warten: float = KILL_WARTEN) -> None:
         pass
 
 
-START_SIGNALE = {signal.SIGTERM, signal.SIGHUP, signal.SIGINT}
-
-
-@contextlib.contextmanager
-def _signale_gesperrt():
-    """Sperrt SIGTERM, SIGHUP und SIGINT (nur für diesen Thread), bis der Block verlassen wird; ein Signal bleibt bis dahin
-    anstehend und wird erst danach zugestellt. Schließt das Fenster zwischen `Popen` und der Zuweisung des Objekts: kommt
-    das Signal erst danach, beendet der vorhandene except/finally-Pfad die eigene Prozessgruppe. Nur Signale, die vorher
-    nicht gesperrt waren, werden wieder freigegeben."""
-    vorher = signal.pthread_sigmask(signal.SIG_BLOCK, START_SIGNALE)
-    try:
-        yield
-    finally:
-        signal.pthread_sigmask(signal.SIG_UNBLOCK, START_SIGNALE - set(vorher))
-
-
 def _kind_starten(cmd: list[str], cwd: str, env: dict, stdout, stderr) -> subprocess.Popen:
     return subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
                             start_new_session=True)
@@ -364,11 +348,21 @@ def _kind_starten(cmd: list[str], cwd: str, env: dict, stdout, stderr) -> subpro
 def _smoke_test(basis: list[str], cwd: str, env: dict) -> tuple[bool, str]:
     """`claude -p "Antworte nur mit ok." --output-format json` mit den Optionen des Laufs, ohne Werkzeuge."""
     cmd = ["claude", "-p", SMOKE_PROMPT, "--output-format", "json", *basis, "--tools", ""]
-    p = None                                               # Start im try: ein Signal nach der Zuweisung beendet die Gruppe
+    p = None                                               # Start im try: ein Abbruch nach der Zuweisung beendet die Gruppe
     try:
-        with _signale_gesperrt():                          # Signal erst nach der Zuweisung von `p` zustellen
-            p = _kind_starten(cmd, cwd, env, subprocess.PIPE, subprocess.PIPE)
-        out, err = p.communicate(timeout=SMOKE_TIMEOUT)
+        _abbruch_pruefen()                                 # kein Kind starten, wenn schon ein Signal anliegt
+        p = _kind_starten(cmd, cwd, env, subprocess.PIPE, subprocess.PIPE)
+        ende = time.monotonic() + SMOKE_TIMEOUT
+        while True:
+            _abbruch_pruefen()                             # direkt nach dem Start: `p` ist zugewiesen
+            rest = ende - time.monotonic()
+            if rest <= 0:
+                raise subprocess.TimeoutExpired(cmd, SMOKE_TIMEOUT)
+            try:
+                out, err = p.communicate(timeout=min(ABBRUCH_TAKT, rest))
+                break
+            except subprocess.TimeoutExpired:              # kurzer Takt, nicht das Gesamtbudget: weiter warten
+                continue
     except OSError as e:
         return False, f"claude nicht startbar: {e}"
     except subprocess.TimeoutExpired:
@@ -404,9 +398,11 @@ def _lauf(cmd: list[str], cwd: str, env: dict, stream_pfad: str, stderr_pfad: st
     p = None                                               # Start im try: ein Signal nach der Zuweisung beendet die Gruppe
     with open(stream_pfad, "wb") as aus, open(stderr_pfad, "wb") as fehler:
         try:
-            with _signale_gesperrt():                      # Signal erst nach der Zuweisung von `p` zustellen
-                p = _kind_starten(cmd, cwd, env, aus, fehler)
+            _abbruch_pruefen()                             # kein Kind starten, wenn schon ein Signal anliegt
+            p = _kind_starten(cmd, cwd, env, aus, fehler)
+            letzte_meldung = time.monotonic()
             while True:
+                _abbruch_pruefen()                         # direkt nach dem Start (`p` ist zugewiesen) und in jedem Takt
                 rest = timeout - (time.monotonic() - start)
                 if rest <= 0:
                     zeitueberschreitung = True
@@ -414,10 +410,12 @@ def _lauf(cmd: list[str], cwd: str, env: dict, stream_pfad: str, stderr_pfad: st
                     _gruppe_beenden(p)
                     break
                 try:
-                    p.wait(timeout=min(FORTSCHRITT_SEKUNDEN, rest))
+                    p.wait(timeout=min(ABBRUCH_TAKT, rest))
                     break
                 except subprocess.TimeoutExpired:
-                    _log(f"läuft seit {time.monotonic() - start:.0f} s, Stream {os.path.getsize(stream_pfad)} Bytes")
+                    if time.monotonic() - letzte_meldung >= FORTSCHRITT_SEKUNDEN:
+                        letzte_meldung = time.monotonic()
+                        _log(f"läuft seit {time.monotonic() - start:.0f} s, Stream {os.path.getsize(stream_pfad)} Bytes")
         except BaseException:
             if p is not None:
                 _gruppe_beenden(p, 5)
@@ -486,23 +484,38 @@ def _argumente(argv: list[str]) -> argparse.Namespace:
 
 
 class Abbruch(KeyboardInterrupt):
-    """Von SIGTERM/SIGHUP ausgelöst; `signum` bestimmt den Exit-Code (128 + signum)."""
+    """Von SIGTERM/SIGHUP/SIGINT ausgelöst; `signum` bestimmt den Exit-Code (128 + signum)."""
 
     def __init__(self, signum: int):
         super().__init__(signum)
         self.signum = signum
 
 
+_abbruch_signal: int | None = None
+
+
 def _signal_handler(signum, _frame):
-    raise Abbruch(signum)
+    """Setzt nur das Flag. Der Handler wirft nie mitten in eine Anweisung (etwa zwischen `Popen` und der Zuweisung des
+    Objekts) und sperrt keine Signale, die ein Kind erben könnte. `_lauf` und `_smoke_test` prüfen das Flag direkt nach
+    dem Start und in ihrer Warteschleife, `_lauf_main` an den Phasengrenzen."""
+    global _abbruch_signal
+    _abbruch_signal = signum
+
+
+def _abbruch_pruefen() -> None:
+    if _abbruch_signal is not None:
+        raise Abbruch(_abbruch_signal)
 
 
 def main(argv: list[str]) -> int:
-    """Wie `_main`, aber SIGTERM und SIGHUP lösen eine Ausnahme aus: die Prozessgruppe von claude wird beendet und
-    Docker aufgeräumt (finally in `_main`), der Exit-Code ist 128 + Signal (SIGINT/Ctrl-C: 130)."""
+    """Wie `_main`, aber SIGTERM, SIGHUP und SIGINT (Strg-C) setzen ein Flag; die Wartestellen lösen daraufhin `Abbruch`
+    aus: die Prozessgruppe von claude wird beendet und Docker aufgeräumt (finally in `_lauf_main`), der Exit-Code ist
+    128 + Signal (SIGINT: 130). Das Aufräumen selbst läuft nach einem Signal zu Ende."""
+    global _abbruch_signal
+    _abbruch_signal = None
     alt = {}
     try:
-        for sig in (signal.SIGTERM, signal.SIGHUP):
+        for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
             alt[sig] = signal.signal(sig, _signal_handler)
     except ValueError:                                   # nicht im Hauptthread (z. B. Testläufer): ohne Handler
         pass
@@ -512,11 +525,12 @@ def main(argv: list[str]) -> int:
         _log(f"Signal {e.signum}: abgebrochen, Prozessgruppe beendet, Docker aufgeräumt")
         return 128 + e.signum
     except KeyboardInterrupt:
-        _log("Abbruch durch Strg-C: Prozessgruppe beendet, Docker aufgeräumt")
+        _log("Abbruch durch KeyboardInterrupt: Prozessgruppe beendet, Docker aufgeräumt")
         return 130
     finally:
         for sig, h in alt.items():
             signal.signal(sig, h)
+        _abbruch_signal = None                           # kein Rest für spätere Aufrufe im selben Prozess
 
 
 def _eval_sperre() -> int | None:
@@ -565,6 +579,7 @@ def _lauf_main(a: argparse.Namespace) -> int:
     ohne = [x.strip() for x in a.ohne.split(",") if x.strip()]
 
     # 1. Vorprüfung: Docker darf keine Reste von security-audit-* haben
+    _abbruch_pruefen()
     _log("Vorprüfung Docker")
     vorher = docker_listen()
     if set(vorher) != {"container", "netze", "images"}:
@@ -577,6 +592,7 @@ def _lauf_main(a: argparse.Namespace) -> int:
         return 5
 
     # 2. Temp-Repo
+    _abbruch_pruefen()
     wurzel, repo = temp_repo_anlegen(a.fixture, SKILL_DIR, a.ohne_lockfile)
     skill = os.path.realpath(os.path.join(repo, ".claude", "skills", SKILL_NAME))
     ausgabe = os.path.join(wurzel, "ausgabe")
@@ -599,17 +615,20 @@ def _lauf_main(a: argparse.Namespace) -> int:
     listen: dict[str, list[str]] = {}
     try:
         # 4. Smoke-Test
+        _abbruch_pruefen()
         _log("Smoke-Test claude -p")
         ok, grund = _smoke_test(gemeinsam, repo, env)
         if not ok:
             print(f"Smoke-Test von claude -p gescheitert: {grund}\nTemp-Verzeichnis: {wurzel}", file=sys.stderr)
             return 6
         # 5. Lauf
+        _abbruch_pruefen()
         _log(f"Lauf startet (Timeout {a.timeout:g} s, Prompt {PROMPTS[a.prompt_art]!r})")
         lauf = _lauf(cmd, repo, env, stream_pfad, stderr_pfad, a.timeout)
         _log(f"Lauf beendet: rc={lauf['rc']}, Timeout={lauf['timeout']}, {lauf['dauer_s']} s")
         # 6. Nachher: Docker-Listen erfassen
         listen = docker_listen()
+        _abbruch_pruefen()
     finally:
         _log("Docker aufräumen (security-audit-*)")
         if not docker_aufraeumen():

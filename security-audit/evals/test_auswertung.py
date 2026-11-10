@@ -747,10 +747,10 @@ def docker_rest():
 if modus == "haengt":
     if os.environ.get("FAKE_CLAUDE_DOCKER_REST"):
         docker_rest()
-    kind = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+    kind = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     with open(os.environ["FAKE_CLAUDE_KIND"], "w") as f:
         f.write(str(kind.pid))
-    time.sleep(600)
+    time.sleep(60)
 if modus in ("bericht", "docker_rest"):
     with open(os.environ["FAKE_CLAUDE_STREAM"]) as f:
         sys.stdout.write(f.read())
@@ -1044,20 +1044,46 @@ def test_temp_repo(tmp_path, monkeypatch):
         shutil.rmtree(wurzel2, ignore_errors=True)
 
 
-def test_lauf_timeout_beendet_gruppe(ev, capsys):
+def _lebt(pid):
+    """Nur Lebendigkeits-Probe (Signal 0), sendet nichts."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _eigene_gruppe_aufraeumen(p):
+    """Räumt die Gruppe eines eigenen Popen-Objekts (start_new_session=True, pgid == p.pid) ab; nie über PIDs aus Dateien."""
+    if p.pid > 1 and p.pid != os.getpgrp():
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def test_lauf_timeout_beendet_gruppe(ev, capsys, monkeypatch):
     ev.modus("haengt")
+    echtes, gestartet = run_eval._kind_starten, []
+
+    def merken(cmd, cwd, env, stdout, stderr):
+        p = echtes(cmd, cwd, env, stdout, stderr)
+        if "json" not in cmd:                                          # nur den Lauf, nicht den Smoke-Test
+            gestartet.append(p)
+        return p
+
+    monkeypatch.setattr(run_eval, "_kind_starten", merken)
     t0 = time.monotonic()
     assert run_eval.main(["--fixture", "fixture-web", "--timeout", "2"]) == 1
     assert time.monotonic() - t0 < 60
+    (p,) = gestartet
     pid = int(ev.kind.read_text())
     for _ in range(50):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not _lebt(pid):
             break
         time.sleep(0.1)
     else:
-        os.kill(pid, signal.SIGKILL)
+        _eigene_gruppe_aufraeumen(p)                                   # nur über das eigene Popen-Objekt
         pytest.fail("Kindprozess der Gruppe lebt noch")
     ergebnis = json.loads(capsys.readouterr().out)
     assert ergebnis["ok"] is False and ergebnis["lauf"]["timeout"] is True
@@ -1218,7 +1244,7 @@ def test_bericht_kein_dict_in_lauf(ev, capsys, monkeypatch, tmp_path):
     assert d1["ok"] is False and "kein Bericht" in d1["details"]
 
 
-@pytest.mark.parametrize("sig,code", [(signal.SIGTERM, 143), (signal.SIGHUP, 129)])
+@pytest.mark.parametrize("sig,code", [(signal.SIGTERM, 143), (signal.SIGHUP, 129), (signal.SIGINT, 130)])
 def test_signal_beendet_gruppe_und_raeumt_auf(ev, tmp_path, monkeypatch, sig, code):
     """I2: SIGTERM/SIGHUP an run_eval → Kindgruppe beendet, Docker aufgeräumt, Exit 128+Signal."""
     monkeypatch.setenv("FAKE_CLAUDE_MODUS", "haengt")
@@ -1242,13 +1268,10 @@ def test_signal_beendet_gruppe_und_raeumt_auf(ev, tmp_path, monkeypatch, sig, co
             p.kill()
     assert p.returncode == code
     for _ in range(50):
-        try:
-            os.kill(kind, 0)
-        except ProcessLookupError:
+        if not _lebt(kind):                                            # nur Probe; der Enkel schläft höchstens 60 s
             break
         time.sleep(0.1)
     else:
-        os.kill(kind, signal.SIGKILL)
         pytest.fail("Kindprozess der Gruppe lebt noch")
     assert json.loads(ev.docker_state.read_text()) == {"container": ["fremder-container"], "netze": [], "images": []}
     assert any(c[:3] == ["rm", "-f", "-v"] for c in ev.docker())
@@ -1373,17 +1396,9 @@ def test_verbotene_muster_nfkc_muster_selbst_haertung_a5d():
     assert auswertung._verbotene("echo harmlos", ["ｆｉｘｔｕｒｅ.invalid"]) == []
 
 
-def _lebt(pid):
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
-
-
 def test_signal_direkt_nach_dem_start_beendet_kind_trotzdem_haertung_a7(ev, monkeypatch, capsys):
-    """Das Signal kommt, nachdem das Kind existiert, aber bevor `_lauf` sein Popen-Objekt kennt: die Signalmaske um den
-    Start hält es an, bis `p` zugewiesen ist; dann beendet der except-Pfad von `_lauf` die eigene Prozessgruppe."""
+    """Das Signal kommt, nachdem das Kind existiert, aber bevor `_lauf` sein Popen-Objekt kennt: der Handler setzt nur ein
+    Flag; `_lauf` prüft es direkt nach der Zuweisung von `p` und beendet die eigene Prozessgruppe."""
     ev.modus("haengt")
     echtes, gestartet = run_eval._kind_starten, []
 
@@ -1396,14 +1411,14 @@ def test_signal_direkt_nach_dem_start_beendet_kind_trotzdem_haertung_a7(ev, monk
             if ev.kind.exists() and ev.kind.read_text():
                 break
             time.sleep(0.1)
-        signal.raise_signal(signal.SIGTERM)                # echtes Signal nach Popen, vor der Zuweisung (gesperrt)
+        signal.raise_signal(signal.SIGTERM)                # echtes Signal nach Popen, vor der Zuweisung
         return p
 
     monkeypatch.setattr(run_eval, "_kind_starten", bombe)
     assert run_eval.main(["--fixture", "fixture-web", "--timeout", "120"]) == 143
     (p,) = gestartet
     try:
-        p.wait(timeout=15)                                 # Fake-claude beendet, nicht mehr in `time.sleep(600)`
+        p.wait(timeout=15)                                 # Fake-claude beendet, nicht mehr in `time.sleep(60)`
     except subprocess.TimeoutExpired:
         p.kill()
         pytest.fail("Kindprozess nach Signal nicht beendet")
@@ -1418,60 +1433,171 @@ def test_signal_direkt_nach_dem_start_beendet_kind_trotzdem_haertung_a7(ev, monk
 
 @pytest.fixture
 def abbruch_handler():
-    """SIGTERM-Handler wie in `main` (wirft Abbruch), nur im Hauptthread; danach der alte."""
+    """SIGTERM-Handler wie in `main` (setzt nur das Flag), nur im Hauptthread; danach der alte. Flag zurückgesetzt."""
     alt = signal.signal(signal.SIGTERM, run_eval._signal_handler)
+    run_eval._abbruch_signal = None
     yield
+    run_eval._abbruch_signal = None
     signal.signal(signal.SIGTERM, alt)
 
 
 def _kind_mit_signal(monkeypatch, gestartet):
-    """Ersetzt `_kind_starten`: startet ein eigenes `sleep`-Kind in eigener Sitzung und löst danach SIGTERM aus."""
+    """Ersetzt `_kind_starten`: startet ein eigenes `sleep`-Kind in eigener Sitzung und ruft danach den Signalhandler
+    auf (wie ein Signal, das nach dem echten Start eintrifft, bevor `_lauf` das Popen-Objekt zugewiesen hat)."""
     def bombe(cmd, cwd, env, stdout, stderr):
         p = subprocess.Popen(["sleep", "30"], stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
                              start_new_session=True)
         gestartet.append(p)
-        signal.raise_signal(signal.SIGTERM)
+        run_eval._signal_handler(signal.SIGTERM, None)
         return p
 
     monkeypatch.setattr(run_eval, "_kind_starten", bombe)
 
 
-def _eigenes_kind_beendet(gestartet):
+def _eigenes_kind_per_sigterm_beendet(gestartet):
     (p,) = gestartet
     try:
-        p.wait(timeout=15)
+        p.wait(timeout=3)
     except subprocess.TimeoutExpired:
         p.kill()                                           # eigenes Popen-Objekt
         p.wait()
-        pytest.fail("eigenes Kind nach Signal im Start nicht beendet")
-    assert p.returncode is not None
+        pytest.fail("eigenes Kind nach Signal im Start nicht innerhalb von 3 s beendet")
+    assert p.returncode == -signal.SIGTERM, "Kind muss per SIGTERM enden (nicht per SIGKILL nach Wartezeit)"
+
+
+def test_signal_handler_setzt_nur_das_flag_und_wirft_nichts(abbruch_handler):
+    assert run_eval._abbruch_signal is None
+    assert run_eval._signal_handler(signal.SIGHUP, None) is None
+    assert run_eval._abbruch_signal == signal.SIGHUP
+    with pytest.raises(run_eval.Abbruch) as e:
+        run_eval._abbruch_pruefen()
+    assert e.value.signum == signal.SIGHUP
 
 
 def test_signal_im_start_beendet_eigenes_kind_lauf(tmp_path, monkeypatch, abbruch_handler):
     gestartet: list = []
     _kind_mit_signal(monkeypatch, gestartet)
+    t0 = time.monotonic()
     with pytest.raises(run_eval.Abbruch):
         run_eval._lauf(["claude"], str(tmp_path), {}, str(tmp_path / "s"), str(tmp_path / "e"), 60)
-    _eigenes_kind_beendet(gestartet)
+    assert time.monotonic() - t0 < 3
+    _eigenes_kind_per_sigterm_beendet(gestartet)
 
 
 def test_signal_im_start_beendet_eigenes_kind_smoke_test(tmp_path, monkeypatch, abbruch_handler):
     gestartet: list = []
     _kind_mit_signal(monkeypatch, gestartet)
+    t0 = time.monotonic()
     with pytest.raises(run_eval.Abbruch):
         run_eval._smoke_test([], str(tmp_path), {})
-    _eigenes_kind_beendet(gestartet)
+    assert time.monotonic() - t0 < 3
+    _eigenes_kind_per_sigterm_beendet(gestartet)
 
 
-def test_signalmaske_wird_nach_dem_start_wieder_freigegeben():
-    vorher = signal.pthread_sigmask(signal.SIG_BLOCK, set())
-    with run_eval._signale_gesperrt():
-        assert run_eval.START_SIGNALE <= signal.pthread_sigmask(signal.SIG_BLOCK, set())
-    assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == vorher
-    with pytest.raises(RuntimeError):
-        with run_eval._signale_gesperrt():
-            raise RuntimeError("Start scheitert")
-    assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == vorher
+def _kind_sleep_und_spaeteres_signal(monkeypatch, gestartet, verzoegerung):
+    """Startet ein eigenes `sleep`-Kind; der Handler wird erst nach `verzoegerung` s aufgerufen (Signal in der Warteschleife)."""
+    import threading
+
+    def starten(cmd, cwd, env, stdout, stderr):
+        p = subprocess.Popen(["sleep", "30"], stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                             start_new_session=True)
+        gestartet.append(p)
+        t = threading.Timer(verzoegerung, run_eval._signal_handler, args=(signal.SIGHUP, None))
+        t.daemon = True
+        t.start()
+        return p
+
+    monkeypatch.setattr(run_eval, "_kind_starten", starten)
+
+
+def test_signal_in_der_warteschleife_beendet_kind_lauf(tmp_path, monkeypatch, abbruch_handler):
+    gestartet: list = []
+    _kind_sleep_und_spaeteres_signal(monkeypatch, gestartet, 0.3)
+    t0 = time.monotonic()
+    with pytest.raises(run_eval.Abbruch) as e:
+        run_eval._lauf(["claude"], str(tmp_path), {}, str(tmp_path / "s"), str(tmp_path / "e"), 60)
+    assert e.value.signum == signal.SIGHUP and time.monotonic() - t0 < 3
+    _eigenes_kind_per_sigterm_beendet(gestartet)
+
+
+def test_signal_in_der_warteschleife_beendet_kind_smoke_test(tmp_path, monkeypatch, abbruch_handler):
+    gestartet: list = []
+    _kind_sleep_und_spaeteres_signal(monkeypatch, gestartet, 0.3)
+    t0 = time.monotonic()
+    with pytest.raises(run_eval.Abbruch) as e:
+        run_eval._smoke_test([], str(tmp_path), {})
+    assert e.value.signum == signal.SIGHUP and time.monotonic() - t0 < 3
+    _eigenes_kind_per_sigterm_beendet(gestartet)
+
+
+def test_signal_vor_dem_start_startet_kein_kind(tmp_path, monkeypatch, abbruch_handler):
+    def nie(*a, **kw):
+        raise AssertionError("Kind gestartet trotz anstehendem Abbruch")
+
+    monkeypatch.setattr(run_eval, "_kind_starten", nie)
+    run_eval._signal_handler(signal.SIGTERM, None)
+    with pytest.raises(run_eval.Abbruch):
+        run_eval._lauf(["claude"], str(tmp_path), {}, str(tmp_path / "s"), str(tmp_path / "e"), 60)
+    with pytest.raises(run_eval.Abbruch):
+        run_eval._smoke_test([], str(tmp_path), {})
+
+
+MASKE_AUSGEBEN = ("import json, signal; "
+                  "print(json.dumps(sorted(int(s) for s in signal.pthread_sigmask(signal.SIG_BLOCK, []))))")
+
+
+def test_kind_erbt_keine_signalmaske_haertung_i1(tmp_path, monkeypatch, abbruch_handler):
+    """Das Kind (python3, gibt seine Signalmaske aus) hat SIGTERM/SIGHUP/SIGINT nicht gesperrt; der Elternprozess sperrt
+    beim Start auch nichts."""
+    echtes, eltern_masken = run_eval._kind_starten, []
+
+    def beobachten(*a, **kw):
+        eltern_masken.append(signal.pthread_sigmask(signal.SIG_BLOCK, []))
+        return echtes(*a, **kw)
+
+    monkeypatch.setattr(run_eval, "_kind_starten", beobachten)
+    stream = tmp_path / "stream"
+    lauf = run_eval._lauf([sys.executable, "-c", MASKE_AUSGEBEN], str(tmp_path), dict(os.environ), str(stream),
+                          str(tmp_path / "err"), 30)
+    assert lauf["rc"] == 0
+    maske = json.loads(stream.read_text())
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        assert int(sig) not in maske, (sig, maske)
+        assert sig not in eltern_masken[0]
+    p = run_eval._kind_starten([sys.executable, "-c", MASKE_AUSGEBEN], str(tmp_path), dict(os.environ),
+                               subprocess.PIPE, subprocess.PIPE)
+    out, _ = p.communicate(timeout=30)
+    assert int(signal.SIGTERM) not in json.loads(out)
+
+
+def test_main_setzt_handler_fuer_term_hup_int_und_setzt_flag_zurueck_haertung_i1(monkeypatch):
+    gesehen = {}
+
+    def fake_main(argv):
+        gesehen["flag"] = run_eval._abbruch_signal
+        for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            gesehen[sig] = signal.getsignal(sig) is run_eval._signal_handler
+        return 0
+
+    alt = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+    run_eval._abbruch_signal = signal.SIGTERM                 # Rest eines früheren Laufs
+    monkeypatch.setattr(run_eval, "_main", fake_main)
+    try:
+        assert run_eval.main([]) == 0
+    finally:
+        run_eval._abbruch_signal = None
+    assert gesehen["flag"] is None
+    assert all(gesehen[s] for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT))
+    assert {sig: signal.getsignal(sig) for sig in alt} == alt  # Handler nach `main` wiederhergestellt
+
+
+@pytest.mark.parametrize("sig,code", [(signal.SIGTERM, 143), (signal.SIGHUP, 129), (signal.SIGINT, 130)])
+def test_main_gibt_128_plus_signal_zurueck_haertung_i1(monkeypatch, sig, code):
+    def fake_main(argv):
+        raise run_eval.Abbruch(sig)
+
+    monkeypatch.setattr(run_eval, "_main", fake_main)
+    assert run_eval.main([]) == code
 
 
 def test_start_fehler_im_lauf_bleibt_der_urspruengliche_fehler_haertung_a7(tmp_path, monkeypatch):
