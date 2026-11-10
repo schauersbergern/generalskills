@@ -85,13 +85,13 @@ UMGEBUNG
 <TESTDATEN>
 
 AUFRUFFORMEN (immer ein einzelner einfacher Befehl)
-Jeder Aufruf von poc.py ist ein einzelner einfacher Befehl: kein &&, |, ;, 2>&1, $(…), keine Umlaute oder Nicht-ASCII-Zeichen. Argumente mit Sonderzeichen stehen in einfachen Anführungszeichen. Ein Request-Body kommt nie per --daten, sondern aus einer Datei: lege sie vorher mit Write unter <DATEIORDNER> an. neustart und ausfuehren rufst du mit Bash-timeout 600000 auf.
+Jeder Aufruf von poc.py ist ein einzelner einfacher Befehl: kein &&, |, ;, 2>&1, $(…), keine Umlaute oder Nicht-ASCII-Zeichen. Argumente mit Sonderzeichen stehen in einfachen Anführungszeichen. Ein Request-Body kommt nie per --daten, sondern aus einer Datei: lege sie vorher mit Write unter <DATEIORDNER> an, mit der Rolle im Namen (daten-<ROLLE>-<n>.json): beide Prüfer laufen gleichzeitig und teilen den Ordner. neustart und ausfuehren rufst du mit Bash-timeout 600000 auf.
 
 ```
 python3 -I <SKILL_DIR>/scripts/poc.py anfrage --lauf <LAUF> --rolle <ROLLE> --methode GET --pfad '/<pfad>?<query>' --header 'Authorization: Bearer <token>'
 python3 -I <SKILL_DIR>/scripts/poc.py anfrage --lauf <LAUF> --rolle <ROLLE> --methode GET --pfad '/api/items?q=a%27%20OR%20%271%27%3D%271' --header 'Authorization: Bearer <token>'
 python3 -I <SKILL_DIR>/scripts/poc.py anfrage --lauf <LAUF> --rolle <ROLLE> --methode GET --pfad '/api/preview?url=http%3A%2F%2F127.0.0.1%3A<PORT>%2Fstatus' --header 'Authorization: Bearer <token>'
-python3 -I <SKILL_DIR>/scripts/poc.py anfrage --lauf <LAUF> --rolle <ROLLE> --methode POST --pfad '/<pfad>' --header 'Content-Type: application/json' --daten-datei <DATEIORDNER>/daten-1.json
+python3 -I <SKILL_DIR>/scripts/poc.py anfrage --lauf <LAUF> --rolle <ROLLE> --methode POST --pfad '/<pfad>' --header 'Content-Type: application/json' --daten-datei <DATEIORDNER>/daten-<ROLLE>-1.json
 python3 -I <SKILL_DIR>/scripts/poc.py ausfuehren --lauf <LAUF> --rolle <ROLLE> -- node -e '<skript>'
 python3 -I <SKILL_DIR>/scripts/poc.py ausfuehren --lauf <LAUF> --rolle <ROLLE> -- sh -c '<befehl mit Pipe>'
 python3 -I <SKILL_DIR>/scripts/poc.py neustart --lauf <LAUF> --rolle <ROLLE>

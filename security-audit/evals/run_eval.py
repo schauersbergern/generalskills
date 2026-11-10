@@ -6,13 +6,16 @@
         [--timeout 5400] [--behalten] [--prompt-art slash|text]
 
 Ein Lauf kostet echte Modell-Token. Exit: 0 alles erfüllt, 1 DoD verfehlt (auch Timeout oder Exit ≠ 0 von claude),
-2 Aufruf ungültig, 5 Docker nicht leer oder nicht lesbar, 6 Smoke-Test von `claude -p` gescheitert.
+2 Aufruf ungültig, 5 Docker nicht leer oder nicht lesbar, 6 Smoke-Test von `claude -p` gescheitert, 7 ein anderer
+Eval-Lauf ist aktiv (Sperrdatei `<temp>/security-audit-eval.lock`; zwei Läufe würden gegenseitig Docker-Reste
+abräumen).
 Fortschritt und Meldungen auf stderr, das Ergebnis als JSON auf stdout und in `<temp>/ergebnis.json`.
 Nur Standardbibliothek.
 """
 from __future__ import annotations
 
 import argparse
+import fcntl
 import fnmatch
 import json
 import os
@@ -162,12 +165,14 @@ def agents_json(opus_md: str) -> str:
 def _opus_md_lesen() -> str:
     kandidaten = [os.path.join(os.path.dirname(SKILL_DIR), "agents", "opus-xhigh.md"),
                   os.path.join(os.path.expanduser("~"), ".claude", "agents", "opus-xhigh.md")]
-    for pfad in kandidaten:
+    for i, pfad in enumerate(kandidaten):
         try:
             with open(pfad, encoding="utf-8") as f:
-                return f.read()
+                text = f.read()
         except OSError:
             continue
+        _log(f"Agent-Definition: {pfad}" + (" (Ersatz aus dem Home-Ordner, nicht aus dem Repo)" if i else ""))
+        return text
     raise FileNotFoundError("agents/opus-xhigh.md nicht gefunden (" + ", ".join(kandidaten) + ")")
 
 
@@ -278,19 +283,31 @@ def docker_listen() -> dict[str, list[str]]:
 
 
 def docker_aufraeumen() -> bool:
-    """Entfernt Container, Netze und Images mit Präfix `security-audit-` (nur diese). True, wenn nichts übrig blieb
-    oder nichts lesbar war, False bei Fehlern beim Entfernen."""
+    """Entfernt Container, Netze und Images mit Präfix `security-audit-` (nur diese). True, wenn nichts übrig blieb; False
+    bei Fehlern beim Entfernen und wenn eine Liste nicht lesbar war (dann ist unbekannt, ob etwas übrig ist)."""
     ok = True
-    schritte = (
-        ("Container", lambda: _eigene(_docker(["ps", "-a", "--format", "{{.Names}}"])[1].splitlines()),
-         lambda n: ["rm", "-f", "-v", *n]),
-        ("Netze", lambda: _eigene(_docker(["network", "ls", "--format", "{{.Name}}"])[1].splitlines()),
-         lambda n: ["network", "rm", *n]),
-        ("Images", lambda: [f"{r}:{t}" for r, t in (_images() or []) if t and t != "<none>"],
-         lambda n: ["rmi", "-f", *n]),
-    )
+
+    def containerliste() -> list[str] | None:
+        rc, out = _docker(["ps", "-a", "--format", "{{.Names}}"])
+        return _eigene(out.splitlines()) if rc == 0 else None
+
+    def netzliste() -> list[str] | None:
+        rc, out = _docker(["network", "ls", "--format", "{{.Name}}"])
+        return _eigene(out.splitlines()) if rc == 0 else None
+
+    def imageliste() -> list[str] | None:
+        images = _images()
+        return None if images is None else [f"{r}:{t}" for r, t in images if t and t != "<none>"]
+
+    schritte = (("Container", containerliste, lambda n: ["rm", "-f", "-v", *n]),
+                ("Netze", netzliste, lambda n: ["network", "rm", *n]),
+                ("Images", imageliste, lambda n: ["rmi", "-f", *n]))
     for art, lesen, loeschen in schritte:
         namen = lesen()
+        if namen is None:
+            _log(f"Aufräumen: {art} nicht lesbar (läuft Docker?), Reste unbekannt")
+            ok = False
+            continue
         if not namen:
             continue
         rc, _ = _docker(loeschen(namen))
@@ -442,20 +459,24 @@ def _home_zustand() -> tuple[set[str], set[str]]:
 
 
 def _bericht_lesen(ordner: str) -> tuple[dict | None, str | None]:
-    """Neueste `.json` im Ausgabeordner des Repos (Bericht); None, wenn keine da oder nicht lesbar/kein dict."""
+    """Neueste `.json` im Ausgabeordner des Repos, die ein Bericht ist (JSON-Objekt mit `befunde`-Liste); andere `.json`
+    (Request-Bodys der Prüfer) zählen nicht. Ohne Bericht: (None, Pfad der neuesten `.json` oder None)."""
     try:
         namen = [n for n in os.listdir(ordner) if n.endswith(".json") and os.path.isfile(os.path.join(ordner, n))]
     except OSError:
         return None, None
     if not namen:
         return None, None
-    pfad = max((os.path.join(ordner, n) for n in namen), key=os.path.getmtime)
-    try:
-        with open(pfad, encoding="utf-8") as f:
-            bericht = json.load(f)
-    except (OSError, ValueError):
-        return None, pfad
-    return (bericht if isinstance(bericht, dict) else None), pfad
+    pfade = sorted((os.path.join(ordner, n) for n in namen), key=os.path.getmtime, reverse=True)
+    for pfad in pfade:
+        try:
+            with open(pfad, encoding="utf-8") as f:
+                bericht = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if isinstance(bericht, dict) and isinstance(bericht.get("befunde"), list):
+            return bericht, pfad
+    return None, pfade[0]
 
 
 # ------------------------------------------------------------------------------------ main
@@ -505,11 +526,36 @@ def main(argv: list[str]) -> int:
             signal.signal(sig, h)
 
 
+def _eval_sperre() -> int | None:
+    """Maschinenweite Sperre (flock auf `<temp>/security-audit-eval.lock`); None, wenn schon ein Eval-Lauf sie hält."""
+    pfad = os.path.join(os.path.realpath(tempfile.gettempdir()), "security-audit-eval.lock")
+    fd = os.open(pfad, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    return fd
+
+
 def _main(argv: list[str]) -> int:
     try:
         a = _argumente(argv)
     except SystemExit as e:
         return e.code if isinstance(e.code, int) else 2
+    fd = _eval_sperre()
+    if fd is None:
+        print("Ein anderer Eval-Lauf ist aktiv (Sperre security-audit-eval.lock im Temp-Ordner): zwei Läufe würden "
+              "gegenseitig Docker-Ressourcen mit Präfix security-audit- entfernen. Warten oder den anderen Lauf beenden.",
+              file=sys.stderr)
+        return 7
+    try:
+        return _lauf_main(a)
+    finally:
+        os.close(fd)
+
+
+def _lauf_main(a: argparse.Namespace) -> int:
     erwartung_pfad = os.path.join(HIER, "expected", f"{a.fixture}.json")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", a.fixture) or not os.path.isfile(erwartung_pfad) \
             or not os.path.isdir(os.path.join(HIER, a.fixture)):

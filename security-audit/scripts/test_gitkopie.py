@@ -1028,3 +1028,23 @@ def test_revision_die_kein_commit_ist_ist_giterror_haertung_b3(tmp_path):
             gitkopie.arbeitskopie(str(repo), str(tmp_path / "ziel"), rev=rev)
     hinweise = gitkopie.repo_hinweise(str(repo), rev="0" * 40)
     assert any("Kein HEAD lesbar" in h for h in hinweise), hinweise
+
+
+# ---------------------------------------------------------------- Härtung TF1-B5 (keine stillen Fallbacks)
+
+def test_index_mit_ungueltiger_zeile_ist_hinweis_statt_stilles_ueberspringen_haertung_b5(tmp_path, monkeypatch):
+    repo = repo_mit(tmp_path, {"a.txt": b"a\n"})
+    shim_git(tmp_path, monkeypatch, vorab='case " $* " in *" ls-files "*) printf "garbage\\0"; exit 0;; esac')
+    hinweise = gitkopie.repo_hinweise(str(repo))
+    assert any("Index nicht lesbar" in h for h in hinweise), hinweise
+
+
+def test_fehlende_objekte_werden_gemeldet_haertung_b5(tmp_path):
+    """Partial Clone ohne Lazy Fetch: fehlende kleine Blobs wurden bisher stillschweigend übergangen (LFS-Prüfung)."""
+    repo = repo_mit(tmp_path, {"a.txt": b"einmalig-a\n", "b.txt": b"einmalig-b\n", "c.txt": b"ok-c\n"})
+    for name in ("a.txt", "b.txt"):
+        sha = roh(repo, "rev-parse", f"HEAD:{name}").decode().strip()
+        os.unlink(repo / ".git" / "objects" / sha[:2] / sha[2:])
+    hinweise = gitkopie.repo_hinweise(str(repo))
+    fehlt = [h for h in hinweise if "Objekt" in h and "fehlen" in h]
+    assert len(fehlt) == 1 and "2" in fehlt[0] and "a.txt" in fehlt[0], hinweise

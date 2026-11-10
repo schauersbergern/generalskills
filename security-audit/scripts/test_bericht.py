@@ -757,3 +757,72 @@ def test_hinweis_mit_tilden_oeffnet_keinen_zaun_t2_n3():
     assert "- \\~\\~\\~ x" in rest
     for kopf in ("## Karte", "## Befunde im Detail", "## Hinweise"):
         assert kopf in rest
+
+
+# ------------------------------------------------------------------------------------ Härtung TF1-B5 (unsichtbare Zeichen, Reste)
+
+UNSICHTBAR_B5 = ["\ufe0f", "\u034f", "\u0378", "\U000e0041", "\u200b", "\u202e", "\u115f", "\u2800", "\u180e", "\U000e0100"]
+
+
+@pytest.mark.parametrize("zeichen", UNSICHTBAR_B5)
+@pytest.mark.parametrize("feld", ["titel", "szenario", "erwartet", "klasse", "beschreibung", "poc"])
+def test_schema_lehnt_unsichtbare_zeichen_in_freitext_ab_haertung_b5(feld, zeichen):
+    """Versteckter Text (Tag-Zeichen, Variation Selectors, Bidi, Zero-Width) darf nicht in den Bericht, auch nicht in die
+    mehrzeiligen Felder; `\n`, `\r`, `\t` bleiben dort erlaubt."""
+    d = beispiel()
+    d["befunde"][0][feld] = f"vorher{zeichen}nachher"
+    fehler = bericht.pruefe_schema(d)
+    assert any("S-1" in f and feld in f for f in fehler), (feld, ascii(zeichen), fehler)
+
+
+@pytest.mark.parametrize("zeichen", UNSICHTBAR_B5)
+def test_schema_lehnt_unsichtbare_zeichen_in_grund_projekt_teilpfad_karte_hinweisen_ab_haertung_b5(zeichen):
+    d = beispiel()
+    d["befunde"][2]["grund"] = f"a{zeichen}b"
+    assert any("S-3" in f and "grund" in f for f in bericht.pruefe_schema(d))
+    for feld in ("projekt", "teilpfad"):
+        d = beispiel()
+        d[feld] = f"a{zeichen}b"
+        assert any(feld in f for f in bericht.pruefe_schema(d)), feld
+    d = beispiel()
+    d["karte"] = [{"flaeche": f"a{zeichen}b", "dateien": ["x"]}]
+    assert any("karte[0]" in f for f in bericht.pruefe_schema(d))
+    d["karte"] = [{"flaeche": "a", "dateien": [f"x{zeichen}y"]}]
+    assert any("karte[0]" in f for f in bericht.pruefe_schema(d))
+    d = beispiel()
+    d["hinweise"] = [f"a{zeichen}b"]
+    assert any("hinweise[0]" in f for f in bericht.pruefe_schema(d))
+
+
+def test_schema_erlaubt_normale_zeichen_und_zeilenumbrueche_in_beschreibung_haertung_b5():
+    d = beispiel()
+    d["befunde"][0]["beschreibung"] = "Zeile 1\r\n\tZeile 2: Grüße 世界 😀 é\u0301 — „ok“"
+    d["befunde"][0]["titel"] = "Größe 世界 😀"
+    d["karte"] = [{"flaeche": "Fläche 世界", "dateien": ["src/ä.js"]}]
+    d["hinweise"] = ["Symlink: a -> b (Ziel gesperrt)"]
+    assert bericht.pruefe_schema(d) == []
+
+
+def test_markdown_escaped_unsichtbare_zeichen_in_karte_und_hinweisen_haertung_b5():
+    d = beispiel()
+    d["hinweise"] = ["a\u202eb\ufe0f"]
+    d["karte"] = [{"flaeche": "F\u200b", "dateien": ["x\U000e0041"]}]
+    md = bericht.markdown(d)
+    for z in ("\u202e", "\ufe0f", "\u200b", "\U000e0041"):
+        assert z not in md
+    assert "\\u202e" in md and "\\ufe0f" in md
+
+
+def test_rendern_hinterlaesst_bei_internem_fehler_keine_tmp_datei_haertung_b5(tmp_path, monkeypatch):
+    d = beispiel()
+    (tmp_path / "w").mkdir()
+    pfad = tmp_path / "w" / "bericht.json"
+    pfad.write_text(json.dumps(d), encoding="utf-8")
+
+    def kaputt(_daten):
+        raise RuntimeError("interner Fehler")
+
+    monkeypatch.setattr(bericht, "markdown", kaputt)
+    with pytest.raises(RuntimeError):
+        bericht._rendern(str(pfad))
+    assert sorted(os.listdir(tmp_path / "w")) == ["bericht.json"]

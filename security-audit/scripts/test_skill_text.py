@@ -245,6 +245,28 @@ def test_vorbereiten_wird_mit_dem_ermittelten_sha_aufgerufen_haertung_b3():
     assert zeilen and all("--sha <sha>" in z for z in zeilen), zeilen
 
 
+def test_alle_hinweis_kategorien_von_poc_sind_dokumentiert_haertung_b5():
+    """Jede Kategorie, die `poc.py bauen` als `hinweis:` ausgeben kann, steht in SKILL.md und im Berichtsformat."""
+    import poc
+    assert set(poc.HINWEIS_KATEGORIEN) >= {"native-module", "prisma-engines", "node-range-zu-lang",
+                                           "node-engines-ignoriert", "lockfile-ohne-paketliste"}
+    quelle = _lies(os.path.join(HIER, "poc.py"))
+    verwendet = set(re.findall(r'"((?:native-module|prisma-engines|node-[a-z-]+|lockfile-ohne-[a-z-]+))"', quelle))
+    assert verwendet <= set(poc.HINWEIS_KATEGORIEN), verwendet - set(poc.HINWEIS_KATEGORIEN)
+    for pfad in (SKILL_MD, BERICHT_FORMAT):
+        text = _lies(pfad)
+        fehlt = [k for k in poc.HINWEIS_KATEGORIEN if k not in text]
+        assert not fehlt, (pfad, fehlt)
+
+
+def test_request_dateien_der_pruefer_kollidieren_nicht_haertung_b6():
+    """Beide Prüfer laufen gleichzeitig und teilen `<DATEIORDNER>`: jeder `--daten-datei`-Name trägt die Rolle."""
+    beispiele = re.findall(r"--daten-datei (\S+)", _lies(BRIEFINGS))
+    assert beispiele, "kein --daten-datei-Beispiel im Prüfer-Briefing"
+    assert all("<ROLLE>" in b for b in beispiele), beispiele
+    assert "<ROLLE>" in next(z for z in _lies(BRIEFINGS).splitlines() if "Request-Body kommt nie per --daten" in z)
+
+
 # ------------------------------------------------------------------------------------ Beispiel-JSON
 
 def test_beispiel_json_ist_gueltig():

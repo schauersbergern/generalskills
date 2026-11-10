@@ -474,7 +474,7 @@ def _index(repo: str) -> tuple[dict[str, tuple[str, str]], list[str]]:
         meta, _, pfad = rec.partition(b"\t")
         teile = meta.split()
         if len(teile) != 3:
-            continue
+            raise GitFehler(f"git ls-files: unerwartete Zeile {rec!r}")
         name = os.fsdecode(pfad)
         if teile[2] != b"0":
             konflikte.append(name)
@@ -504,6 +504,7 @@ def repo_hinweise(repo: str, rev: str = "HEAD") -> list[str]:
         else:
             namen.belege(e.pfad)
 
+    fehlend: list[str] = []
     try:
         with _Batch(repo) as batch:
             for e in baum:
@@ -516,10 +517,15 @@ def repo_hinweise(repo: str, rev: str = "HEAD") -> list[str]:
                     hinweise.append(f"Symlink: {_t(e.pfad)} -> {ziel}")
                 elif e.art == "blob" and e.groesse <= LFS_MAX_GROESSE:
                     inhalt = batch.lies(e.sha)
-                    if inhalt is not None and inhalt.startswith(LFS_PREFIX):
+                    if inhalt is None:
+                        fehlend.append(e.pfad)
+                    elif inhalt.startswith(LFS_PREFIX):
                         hinweise.append(f"LFS-Pointer: {_t(e.pfad)} (Inhalt liegt nicht im Repo)")
     except (GitFehler, OSError) as err:
         hinweise.append(f"Prüfung von Symlinks und LFS-Pointern nicht möglich: {_t(err)}")
+    if fehlend:
+        hinweise.append(f"Objekte fehlen im Repo (Partial Clone ohne Lazy Fetch?): {len(fehlend)} Dateien, "
+                        f"z. B. {_t(fehlend[0])}; LFS-Prüfung für sie nicht möglich")
 
     try:
         index, konflikte = _index(repo)

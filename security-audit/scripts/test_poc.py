@@ -1506,3 +1506,58 @@ def test_vorbereiten_unbekannter_sha_ist_git_fehler_haertung_b3(umg, tmp_path):
     r = umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo, "--sha", "0" * 40)
     assert r.returncode == 4 and r.stdout.splitlines()[0] == "kategorie: git-fehler"
     assert not os.path.exists(os.path.join(umg.zustand(), "quelle.fertig"))
+
+
+# ------------------------------------------------------------------------------------ Härtung TF1-B5 (keine stillen Fallbacks)
+
+def test_lockfile_unlesbar_nennt_den_grund_haertung_b5(tmp_path, capsys):
+    ordner = lock_in(tmp_path, "{kaputt")
+    assert poc.lockfile_pruefen(ordner) == "lockfile-fehlt"
+    assert "package-lock.json nicht lesbar" in capsys.readouterr().err
+    leer = lock_in(tmp_path / "x", None, dateien={})
+    assert poc.lockfile_pruefen(leer) == "lockfile-fehlt"
+    assert "nicht lesbar" not in capsys.readouterr().err        # fehlende Datei: eigene, bekannte Kategorie
+
+
+def test_lockfile_ohne_paketliste_ist_hinweis_haertung_b5(tmp_path):
+    v1 = json.dumps({"name": "m", "lockfileVersion": 1, "dependencies": {"a": {"version": "1.0.0"}}})
+    assert "lockfile-ohne-paketliste" in poc.lockfile_hinweise(lock_in(tmp_path, v1))
+    assert "lockfile-ohne-paketliste" not in poc.lockfile_hinweise(lock_in(tmp_path / "v3", lockdatei()))
+
+
+@pytest.mark.parametrize("engines, erwartet", [
+    (">=99", True), ("lts/*", True), (">=18 <19", True), ("garbage ??", True),     # nicht auswählbar: Standard 22 gilt
+    (">=20", False), ("^22", False), ("20 || 22", False),
+])
+def test_node_engines_ignoriert_ist_hinweis_haertung_b5(tmp_path, engines, erwartet):
+    ordner = projekt(tmp_path / "q", {"package.json": json.dumps({"name": "m", "engines": {"node": engines}})})
+    hinweise = poc.node_hinweise(ordner, None)
+    assert ("node-engines-ignoriert" in hinweise) is erwartet, (engines, hinweise)
+    assert poc.node_hinweise(ordner, "22") == []                     # explizite Vorgabe: nichts zu melden
+
+
+def test_node_ohne_engines_kein_hinweis_haertung_b5(tmp_path):
+    assert poc.node_hinweise(projekt(tmp_path / "q", {"package.json": "{}"}), None) == []
+
+
+def test_node_range_zu_lang_bleibt_eigener_hinweis_haertung_b5(tmp_path):
+    ordner = projekt(tmp_path / "q", {"package.json": json.dumps({"engines": {"node": ">=1 " * 2000}})})
+    assert poc.node_hinweise(ordner, None) == ["node-range-zu-lang"]
+
+
+def test_puffer_lesefehler_wird_markiert_haertung_b5():
+    import types
+    fd = os.open(os.devnull, os.O_RDONLY)
+    os.close(fd)                                                      # ungültiger Deskriptor: os.read wirft OSError
+    puffer = poc._Puffer(types.SimpleNamespace(fileno=lambda: fd), 100, False)
+    puffer.ergebnis(time.monotonic() + 5)
+    assert puffer.lesefehler is True
+
+
+def test_puffer_ohne_fehler_ohne_marke_haertung_b5():
+    r, w = os.pipe()
+    os.write(w, b"abc")
+    os.close(w)
+    with os.fdopen(r, "rb") as strom:
+        puffer = poc._Puffer(strom, 100, False)
+        assert puffer.ergebnis(time.monotonic() + 5) == (b"abc", False) and puffer.lesefehler is False

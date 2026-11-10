@@ -66,7 +66,7 @@ python3 -I ${CLAUDE_SKILL_DIR}/scripts/poc.py starten --lauf <id> --rolle p1 --s
 - `pruefen` Exit 0 → `bauen`, dann `starten` für `p1` und `p2` (je eine Instanz für einen Prüfer). Startet nur eine Rolle, bekommt der zugehörige Prüfer alle P1/P2 mit PoC-Möglichkeit, der andere prüft rein statisch (Instanz „nein“ im Briefing). Start-Befehl, Port, Env-Platzhalter (aus `.env.example`, nur Dummy-Werte), Dienst und Seed leitest du aus `package.json`, Dockerfile/Compose und Code ab. `HOST=0.0.0.0` und `PORT` setzt `poc.py`, die App muss darauf lauschen.
 - **Seed:** zwei Mandanten mit je einem Nutzer und Token (bzw. Session), damit Mandanten-PoCs möglich sind. Notiere Zugänge und IDs als `<TESTDATEN>` für das Prüfer-Briefing.
 - Mit `--dienst postgres` gibt `starten` `db: postgres://poc:poc@db:5432/poc` aus. Nutze es als `--env 'DATABASE_URL=…'`.
-- Stdout-Zeilen `hinweis: native-module | prisma-engines | node-range-zu-lang` kommen in die Hinweise (bei `prisma-engines` bleiben Prisma-abhängige Befunde `unbestätigt`).
+- Stdout-Zeilen `hinweis: native-module | prisma-engines | lockfile-ohne-paketliste | node-range-zu-lang | node-engines-ignoriert` kommen in die Hinweise (bei `prisma-engines` bleiben Prisma-abhängige Befunde `unbestätigt`; bei `lockfile-ohne-paketliste` sind native Module und Prisma nicht erkennbar, bei `node-engines-ignoriert` läuft die App auf Node 22 oder `.nvmrc` statt auf der geforderten Version).
 - **Scheitert ein Schritt** (Exit 3 `docker-fehlt`, Exit 4 mit erster Zeile `kategorie: lockfile-fehlt | lockfile-fremde-quelle | nicht-npm | build-fehler | build-timeout | start-fehler`): Ein korrigierter Versuch ist erlaubt (Start-Befehl, Port, Env, Seed aus dem Logauszug ableiten), nicht bei `build-timeout`, `nicht-npm`, `lockfile-*` und `docker-fehlt`. Danach Hinweis mit der Kategorie im Bericht und **keine PoCs**. Die Prüfer laufen trotzdem (nur widerlegen, sonst `unbestätigt`).
 - Immer als Hinweis in den Bericht: „BuildKit-Cache kann Code-Layer des geprüften Repos enthalten (`docker builder prune`).“ und die Grenzen aus Regel 9.
 
@@ -84,7 +84,7 @@ Je Fläche ein Reviewer mit dem Briefing aus `references/agenten-briefings.md`, 
 
 ### 6. Prüfer (bis zu 2)
 
-- Teile die P1/P2 auf die Prüfer auf (Prüfer 1 = Rolle `p1`, Prüfer 2 = `p2`), alle Befunde eines Prüfers in **einem** Briefing, keine Pakete per `SendMessage`. Briefing aus `references/agenten-briefings.md`, Abschnitt „Prüfer“.
+- Teile die P1/P2 auf die Prüfer auf (Prüfer 1 = Rolle `p1`, Prüfer 2 = `p2`), alle Befunde eines Prüfers in **einem** Briefing, keine Pakete per `SendMessage`. Briefing aus `references/agenten-briefings.md`, Abschnitt „Prüfer“. `<DATEIORDNER>` ist `<ausgabe_ordner>/anfragen`.
 - **Je Befund nur** ID, Titel, Kategorie, `datei:zeile` und die behauptete Eingabe. Nie Szenario, Code-Pfad oder Beschreibung des Reviewers.
 - Auftrag: widerlegen. Gelingt das nicht und läuft die Instanz, belegt der Prüfer per `poc.py anfrage --rolle <p1|p2>`, zwischen PoCs `poc.py neustart --rolle <p1|p2>`; `poc.py ausfuehren` prüft Zustand im Container. Ergebnis je Befund: `bestätigt` (Request und beobachtete Antwort), `unbestätigt` (eigener `code_pfad`), `verworfen` (`grund`). Stufenänderung mit Begründung ist erlaubt.
 - Mehr als 12 P1/P2 je Prüfer: priorisiere nach Stufe und Sicherheit der Herleitung. Der Rest bleibt `unbestätigt` mit dem Code-Pfad des Reviewers und dem Vermerk „nicht geprüft (Budget)“ in `beschreibung`.

@@ -148,19 +148,26 @@ def kontext(repo: str, teilpfad: str | None, jetzt: datetime | None = None) -> d
 
 # ------------------------------------------------------------------------------------ Schema
 
+_UNSICHTBAR_MELDUNG = "enthält Steuer-, Format- oder unsichtbare Zeichen"
+
+
 def _text_fehler(wert: object, einzeilig: bool) -> str | None:
-    """Fehlertext, wenn `wert` kein nichtleerer Text ist; einzeilig: keine Zeilenumbrüche, Steuer-/Formatzeichen
-    und keine Dreifach-Backticks (würden den Befundlisten-Block verlassen)."""
+    """Fehlertext, wenn `wert` kein nichtleerer Text ist; unsichtbare Zeichen (`gitkopie.unsichtbar`: Steuer-, Format-,
+    Bidi-, Zero-Width-Zeichen, Tag-Zeichen, Variation Selectors, nicht zugewiesene Codepoints) sind in jedem Feld verboten
+    (versteckter Text aus dem Repo), in mehrzeiligen Feldern außer `\n`, `\r`, `\t`. Einzeilig: zusätzlich keine
+    Dreifach-Backticks (würden den Befundlisten-Block verlassen)."""
     if not isinstance(wert, str) or not wert.strip():
         return "muss ein nichtleerer Text sein"
     for ch in wert:
-        kat = unicodedata.category(ch)
-        if kat in ("Cs", "Co") or (einzeilig and kat in ("Cc", "Cf", "Zl", "Zp")) \
-                or (not einzeilig and kat == "Cc" and ch not in "\n\r\t"):
-            return "enthält Steuer-, Format- oder ungültige Zeichen" + (" (einzeiliges Feld)" if einzeilig else "")
+        if gitkopie.unsichtbar(ch) and (einzeilig or ch not in "\n\r\t"):
+            return _UNSICHTBAR_MELDUNG + (" (einzeiliges Feld)" if einzeilig else "")
     if einzeilig and "```" in wert:
         return "enthält ``` (einzeiliges Feld)"
     return None
+
+
+def _hat_unsichtbares(text: str) -> bool:
+    return any(gitkopie.unsichtbar(ch) for ch in text)
 
 
 def _pfad_fehler(pfad: object) -> str | None:
@@ -264,9 +271,14 @@ def pruefe_schema(daten: object) -> list[str]:
                 if not (isinstance(e, dict) and isinstance(e.get("flaeche"), str) and isinstance(e.get("dateien"), list)
                         and all(isinstance(d, str) for d in e["dateien"])):
                     f.append(f"karte[{i}] muss {{flaeche: Text, dateien: [Text]}} sein")
-    if "hinweise" in daten and not (isinstance(daten["hinweise"], list)
-                                    and all(isinstance(h, str) for h in daten["hinweise"])):
-        f.append("hinweise muss eine Liste von Texten sein")
+                elif any(_hat_unsichtbares(t) for t in [e["flaeche"], *e["dateien"]]):
+                    f.append(f"karte[{i}] {_UNSICHTBAR_MELDUNG}")
+    if "hinweise" in daten:
+        h = daten["hinweise"]
+        if not (isinstance(h, list) and all(isinstance(x, str) for x in h)):
+            f.append("hinweise muss eine Liste von Texten sein")
+        else:
+            f.extend(f"hinweise[{i}] {_UNSICHTBAR_MELDUNG}" for i, x in enumerate(h) if _hat_unsichtbares(x))
     if "befunde" in daten:
         if not isinstance(daten["befunde"], list):
             f.append("befunde muss eine Liste sein")
@@ -293,8 +305,8 @@ def pruefe_schema(daten: object) -> list[str]:
 # ------------------------------------------------------------------------------------ Markdown
 
 def _inline(text: object) -> str:
-    """Nicht validierten Text (Karte, Hinweise) einzeilig machen; Backticks und Tilden escapen (kein Codezaun möglich)."""
-    return " ".join(str(text).split()).replace("`", "\\`").replace("~", "\\~")
+    """Nicht validierten Text (Karte, Hinweise) einzeilig machen, unsichtbare Zeichen als Escape-Sequenz zeigen; Backticks und Tilden escapen (kein Codezaun möglich)."""
+    return _t(" ".join(str(text).split()), 10**6).replace("`", "\\`").replace("~", "\\~")
 
 
 def _block(inhalt: str) -> list[str]:
@@ -377,14 +389,19 @@ def _rendern(pfad: str) -> int:
     if os.path.abspath(ziel) == os.path.abspath(pfad):
         print("Ziel wäre die Eingabedatei selbst", file=sys.stderr)
         return 2
+    tmp = None
     try:
         fd, tmp = tempfile.mkstemp(prefix=".bericht-", suffix=".tmp", dir=os.path.dirname(os.path.abspath(ziel)))
         with os.fdopen(fd, "wb") as fh:
             fh.write(markdown(daten).encode("utf-8", "replace"))
         os.replace(tmp, ziel)
+        tmp = None
     except OSError as e:
         print(f"Schreiben fehlgeschlagen: {_t(e)}", file=sys.stderr)
         return 2
+    finally:
+        if tmp is not None and os.path.lexists(tmp):       # Fehler zwischen mkstemp und replace: keine Reste im Ausgabeordner
+            os.unlink(tmp)
     print(ziel)
     return 0
 

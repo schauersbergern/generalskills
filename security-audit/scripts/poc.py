@@ -66,6 +66,10 @@ APP_PORT_DB = 5432
 POSTGRES_IMAGE = "postgres:16-alpine"
 DB_URL = "postgres://poc:poc@db:5432/poc"
 
+# Hinweis-Kategorien, die `bauen` ausgeben kann (`hinweis: <kategorie>`); SKILL.md und bericht-format.md nennen jede.
+HINWEIS_KATEGORIEN = ("native-module", "prisma-engines", "lockfile-ohne-paketliste", "node-range-zu-lang",
+                      "node-engines-ignoriert")
+
 LAUF_RE = re.compile(r"[0-9a-f]{8}")
 ROLLE_RE = re.compile(r"p[12]")
 ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -239,6 +243,7 @@ class _Puffer:
     def __init__(self, strom, grenze: int, ende: bool):
         self.daten = bytearray()
         self.gekuerzt = False
+        self.lesefehler = False          # Lesefehler am Strom: die Ausgabe ist unvollständig
         self._grenze = grenze
         self._ende = ende
         self.thread = threading.Thread(target=self._lesen, args=(strom,), daemon=True)
@@ -250,6 +255,7 @@ class _Puffer:
             try:
                 teil = os.read(fd, 65536)
             except OSError:
+                self.lesefehler = True
                 return
             if not teil:
                 return
@@ -328,6 +334,8 @@ def _docker(args: list[str], timeout: int, eingabe: bytes | None = None, env: di
     r = Ergebnis(rc, o, e, ko or ke)
     if r.gekuerzt:
         print(f"docker {args[0]}: Ausgabe auf {LESE_MAX // 1024 // 1024} MiB gekürzt", file=sys.stderr)
+    if out.lesefehler or err.lesefehler:
+        print(f"docker {args[0]}: Ausgabe unvollständig (Lesefehler am Strom)", file=sys.stderr)
     if (rc in DAEMON_EXIT and args[0] != "version"
             and any(m in e.decode("utf-8", "replace").lower() for m in DAEMON_WEG)):
         v = _docker(["version", "--format", "{{.Server.Version}}"], VERSION_TIMEOUT, budget=False)
@@ -428,9 +436,13 @@ def _lock_laden(quelle: str) -> dict | None:
             print(f"poc.py: package-lock.json zu groß (über {LOCKFILE_MAX // 1024 // 1024} MiB), nicht gelesen", file=sys.stderr)
             return None
         daten = _json_datei(pfad)
-    except (OSError, ValueError, RecursionError):
+    except (OSError, ValueError, RecursionError) as e:
+        print(f"poc.py: package-lock.json nicht lesbar ({_tail(f'{type(e).__name__}: {e}', 1)})", file=sys.stderr)
         return None
-    return daten if isinstance(daten, dict) else None
+    if not isinstance(daten, dict):
+        print("poc.py: package-lock.json nicht lesbar (kein JSON-Objekt)", file=sys.stderr)
+        return None
+    return daten
 
 
 FREMDE_PRAEFIXE = ("git+", "git://", "github:", "gitlab:", "bitbucket:", "gist:", "file:", "link:", "ssh://")
@@ -475,11 +487,13 @@ def lockfile_pruefen(quelle: str) -> str | None:
 
 
 def lockfile_hinweise(quelle: str) -> list[str]:
-    """Hinweis-Kategorien (brechen den Bau nicht ab): native-module, prisma-engines."""
+    """Hinweis-Kategorien (brechen den Bau nicht ab): native-module, prisma-engines, lockfile-ohne-paketliste."""
     daten = _lock_laden(quelle)
-    pakete = daten.get("packages") if daten else None
-    if not isinstance(pakete, dict):
+    if daten is None:
         return []
+    pakete = daten.get("packages")
+    if not isinstance(pakete, dict):
+        return ["lockfile-ohne-paketliste"]          # lockfileVersion 1: native Module und Prisma nicht erkennbar
     hinweise: list[str] = []
     native = prisma = False
     for pfad, eintrag in pakete.items():
@@ -602,28 +616,20 @@ def _engines(quelle: str) -> str | None:
     return engines if isinstance(engines, str) and engines.strip() else None
 
 
-def node_hinweise(quelle: str, vorgabe: str | None) -> list[str]:
-    """Hinweis-Kategorien zur Node-Auswahl: node-range-zu-lang (engines.node wird ignoriert)."""
-    engines = None if vorgabe else _engines(quelle)
-    if engines is not None and _bereich_lesen(engines) is None:
-        return ["node-range-zu-lang"]
-    return []
-
-
-def node_version(quelle: str, vorgabe: str | None) -> str:
-    """Node-Major: Vorgabe, sonst höchster Kandidat (24/22/20) zu `engines.node`, sonst `.nvmrc`, sonst 22."""
+def _node_wahl(quelle: str, vorgabe: str | None) -> tuple[str, str]:
+    """(Node-Major, Quelle der Wahl): `vorgabe`, `engines`, `nvmrc` oder `standard`."""
     if vorgabe:
-        return str(vorgabe)
+        return str(vorgabe), "vorgabe"
     engines = _engines(quelle)
     alternativen = _bereich_lesen(engines) if engines else None
     if alternativen is not None:
         for major in KANDIDATEN:
             if _range_erfuellt((major, 99, 99), alternativen):
-                return str(major)
+                return str(major), "engines"
         # Bereiche, die nur einzelne Minor-/Patch-Versionen treffen (~20.11, =20.11.5, <=20.11.0).
         for major in KANDIDATEN:
             if any(_range_erfuellt(v, alternativen) for v in sorted(_proben(major, alternativen))):
-                return str(major)
+                return str(major), "engines"
     try:
         with open(os.path.join(quelle, ".nvmrc"), encoding="utf-8", errors="replace") as f:
             nvmrc = f.readline(100).strip()
@@ -631,8 +637,26 @@ def node_version(quelle: str, vorgabe: str | None) -> str:
         nvmrc = ""
     m = re.fullmatch(r"v?(\d+)(?:\.\d+){0,2}", nvmrc)
     if m and len(m.group(1)) <= 3 and int(m.group(1)) in KANDIDATEN:
-        return m.group(1)
-    return STANDARD_NODE
+        return m.group(1), "nvmrc"
+    return STANDARD_NODE, "standard"
+
+
+def node_hinweise(quelle: str, vorgabe: str | None) -> list[str]:
+    """Hinweis-Kategorien zur Node-Auswahl: `node-range-zu-lang` (engines.node wird ignoriert) und `node-engines-ignoriert`
+    (engines.node ist unlesbar oder von keinem Kandidaten 24/22/20 erfüllbar; es gilt `.nvmrc` oder der Standard)."""
+    if vorgabe:
+        return []
+    engines = _engines(quelle)
+    if engines is None:
+        return []
+    if _bereich_lesen(engines) is None:
+        return ["node-range-zu-lang"]
+    return [] if _node_wahl(quelle, None)[1] == "engines" else ["node-engines-ignoriert"]
+
+
+def node_version(quelle: str, vorgabe: str | None) -> str:
+    """Node-Major: Vorgabe, sonst höchster Kandidat (24/22/20) zu `engines.node`, sonst `.nvmrc`, sonst 22."""
+    return _node_wahl(quelle, vorgabe)[0]
 
 
 # ------------------------------------------------------------------------------------ Befehle

@@ -1443,3 +1443,69 @@ def test_start_fehler_im_lauf_bleibt_der_urspruengliche_fehler_haertung_a7(tmp_p
         run_eval._lauf(["claude"], str(tmp_path), {}, str(tmp_path / "s"), str(tmp_path / "e"), 5)
     ok, grund = run_eval._smoke_test([], str(tmp_path), {})
     assert ok is False and "nicht startbar" in grund
+
+
+# ------------------------------------------------------------------------------------ Härtung TF1-B5 / B6 (Eval)
+
+def test_docker_aufraeumen_meldet_nicht_lesbare_listen_haertung_b5(ev, capsys):
+    """Nicht lesbares Docker ist nicht „nichts übrig“: Rückgabe False und eine Meldung."""
+    ev.docker_state.write_text(json.dumps({"kaputt": True, "container": [], "netze": [], "images": []}))
+    assert run_eval.docker_aufraeumen() is False
+    assert "nicht lesbar" in capsys.readouterr().err
+
+
+def test_docker_aufraeumen_sauber_bleibt_true_haertung_b5(ev):
+    assert run_eval.docker_aufraeumen() is True
+
+
+def test_opus_md_lesen_nennt_die_quelle_haertung_b5(tmp_path, monkeypatch, capsys):
+    text = run_eval._opus_md_lesen()                              # echtes Repo: agents/opus-xhigh.md
+    assert "opus-xhigh" in text or "description" in text
+    assert os.path.join("agents", "opus-xhigh.md") in capsys.readouterr().err
+    leer = tmp_path / "skill-ohne-agents" / "security-audit"
+    leer.mkdir(parents=True)
+    home = tmp_path / "home"
+    (home / ".claude" / "agents").mkdir(parents=True)
+    (home / ".claude" / "agents" / "opus-xhigh.md").write_text("---\ndescription: x\n---\nrumpf\n", encoding="utf-8")
+    monkeypatch.setattr(run_eval, "SKILL_DIR", str(leer))
+    monkeypatch.setenv("HOME", str(home))
+    assert "rumpf" in run_eval._opus_md_lesen()
+    fehler = capsys.readouterr().err
+    assert str(home) in fehler and "Ersatz" in fehler            # Fallback auf die Home-Datei ist sichtbar
+
+
+def test_bericht_lesen_nimmt_den_bericht_nicht_eine_anfragedatei_haertung_b6(tmp_path):
+    """Prüfer legen Request-Bodys als .json im Ausgabeordner ab; der neueste .json ist nicht automatisch der Bericht."""
+    ordner = tmp_path / "ausgabe" / "repo"
+    ordner.mkdir(parents=True)
+    bericht_pfad = ordner / "2026-11-09-abc1234.json"
+    bericht_pfad.write_text(json.dumps({"version": 1, "befunde": []}), encoding="utf-8")
+    anfrage = ordner / "daten-p1-1.json"
+    anfrage.write_text(json.dumps({"titel": "x"}), encoding="utf-8")
+    os.utime(bericht_pfad, (1000, 1000))
+    os.utime(anfrage, (2000, 2000))                               # neuer als der Bericht
+    daten, pfad = run_eval._bericht_lesen(str(ordner))
+    assert pfad == str(bericht_pfad) and daten == {"version": 1, "befunde": []}
+
+
+def test_bericht_lesen_ohne_bericht_unter_den_json_haertung_b6(tmp_path):
+    (tmp_path / "daten-p1-1.json").write_text("{}", encoding="utf-8")
+    daten, _pfad = run_eval._bericht_lesen(str(tmp_path))
+    assert daten is None
+
+
+def test_eval_laeuft_nicht_parallel_haertung_b6(ev, capsys):
+    """Zwei Eval-Läufe räumen sonst gegenseitig alles mit Präfix security-audit- ab."""
+    import fcntl
+    fd = os.open(os.path.join(os.path.realpath(tempfile.gettempdir()), "security-audit-eval.lock"),
+                 os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        assert run_eval.main(["--fixture", "fixture-web", "--timeout", "5"]) == 7
+    finally:
+        os.close(fd)
+    assert "anderer Eval-Lauf" in capsys.readouterr().err
+    assert ev.docker() == [] and ev.aufrufe() == []               # nichts angefasst
+    ev.modus("bericht")
+    assert run_eval.main(["--fixture", "fixture-web"]) == 0       # Sperre frei: läuft (und gibt sie wieder frei)
+    assert run_eval.main(["--fixture", "fixture-web"]) == 0
