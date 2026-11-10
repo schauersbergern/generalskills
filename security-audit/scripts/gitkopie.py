@@ -150,9 +150,28 @@ def _baum(repo: str) -> list[Eintrag]:
     return eintraege
 
 
+_UNSICHTBAR_BEREICHE = ((0xFE00, 0xFE0F), (0xE0100, 0xE01EF), (0x034F, 0x034F), (0x180B, 0x180F), (0x17B4, 0x17B5),
+                        (0x115F, 0x1160), (0x3164, 0x3164), (0xFFA0, 0xFFA0), (0x2800, 0x2800))
+
+
+def unsichtbar(ch: str) -> bool:
+    """Zeichen, das in Terminal/LLM-Kontext unsichtbar ist oder den Text umlenkt: Kategorien Cc, Cf, Cs, Co, Cn, Zl, Zp
+    sowie Variation Selectors, CGJ, Mongolisch-/Khmer-Steuerzeichen, Hangul- und Braille-Füller. Die eine Quelle für alle
+    Meldungen und Ausgaben des Skills (`_t` hier, `poc._entschaerfen`)."""
+    o = ord(ch)
+    return (unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp")
+            or any(von <= o <= bis for von, bis in _UNSICHTBAR_BEREICHE))
+
+
+def escape_zeichen(ch: str) -> str:
+    """`\\xNN`, `\\uNNNN` oder `\\UNNNNNNNN` für ein Zeichen."""
+    o = ord(ch)
+    return f"\\x{o:02x}" if o < 0x100 else f"\\u{o:04x}" if o < 0x10000 else f"\\U{o:08x}"
+
+
 def _t(text: object, grenze: int = MAX_TEXT) -> str:
-    """Repo-stämmigen Text für Meldungen entschärfen: Steuer-/Formatzeichen (Newline, ESC, Bidi, Zero-Width)
-    als Escape-Sequenz, Länge auf `grenze` Zeichen kappen. Meldungen fließen in den LLM-Kontext."""
+    """Repo-stämmigen Text für Meldungen entschärfen: unsichtbare Zeichen (`unsichtbar`: Newline, ESC, Bidi, Zero-Width,
+    Variation Selectors …) als Escape-Sequenz, Länge auf `grenze` Zeichen kappen. Meldungen fließen in den LLM-Kontext."""
     kurz = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
     aus = []
     for ch in str(text):
@@ -161,8 +180,8 @@ def _t(text: object, grenze: int = MAX_TEXT) -> str:
             aus.append(kurz[ch])
         elif 0xDC80 <= o <= 0xDCFF:                      # surrogateescape: ungültiges UTF-8 im Namen
             aus.append(f"\\x{o - 0xDC00:02x}")
-        elif unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Zl", "Zp"):
-            aus.append(f"\\x{o:02x}" if o < 0x100 else f"\\u{o:04x}" if o < 0x10000 else f"\\U{o:08x}")
+        elif unsichtbar(ch):
+            aus.append(escape_zeichen(ch))
         else:
             aus.append(ch)
     ergebnis = "".join(aus)

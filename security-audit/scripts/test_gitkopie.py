@@ -686,6 +686,29 @@ def test_namenskollision_ordner_zuerst_dann_datei(tmp_path):
 
 # ---------------------------------------------------------------- Meldungen entschärfen
 
+UNSICHTBARE_ZEICHEN = [
+    "\ufe00", "\ufe0f", "\U000e0100", "\U000e01ef",      # Variation Selectors
+    "\u034f", "\u180b", "\u180c", "\u180d", "\u180f", "\u17b4", "\u17b5",   # CGJ, Mongolisch, Khmer
+    "\u115f", "\u1160", "\u3164", "\uffa0", "\u2800",  # Hangul-/Braille-Füller
+    "\u2028", "\u2029", "\u0378", "\U0010ffff",          # Zeilentrenner, nicht zugewiesen (Cn)
+]
+
+
+@pytest.mark.parametrize("zeichen", UNSICHTBARE_ZEICHEN)
+def test_t_escaped_alle_unsichtbaren_zeichen_haertung_a2(zeichen):
+    aus = gitkopie._t(f"a{zeichen}b")
+    assert zeichen not in aus and aus.startswith("a\\") and aus.endswith("b"), ascii(aus)
+
+
+def test_unsichtbar_ist_die_gemeinsame_funktion_von_poc_haertung_a2():
+    import poc
+    assert poc._unsichtbar is gitkopie.unsichtbar
+
+
+def test_t_laesst_normalen_text_haertung_a2():
+    assert gitkopie._t("Grüße, 世界 é\u0301 😀 .env") == "Grüße, 世界 é\u0301 😀 .env"
+
+
 def test_t_escaped_und_kappt():
     assert gitkopie._t("a\nb\r\tc") == "a\\nb\\r\\tc"
     assert gitkopie._t("\x1b[31mrot") == "\\x1b[31mrot"

@@ -27,7 +27,6 @@ import sys
 import tempfile
 import threading
 import time
-import unicodedata
 from typing import NamedTuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -312,14 +311,7 @@ def _daemon_pruefen() -> str:
     return r.out.decode("utf-8", "replace").strip()
 
 
-_UNSICHTBAR_BEREICHE = ((0xFE00, 0xFE0F), (0xE0100, 0xE01EF), (0x034F, 0x034F), (0x180B, 0x180D), (0x17B4, 0x17B5),
-                        (0x3164, 0x3164), (0xFFA0, 0xFFA0), (0x1160, 0x1160), (0x2800, 0x2800))
-
-
-def _unsichtbar(ch: str) -> bool:
-    o = ord(ch)
-    return (unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp")
-            or any(von <= o <= bis for von, bis in _UNSICHTBAR_BEREICHE))
+_unsichtbar = gitkopie.unsichtbar      # eine Definition für alle Ausgaben (gitkopie._t nutzt dieselbe)
 
 
 def _entschaerfen(text: str) -> str:
@@ -332,8 +324,7 @@ def _entschaerfen(text: str) -> str:
         elif ch == "\r":
             aus.append("\\r")
         elif _unsichtbar(ch):
-            o = ord(ch)
-            aus.append(f"\\x{o:02x}" if o < 0x100 else f"\\u{o:04x}" if o < 0x10000 else f"\\U{o:08x}")
+            aus.append(gitkopie.escape_zeichen(ch))
         else:
             aus.append(ch)
     return "".join(aus)

@@ -1200,8 +1200,8 @@ def test_starten_fehler_mit_daemon_stoerung(umg, tmp_path):
 
 @pytest.mark.parametrize("zeichen", [
     "\ufe00", "\ufe0f", "\U000e0100", "\U000e01ef",      # Variation Selectors
-    "\u034f", "\u180b", "\u180d", "\u17b4", "\u17b5",   # Combining Grapheme Joiner, Mongolisch, Khmer
-    "\u3164", "\uffa0", "\u1160", "\u2800",              # Hangul-/Braille-Füller
+    "\u034f", "\u180b", "\u180d", "\u180f", "\u17b4", "\u17b5",   # Combining Grapheme Joiner, Mongolisch, Khmer
+    "\u3164", "\uffa0", "\u115f", "\u1160", "\u2800",  # Hangul-/Braille-Füller
     "\u2028", "\u2029",                                    # Zeilen-/Absatztrenner
     "\u0378", "\U0010ffff",                                # nicht zugewiesen (Cn)
 ])
