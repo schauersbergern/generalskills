@@ -2086,6 +2086,16 @@ def test_auswertung_tf2_d4_alle_unbestaetigt(bericht, erw_ohne, stream):
         assert alles(bericht, erw_ohne, stream)["dod"]["TF2-D4"]["ok"] is False, status
 
 
+@pytest.mark.parametrize("stufe", ["P2", "P3"])
+def test_auswertung_tf2_d4_alle_unbestaetigt_jede_stufe(bericht, erw_ohne, stream, stufe):
+    """Task-6-Review I-1: `alle_unbestaetigt` gilt für jeden Befund, nicht nur für P1."""
+    ohne_bericht(bericht)
+    assert alles(bericht, erw_ohne, stream)["dod"]["TF2-D4"]["ok"] is True
+    befund(bericht, "src/routes/projects.js").update(stufe=stufe, status="bestätigt",
+                                                     poc=f"{POC} anfrage --lauf 0a1b2c3d --rolle p1 --pfad /x")
+    assert alles(bericht, erw_ohne, stream)["dod"]["TF2-D4"]["ok"] is False
+
+
 def test_auswertung_tf2_d4_lockfile_fehlt_befund(bericht, erw_ohne, stream):
     """Der W1-Eintrag (`lockfile-fehlt` für package.json) gehört zu TF2-D4."""
     ohne_bericht(bericht)

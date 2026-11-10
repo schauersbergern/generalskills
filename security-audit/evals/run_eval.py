@@ -267,7 +267,9 @@ def secret_einbauen(repo: str) -> tuple[str, dict]:
     """Fake-Secret in die Historie des Temp-Repos: `config/keys.js` mit `const apiKey = "<32 Zeichen [A-Za-z0-9]>";`
     committen, danach löschen und erneut committen (zwei Commits). Gibt (Wert, `secret_info`) zurück; `secret_info` ist
     `{"sha256": …, "commit": <voller SHA des Einbau-Commits>, "laenge": 32}`. Der Wert wird nirgends geschrieben außer
-    in diese Datei und damit in die Git-Historie des Temp-Repos; der Aufrufer hält ihn nur im Speicher."""
+    in diese Datei und damit in die Git-Historie des Temp-Repos; der Aufrufer hält ihn nur im Speicher. Bleibt das
+    Temp-Verzeichnis liegen (`--behalten` oder gescheiterter Lauf), steht der (lokal erzeugte, wertlose) Fake-Wert dort im
+    Einbau-Commit; er gelangt nie in `ergebnis.json`, stdout oder stderr."""
     wert = "".join(secrets.choice(SECRET_ALPHABET) for _ in range(SECRET_LAENGE))
     pfad = os.path.join(repo, *SECRET_DATEI.split("/"))
     os.makedirs(os.path.dirname(pfad), exist_ok=True)
@@ -802,8 +804,8 @@ def _lauf_main(a: argparse.Namespace) -> int:
     ergebnis["ok"] = bool(ergebnis["ok"] and lauf_ok)
     text = json.dumps(ergebnis, ensure_ascii=False, indent=2)
     if secret_wert and secret_wert in text:                         # Gürtel und Hosenträger: der Wert gehört nie in die Ausgabe
-        text = text.replace(secret_wert, "*" * len(secret_wert))
-        ergebnis["ok"] = False
+        ergebnis["ok"] = False                                      # vor dem erneuten Serialisieren, damit `ok` im JSON stimmt
+        text = json.dumps(ergebnis, ensure_ascii=False, indent=2).replace(secret_wert, "*" * len(secret_wert))
     try:
         with open(os.path.join(wurzel, "ergebnis.json"), "w", encoding="utf-8") as f:
             f.write(text + "\n")
