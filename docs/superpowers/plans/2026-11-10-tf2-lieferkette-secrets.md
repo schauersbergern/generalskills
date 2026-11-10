@@ -155,3 +155,25 @@ Task 4 → 1 → 2 → 3 → 5 → 6 → 7 (Schema zuerst, weil die Entwürfe au
 **K7:** `test_fixture.py`: App-Fixture benennt alle `.tmpl` um; Tests „keine Install-Skripte“ und „keine echten Secrets“ für `fixture-deps`; PoC-Payload in Tests harmlos (`variable` liefert ein Rechenergebnis, kein Dateisystem/Prozess); Lockfile-Kopien heißen `package-lock.json`.
 **K8:** Task-3-Satz „bis dahin Felder prüfen“ entfällt (Schema existiert nach Task 4).
 **K9:** Testnamen wie oben, eindeutig gegenüber bestehenden (`test_lockfile_fehlt` u. a.).
+
+## Nachträge nach Plan-Review R2 (Vorrang vor allem oben)
+
+**B1 (SKILL.md, ersetzt den W1-Satz zu `secrets`):** `secrets` Exit 0 mit gesetztem Marker **oder** Exit 0 mit `{"werkzeug":"gitleaks","fehlt":true}` → weiter (fehlt: Hinweis übernehmen, keine Secret-Befunde). Alles andere (Exit ≠ 0; Exit 0 ohne Marker und ohne `fehlt`) → Abbruch vor der Karte mit wörtlicher Meldung. Test `test_skill_secrets_fehlt_laeuft_weiter` in `test_skill_text.py` (beide Sätze wörtlich vorhanden).
+
+**W-a (DoD-Schlüssel, ergänzt B2):** Hat die Erwartung weder `luecke`- noch `werkzeug`-Einträge, sind TF1-D1 und TF1-D2 immer vorhanden und rot („Erwartung leer“). `test_erwartung_leer` bleibt unverändert grün.
+
+**W-b (Task 1):** `secrets --lauf <id> --quelle <p> --sha <sha>`: Exit 2, wenn `realpath(--quelle) != realpath(<zustand_ordner(lauf)>/quelle)` oder `quelle.fertig` fehlt (wie `poc.py` beim Bau). Test `test_secrets_quelle_ausserhalb_verweigert` (Ordner außerhalb bleibt byte-gleich).
+
+**W-c (Hinweise):** SKILL.md Schritt 1b: `hinweis`/`hinweise` aller drei Unterbefehle werden unverändert in `bericht.hinweise` übernommen; bei `fehlt` lautet der Hinweis wörtlich „gitleaks fehlt“ bzw. „osv-scanner fehlt“ (von den Skripten erzeugt, nicht vom Modell formuliert). `auswertung`: jeder Eintrag aus `werkzeug_hinweise` muss als Teilstring (NFC, casefold) in einem Element von `bericht["hinweise"]` stehen. Tests `test_auswertung_tf2_d4_hinweis_fehlt_rot`, `test_skill_hinweise_uebernehmen`.
+
+**Klein:**
+- K-a: Commit-Vergleich per Präfix (Befund-SHA ≥ 7 Zeichen, Präfix von `secret_info.commit`); SKILL.md schreibt volle SHAs aus der `secrets`-Ausgabe vor.
+- K-b: `befunde_zuordnen`: Befunde mit `werkzeug` werden nur `werkzeug`-Einträgen zugeordnet, nie `luecke`/`koeder`. Test `test_werkzeug_befund_nicht_als_luecke`.
+- K-c: `alle_unbestaetigt` = kein Befund mit Status `bestätigt` im Bericht.
+- K-d: Nachtrag R1 gilt (`poc.werkzeug_fehlt`, `gitkopie.werkzeug_umgebung`); Task 4 Files zusätzlich `security-audit/scripts/gitkopie.py`, `security-audit/scripts/test_gitkopie.py`; Test `test_werkzeug_umgebung_ohne_git_variablen`.
+- K-e: `abhaengigkeiten` liefert je Paket `zeile`: npm-Lockfile Zeile des Schlüssels `"node_modules/<name>"`, sonst erste Zeile mit dem Paketnamen, Fallback 1; `code_pfad` = `<lockfile>:<zeile>`. Test `test_abhaengigkeiten_zeile_im_lockfile`.
+- K-f: `in_head` per `git cat-file -e <sha>:<datei>` mit dem übergebenen `--sha` (nicht `HEAD`).
+- K-g: Marker wird auch gesetzt, wenn `gitleaks dir` nichts findet. Test `test_marker_ohne_treffer`.
+- K-h: In `bauen` kommt die Marker-Prüfung **nach** `_daemon_pruefen`.
+- K-i: TF2-D5 → `test_auswertung_fixture_web_ohne_tf1_d1`; TF2-D6 → `test_auswertung_regression_nur_tf1`.
+- K-j: Kurze git-Aufrufe über `gitkopie.git()` (`subprocess.run` mit Timeout, beendet nur das eigene direkte Kind) sind erlaubt; der Spiegel-Klon und die Werkzeuge (gitleaks, osv-scanner) laufen über eigenes `Popen(start_new_session=True)` und beenden bei Timeout nur diese eigene Gruppe. Keine anderen Signale.
