@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Tests für fehlerklassen.py. Aufruf: python3 auto-feature/scripts/test_fehlerklassen.py"""
+import fcntl
 import os
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 SKRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fehlerklassen.py")
@@ -139,6 +142,9 @@ class Struktur(Basis):
 
     def test_zaunzeile_im_block(self):
         self.abgelehnt(GUT.replace("- Status: offen", "```bash\n- Status: offen"))
+
+    def test_eingerueckte_zaunzeile_als_fortsetzung(self):
+        self.abgelehnt(GUT.replace("- Status: offen", "  ```bash\n- Status: offen"))
 
     def test_vorlage_samt_zaun_aus_retro_md(self):
         self.abgelehnt("```\n" + GUT + "```\n")
@@ -316,6 +322,224 @@ class Status(Basis):
     def test_unbekannter_status(self):
         lauf("neu", self.datei, eingabe=GUT)
         self.assertNotEqual(lauf("status", self.datei, "K-1", "vielleicht", "x").returncode, 0)
+
+
+BELEG2 = "- Beleg: PR #200 R1-1 [P2], `a.ts:3`, 2026-11-10 — wieder\n"
+
+
+class Zeige(Basis):
+    def test_gibt_den_ganzen_kandidaten_mit_vielen_belegen_aus(self):
+        lauf("neu", self.datei, eingabe=GUT)
+        lauf("neu", self.datei, eingabe=GUT.replace("Token-Prüfung", "Zweite"))
+        for n in range(1, 7):
+            r = lauf("beleg", self.datei, "K-1", eingabe=BELEG2.replace("R1-1", f"R1-{n}"))
+            self.assertEqual(r.returncode, 0, r.stderr)
+        r = lauf("zeige", self.datei, "K-1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.stdout.startswith("## K-1 · Token-Prüfung"))
+        for feld in ("- Durchgerutscht:", "- Prüfpunkt (", "- Deterministisch:", "- Status: offen"):
+            self.assertIn(feld, r.stdout)
+        self.assertEqual(r.stdout.count("- Beleg:"), 7)
+        self.assertNotIn("K-2", r.stdout)
+
+    def test_unbekannte_id(self):
+        self.assertNotEqual(lauf("zeige", self.datei, "K-3").returncode, 0)
+
+    def test_hilfe_nennt_stdin(self):
+        for befehl in ("beleg", "neu"):
+            self.assertIn("<<", lauf(befehl, "-h").stdout)
+
+
+class BelegDublette(Basis):
+    """Review R1-8: ein Befund belegt einen Kandidaten nur einmal."""
+
+    def test_gleiche_quelle_und_befund_id_wird_abgelehnt(self):
+        lauf("neu", self.datei, eingabe=GUT)
+        self.assertEqual(lauf("beleg", self.datei, "K-1", eingabe=BELEG2).returncode, 0)
+        vorher = self.text()
+        r = lauf("beleg", self.datei, "K-1", eingabe=BELEG2.replace("[P2]", "[P1]").replace("a.ts:3", "b.ts:9"))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("PR #200 R1-1", r.stderr)
+        self.assertEqual(self.text(), vorher)
+
+    def test_der_beleg_aus_neu_zaehlt_mit(self):
+        lauf("neu", self.datei, eingabe=GUT)
+        r = lauf("beleg", self.datei, "K-1", eingabe=BELEG2.replace("PR #200 R1-1", "PR #191 R1-2"))
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_andere_befund_id_oder_pr_ist_erlaubt(self):
+        lauf("neu", self.datei, eingabe=GUT)
+        for q in ("PR #200 R1-1", "PR #200 R2-1", "PR #201 R1-1"):
+            r = lauf("beleg", self.datei, "K-1", eingabe=BELEG2.replace("PR #200 R1-1", q))
+            self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.text().count("- Beleg:"), 4)
+
+    def test_dublette_innerhalb_der_eingabe(self):
+        lauf("neu", self.datei, eingabe=GUT)
+        vorher = self.text()
+        self.assertNotEqual(lauf("beleg", self.datei, "K-1", eingabe=BELEG2 + BELEG2).returncode, 0)
+        self.assertEqual(self.text(), vorher)
+
+    def test_gleicher_befund_an_anderem_kandidaten_ist_erlaubt(self):
+        lauf("neu", self.datei, eingabe=GUT)
+        lauf("neu", self.datei, eingabe=GUT.replace("Token-Prüfung", "Zweite"))
+        self.assertEqual(lauf("beleg", self.datei, "K-1", eingabe=BELEG2).returncode, 0)
+        self.assertEqual(lauf("beleg", self.datei, "K-2", eingabe=BELEG2).returncode, 0)
+
+
+class Dateirechte(Basis):
+    """Review R1-10: Rechte bleiben, kein Temp-Rest, Symlink bleibt Symlink."""
+
+    def test_rechte_der_alten_datei_bleiben(self):
+        for modus in (0o644, 0o664):
+            os.chmod(self.datei, modus)
+            r = lauf("neu", self.datei, eingabe=GUT)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(stat.S_IMODE(os.stat(self.datei).st_mode), modus)
+            lauf("beleg", self.datei, "K-1", eingabe=BELEG2.replace("R1-1", f"R{modus}"))
+            self.assertEqual(stat.S_IMODE(os.stat(self.datei).st_mode), modus)
+            lauf("status", self.datei, "K-1", "übernommen", f"x{modus}")
+            self.assertEqual(stat.S_IMODE(os.stat(self.datei).st_mode), modus)
+            self.setUp()
+
+    def test_kein_temp_rest(self):
+        lauf("neu", self.datei, eingabe=GUT)
+        self.assertEqual([n for n in os.listdir(self.tmp.name) if n.startswith(".kandidaten-")], [])
+
+    def test_symlink_bleibt_symlink(self):
+        ziel = os.path.join(self.tmp.name, "echt.md")
+        os.replace(self.datei, ziel)
+        os.symlink(ziel, self.datei)
+        r = lauf("neu", self.datei, eingabe=GUT)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(os.path.islink(self.datei))
+        with open(ziel, encoding="utf-8") as f:
+            self.assertIn("## K-1", f.read())
+        self.assertTrue(os.path.exists(ziel + ".lock"))
+
+
+class Statuswechsel(Basis):
+    """Review R1-11 und R1-7."""
+
+    def setUp(self):
+        super().setUp()
+        lauf("neu", self.datei, eingabe=GUT)
+        lauf("neu", self.datei, eingabe=GUT.replace("Token-Prüfung", "Zweite"))
+
+    def test_nur_offen_wechselt(self):
+        self.assertEqual(lauf("status", self.datei, "K-1", "übernommen", "PR #9, 2026-11-10").returncode, 0)
+        for neu in ("verworfen", "offen", "übernommen"):
+            r = lauf("status", self.datei, "K-1", neu, "doch")
+            self.assertNotEqual(r.returncode, 0, neu)
+        self.assertIn("- Status: übernommen (PR #9, 2026-11-10)", self.text())
+        self.assertNotIn("doch", self.text())
+
+    def test_verworfen_bleibt_verworfen(self):
+        lauf("status", self.datei, "K-1", "verworfen", "zu speziell")
+        self.assertNotEqual(lauf("status", self.datei, "K-1", "offen").returncode, 0)
+        self.assertIn("(zu speziell)", self.text())
+
+    def test_beleg_an_verworfenen_kandidaten_wird_abgelehnt(self):
+        lauf("status", self.datei, "K-1", "verworfen", "zu speziell")
+        vorher = self.text()
+        r = lauf("beleg", self.datei, "K-1", eingabe=BELEG2)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("verworfen", r.stderr)
+        self.assertEqual(self.text(), vorher)
+
+    def test_beleg_an_uebernommenen_kandidaten_geht(self):
+        lauf("status", self.datei, "K-1", "übernommen", "PR #9")
+        self.assertEqual(lauf("beleg", self.datei, "K-1", eingabe=BELEG2).returncode, 0)
+
+    def test_vermerk_pflicht_fuer_uebernommen_und_verworfen(self):
+        for st in ("übernommen", "verworfen"):
+            self.assertNotEqual(lauf("status", self.datei, "K-1", st).returncode, 0, st)
+        self.assertEqual(lauf("status", self.datei, "K-1", "offen").returncode, 0)
+
+    def test_status_an_k2_laesst_k1_in_ruhe(self):
+        self.assertEqual(lauf("status", self.datei, "K-2", "verworfen", "x").returncode, 0)
+        zeilen = lauf("liste", self.datei).stdout.splitlines()
+        self.assertTrue(zeilen[0].startswith("K-1 · offen"), zeilen)
+        self.assertTrue(zeilen[1].startswith("K-2 · verworfen"), zeilen)
+
+    def test_fehlende_statuszeile_wird_am_ende_des_kandidaten_ergaenzt(self):
+        with open(self.datei, encoding="utf-8") as f:
+            t = f.read()
+        k1, k2 = t.split("## K-2")
+        k1 = "\n".join(z for z in k1.splitlines() if not z.startswith("- Status")) + "\n\n"
+        with open(self.datei, "w", encoding="utf-8") as f:
+            f.write(k1 + "## K-2" + k2)
+        self.assertEqual(lauf("status", self.datei, "K-1", "übernommen", "PR #9").returncode, 0)
+        k1, k2 = self.text().split("## K-2")
+        self.assertIn("- Status: übernommen (PR #9)", k1)
+        self.assertNotIn("übernommen", k2)
+        self.assertIn("- Status: offen", k2)
+
+    def test_liste_filtert_auch_nach_verworfen_und_uebernommen(self):
+        lauf("status", self.datei, "K-1", "verworfen", "zu speziell")
+        lauf("status", self.datei, "K-2", "übernommen", "PR #9 (neu)")
+        v = lauf("liste", self.datei, "--status", "verworfen").stdout
+        self.assertEqual(v.count("\n"), 1)
+        self.assertIn("K-1 · verworfen", v)
+        u = lauf("liste", self.datei, "--status", "übernommen").stdout
+        self.assertIn("K-2 · übernommen", u)
+
+    def test_beleg_kommt_nach_dem_letzten_vorhandenen_beleg(self):
+        for n in (2, 3):
+            lauf("beleg", self.datei, "K-1", eingabe=BELEG2.replace("R1-1", f"R1-{n}"))
+        k1 = self.text().split("## K-2")[0].splitlines()
+        belege = [i for i, z in enumerate(k1) if z.startswith("- Beleg")]
+        self.assertEqual(len(belege), 3)
+        self.assertEqual(belege, list(range(belege[0], belege[0] + 3)))
+        self.assertIn("R1-3", k1[belege[-1]])
+        self.assertTrue(k1[belege[-1] + 1].startswith("- Durchgerutscht"))
+
+
+class Sperrverhalten(Basis):
+    """Review R1-5: je schreibendem Befehl ein Wartetest. Der Test hält die Sperre selbst."""
+
+    def unter_sperre(self, args, eingabe):
+        vorher = self.text()
+        with open(self.datei + ".lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            p = subprocess.Popen([sys.executable, "-I", SKRIPT, *args], stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if eingabe:
+                p.stdin.write(eingabe)
+            p.stdin.close()
+            time.sleep(1.0)
+            self.assertIsNone(p.poll(), "Der Befehl lief trotz gehaltener Sperre durch")
+            self.assertEqual(self.text(), vorher)
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        out, err = p.communicate(timeout=15)
+        self.assertEqual(p.returncode, 0, err)
+        self.assertNotEqual(self.text(), vorher)
+        return out
+
+    def test_neu_wartet(self):
+        self.assertEqual(self.unter_sperre(["neu", self.datei], GUT).strip(), "K-1")
+
+    def test_beleg_wartet(self):
+        lauf("neu", self.datei, eingabe=GUT)
+        self.unter_sperre(["beleg", self.datei, "K-1"], BELEG2)
+        self.assertIn("PR #200", self.text())
+
+    def test_status_wartet(self):
+        lauf("neu", self.datei, eingabe=GUT)
+        self.unter_sperre(["status", self.datei, "K-1", "verworfen", "x"], None)
+        self.assertIn("- Status: verworfen (x)", self.text())
+
+
+class MehrereBloecke(Basis):
+    def test_ein_kaputter_block_verhindert_auch_den_guten(self):
+        kaputt = GUT.replace("Token-Prüfung", "Zweite")
+        kaputt = "\n".join(z for z in kaputt.splitlines() if not z.startswith("- Deterministisch")) + "\n"
+        r = lauf("neu", self.datei, eingabe=GUT + "\n" + kaputt)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.text(), KOPF)
+        r = lauf("neu", self.datei, eingabe=kaputt + "\n" + GUT)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.text(), KOPF)
 
 
 if __name__ == "__main__":

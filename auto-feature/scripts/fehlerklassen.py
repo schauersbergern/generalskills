@@ -3,8 +3,12 @@
 
   liste  <datei> [--status offen]     eine Zeile je Kandidat: ID · Status · Klasse · Belege: n
   neu    <datei>   < block(s)         Kandidaten mit Kopf „## K-? · <Klasse>“ anhängen, IDs vergeben, IDs ausgeben
-  beleg  <datei> K-<n> < zeile        weiteren Beleg („- Beleg: …“) an einen Kandidaten hängen
-  status <datei> K-<n> <status> [vermerk]   offen | übernommen | verworfen (übernommen/verworfen mit Vermerk)
+  zeige  <datei> K-<n>                den ganzen Kandidaten ausgeben
+  beleg  <datei> K-<n> < zeile        weiteren Beleg („- Beleg: …“, von stdin) an einen Kandidaten hängen;
+                                      ein schon vorhandener Beleg (gleiche Quelle und Befund-ID) und ein
+                                      verworfener Kandidat werden abgelehnt
+  status <datei> K-<n> <status> [vermerk]   offen | übernommen | verworfen (übernommen/verworfen mit einzeiligem
+                                      Vermerk); nur ein offener Kandidat wechselt den Status
 
 Schreibende Befehle halten eine Sperre auf <datei>.lock, damit parallele Review-Threads keine ID doppelt vergeben.
 Nur Python-Standardbibliothek.
@@ -14,6 +18,7 @@ import datetime
 import fcntl
 import os
 import re
+import stat
 import sys
 import tempfile
 
@@ -41,16 +46,23 @@ def lies(pfad):
 
 
 def schreibe(pfad, zeilen):
-    ordner = os.path.dirname(os.path.abspath(pfad))
-    fd, tmp = tempfile.mkstemp(dir=ordner, prefix=".kandidaten-")
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write("\n".join(zeilen).rstrip("\n") + "\n")
-    os.replace(tmp, pfad)
+    pfad = os.path.realpath(pfad)
+    modus = stat.S_IMODE(os.stat(pfad).st_mode)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(pfad), prefix=".kandidaten-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("\n".join(zeilen).rstrip("\n") + "\n")
+        os.chmod(tmp, modus)
+        os.replace(tmp, pfad)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
 
 
 class Sperre:
     def __init__(self, pfad):
-        self.pfad = pfad + ".lock"
+        self.pfad = os.path.realpath(pfad) + ".lock"
 
     def __enter__(self):
         self.f = open(self.pfad, "w")
@@ -86,6 +98,10 @@ def finde(zeilen, kid):
         if k[0] == kid:
             return k
     fehler(f"Kandidat {kid} nicht gefunden")
+
+
+def status_von(block):
+    return next((z[len("- Status: "):].split(" (")[0] for z in block if z.startswith("- Status: ")), "?")
 
 
 def pruefe_beleg(zeile):
@@ -161,6 +177,12 @@ def cmd_neu(a):
     print("\n".join(ids))
 
 
+def cmd_zeige(a):
+    zeilen = lies(a.datei)
+    _, _, start, ende = finde(zeilen, a.id)
+    print("\n".join(zeilen[start:ende]))
+
+
 def cmd_beleg(a):
     neu = [z for z in sys.stdin.read().splitlines() if z.strip()]
     if not neu:
@@ -171,7 +193,15 @@ def cmd_beleg(a):
     with Sperre(a.datei):
         zeilen = lies(a.datei)
         _, _, start, ende = finde(zeilen, a.id)
+        if status_von(zeilen[start:ende]) == "verworfen":
+            fehler(f"{a.id} ist verworfen und bekommt keine Belege; kommt die Klasse wieder, neuen Kandidaten anlegen")
         belege = [i for i in range(start, ende) if zeilen[i].startswith("- Beleg")]
+        vorhanden = {BELEG_RE.match(zeilen[i]).group("quelle") for i in belege if BELEG_RE.match(zeilen[i])}
+        for z in neu:
+            quelle = BELEG_RE.match(z).group("quelle")
+            if quelle in vorhanden:
+                fehler(f"{a.id} hat schon einen Beleg „{quelle}“; der Befund ist erfasst, nichts hinzugefügt")
+            vorhanden.add(quelle)
         pos = (belege[-1] + 1) if belege else start + 1
         zeilen[pos:pos] = neu
         schreibe(a.datei, zeilen)
@@ -188,6 +218,9 @@ def cmd_status(a):
     with Sperre(a.datei):
         zeilen = lies(a.datei)
         _, _, start, ende = finde(zeilen, a.id)
+        bisher = status_von(zeilen[start:ende])
+        if bisher in ("übernommen", "verworfen"):
+            fehler(f"{a.id} ist {bisher}; der Status bleibt, sonst geht der Vermerk verloren (von Hand ändern, falls nötig)")
         neu = f"- Status: {a.status}" + (f" ({a.vermerk})" if a.vermerk else "")
         for i in range(start, ende):
             if zeilen[i].startswith("- Status"):
@@ -202,7 +235,7 @@ def cmd_liste(a):
     zeilen = lies(a.datei)
     for kid, klasse, start, ende in kandidaten(zeilen):
         block = zeilen[start:ende]
-        status = next((z[len("- Status: "):].split(" (")[0] for z in block if z.startswith("- Status: ")), "?")
+        status = status_von(block)
         if a.status and status != a.status:
             continue
         belege = sum(1 for z in block if z.startswith("- Beleg"))
@@ -212,18 +245,24 @@ def cmd_liste(a):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
-    s = sub.add_parser("liste")
+    s = sub.add_parser("liste", help="eine Zeile je Kandidat")
     s.add_argument("datei")
     s.add_argument("--status", choices=STATUS)
     s.set_defaults(f=cmd_liste)
-    s = sub.add_parser("neu")
+    NEU_HILFE = "Kandidaten von stdin anhängen: neu <datei> <<'EOF' … EOF"
+    s = sub.add_parser("neu", help=NEU_HILFE, description=NEU_HILFE)
     s.add_argument("datei")
     s.set_defaults(f=cmd_neu)
-    s = sub.add_parser("beleg")
+    s = sub.add_parser("zeige", help="den ganzen Kandidaten ausgeben")
+    s.add_argument("datei")
+    s.add_argument("id")
+    s.set_defaults(f=cmd_zeige)
+    BELEG_HILFE = "Beleg von stdin an einen Kandidaten hängen: beleg <datei> K-<n> <<'EOF' … EOF"
+    s = sub.add_parser("beleg", help=BELEG_HILFE, description=BELEG_HILFE)
     s.add_argument("datei")
     s.add_argument("id")
     s.set_defaults(f=cmd_beleg)
-    s = sub.add_parser("status")
+    s = sub.add_parser("status", help="Status eines offenen Kandidaten setzen")
     s.add_argument("datei")
     s.add_argument("id")
     s.add_argument("status")
