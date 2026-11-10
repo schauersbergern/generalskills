@@ -9,7 +9,9 @@ Arbeitskopie (gleiche Länge, Zeichen `*`, `\\n` und `\\r` bleiben), setzt dann 
 prüft danach die Historie in einem Spiegelklon des Repos. Ausgabe (JSON auf stdout): `befunde_roh` je (Regel, Datei) mit `regel`,
 `datei`, `zeile`, `commits` (volle SHAs, höchstens 20, jüngster zuerst) und `in_head`, dazu `hinweise` und `geschwaerzt`. Die
 gitleaks-Felder `Secret`, `Match`, `Author`, `Email`, `Message` und `Fingerprint` werden nie ausgegeben, kein Secret-Wert
-verlässt den Prozess.
+verlässt den Prozess. Grenze: gitleaks überspringt mit `useDefault = true` bestimmte Pfade (`STANDARD_AUSNAHMEN`, z. B.
+`node_modules/`, Lockfiles, `*.svg`); Textdateien dieser Klassen in der Arbeitskopie werden weder geprüft noch geschwärzt und
+stehen deshalb im Hinweis „gitleaks-Standardausnahmen nicht geprüft: …“.
 
 Exit-Codes: 0 ok (auch wenn gitleaks fehlt: `{"werkzeug": "gitleaks", "fehlt": true, ...}`, dann ohne Marker), 2 ungültige
 Argumente (auch `--quelle` ≠ Arbeitskopie des Laufs), 4 Schwärzung gescheitert (`kategorie: schwaerzung-fehlgeschlagen`, kein
@@ -30,6 +32,7 @@ import stat
 import sys
 import time
 from datetime import datetime, timezone
+from typing import NamedTuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gitkopie  # noqa: E402
@@ -40,6 +43,9 @@ from poc import PocFehler  # noqa: E402
 SECRETS_BUDGET = 300           # Sekunden für `secrets` insgesamt; Skill-Bash-Limit: 600 s
 SECRETS_DIR_BUDGET = 120       # davon `gitleaks dir` samt Schwärzung (zuerst)
 KONFIG_SUCHE_BUDGET = 30       # Suche nach Repo-Konfiguration und `gitleaks:allow` in der Arbeitskopie
+AUSNAHMEN_SUCHE_BUDGET = 30    # Suche nach Dateien der gitleaks-Standardausnahmen in der Arbeitskopie
+TEXT_PROBE = 8192              # so viele Bytes entscheiden, ob eine Datei Text ist (kein NUL, nicht leer)
+MAX_NAMEN_JE_KLASSE = 3        # Dateien je Klasse im Hinweis zu den Standardausnahmen
 ALLOW_DATEI_MAX = 16 * 1024 * 1024
 REPORT_MAX = 256 * 1024 * 1024
 MAX_COMMITS = 20
@@ -49,6 +55,52 @@ KONFIG_NAMEN = (".gitleaks.toml", ".gitleaksignore", "osv-scanner.toml")
 ARBEIT = ("leer", "leer-ignore", "gitleaks.toml", "gl-dir.json", "gl-git.json", "spiegel.git")   # unter <zustand>/lieferkette/
 VOLLER_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 ALLOW_MARKE = b"gitleaks:allow"
+
+
+class Ausnahme(NamedTuple):
+    """Pfadklasse, die gitleaks mit `useDefault = true` überspringt: Secrets darin werden weder gemeldet noch geschwärzt."""
+    name: str
+    muster: re.Pattern          # gegen den Pfad relativ zur Arbeitskopie (Trenner `/`)
+    beispiele: tuple            # Pfade, die gitleaks 8.30 nachweislich überspringt (`test_standard_ausnahmen_echt`)
+
+
+def _klasse(name: str, muster: str, *beispiele: str, gross_klein: bool = False) -> Ausnahme:
+    return Ausnahme(name, re.compile(muster, re.IGNORECASE if gross_klein else 0), beispiele)
+
+
+# Mit gitleaks 8.30.1 gemessen (Standard-Allowlist und Archiv-Erkennung); Groß-/Kleinschreibung wie gemessen: nur `gitleaks.toml`
+# unterscheidet sie, alle anderen Klassen nicht. Die Binärformate zählen nur, wenn die Datei Text enthält.
+STANDARD_AUSNAHMEN = (
+    _klasse("node_modules, bower_components", r"(?:^|/)(?:node_modules|bower_components)/",
+            "node_modules/x/a.js", "web/node_modules/p/b.js", "bower_components/a/b.js", gross_klein=True),
+    _klasse("Paketsperrdateien", r"(?:^|/)(?:package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|Pipfile\.lock"
+            r"|poetry\.lock|gradle\.lockfile)$",
+            "package-lock.json", "web/package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "Pipfile.lock",
+            "poetry.lock", "gradle.lockfile", gross_klein=True),
+    _klasse("Go-Moduldateien", r"go\.(?:mod|sum|work(?:\.sum)?)$", "go.mod", "a/b/go.sum", "go.work", "go.work.sum", "xgo.sum",
+            gross_klein=True),
+    _klasse("Go-vendor", r"(?:^|/)vendor/(?:modules\.txt$|(?:github\.com|golang\.org/x|google\.golang\.org|gopkg\.in|istio\.io"
+            r"|k8s\.io|sigs\.k8s\.io)(?:/|$))",
+            "vendor/modules.txt", "vendor/github.com/a/b.go", "vendor/golang.org/x/a.go", "vendor/google.golang.org/a.go",
+            "vendor/gopkg.in/a.go", "vendor/istio.io/a.go", "vendor/k8s.io/a.go", "vendor/sigs.k8s.io/a.go",
+            "sub/vendor/github.com/a.go", gross_klein=True),
+    _klasse("Gradle-/Maven-Wrapper", r"(?:^|/)(?:gradlew(?:\.bat)?|mvnw(?:\.cmd)?|\.mvn/wrapper/MavenWrapperDownloader\.java)$",
+            "gradlew", "gradlew.bat", "mvnw", "mvnw.cmd", "sub/gradlew", ".mvn/wrapper/MavenWrapperDownloader.java",
+            gross_klein=True),
+    _klasse("gitleaks.toml", r"gitleaks\.toml", "gitleaks.toml", ".gitleaks.toml", "sub/gitleaks.toml", "old-gitleaks.toml",
+            "gitleaks.toml.example"),
+    _klasse(".git-Ordner", r"(?:^|/)\.git/", "sub/.git/a.js", "x/.git/config", gross_klein=True),
+    _klasse("Bilder (bmp, gif, jpg, png, svg, tif)", r"\.(?:bmp|gif|jpe?g|png|svg|tiff?)$",
+            "x.svg", "x.png", "x.jpg", "x.jpeg", "x.gif", "x.bmp", "x.tif", "x.tiff", "x.SVG", gross_klein=True),
+    _klasse("Schriften (eot, otf, ttf, woff)", r"\.(?:eot|otf|ttf|woff2?)$",
+            "x.eot", "x.otf", "x.ttf", "x.woff", "x.woff2", "x.TTF", gross_klein=True),
+    _klasse("Office- und Binärformate (doc, xls, pdf, exe, gltf u. ä.)",
+            r"\.(?:docx?|xlsx?|pdf|bin|socket|vsidx|v2|suo|wsuo|pdb|exe|gltf)$",
+            "x.doc", "x.docx", "x.xls", "x.xlsx", "x.pdf", "x.bin", "x.socket", "x.vsidx", "x.v2", "x.suo", "x.wsuo", "x.pdb",
+            "x.exe", "x.gltf", "x.PDF", gross_klein=True),
+    _klasse("Archive (zip, tar, gz, bz2, xz, zst, lz4, 7z, rar)", r"\.(?:zip|tar|gz|bz2|xz|zst|lz4|7z|rar)",
+            "x.zip", "x.tar", "x.gz", "x.bz2", "x.xz", "x.zst", "x.lz4", "x.7z", "x.rar", "x.tar.gz", "x.GZ", gross_klein=True),
+)
 
 
 fehlt = poc.werkzeug_fehlt     # einziger Parser von SECURITY_AUDIT_OHNE (PATH + Umgebungsvariable), für alle Unterbefehle
@@ -65,12 +117,13 @@ class ReportFehler(Exception):
 # ------------------------------------------------------------------------------------ Hilfen
 
 def _sekunden(name: str, standard: float) -> float:
-    """Budget in Sekunden; die Umgebungsvariable überschreibt den Standard (Tests)."""
+    """Budget in Sekunden; die Umgebungsvariable darf den Standard nur verkürzen (Tests), nie verlängern: ungültig, nicht endlich
+    oder ≤ 0 ergibt den Standard, größere Werte werden auf den Standard gedeckelt (Skill-Limit 600 s)."""
     try:
         wert = float(os.environ.get(name, ""))
     except ValueError:
         return standard
-    return wert if wert > 0 else standard
+    return min(wert, standard) if wert > 0 else standard
 
 
 def _lieferkette_ordner(zustand: str) -> str:
@@ -200,6 +253,60 @@ def _ignore_entfernen(pfade: list[str], quelle: str) -> None:
             pass
         except OSError as e:
             raise SchwaerzFehler(f".gitleaksignore nicht entfernbar: {_t(os.path.relpath(pfad, quelle))} ({e.strerror})") from e
+
+
+def _standard_ausnahme(rel: str) -> str | None:
+    """Name der Klasse der gitleaks-Standardausnahmen, in die der Pfad (relativ zur Arbeitskopie, `/`) fällt, sonst None."""
+    for klasse in STANDARD_AUSNAHMEN:
+        if klasse.muster.search(rel):
+            return klasse.name
+    return None
+
+
+def _hat_textinhalt(pfad: str) -> bool:
+    """Nicht leer und ohne NUL in den ersten Bytes (wie die Textheuristik von git); nur dann gibt es etwas zu prüfen."""
+    try:
+        if not stat.S_ISREG(os.lstat(pfad).st_mode):
+            return False
+        with open(pfad, "rb") as f:
+            kopf = f.read(TEXT_PROBE)
+    except OSError:
+        return False
+    return bool(kopf) and b"\0" not in kopf
+
+
+def _standard_ausnahmen_hinweise(quelle: str) -> list[str]:
+    """Hinweis, wenn die Arbeitskopie Textdateien enthält, die gitleaks mit `useDefault = true` überspringt (dort wird nichts
+    gemeldet und nichts geschwärzt). Nennt je Klasse die Anzahl und bis zu drei Dateien, nie Inhalte."""
+    ende = time.monotonic() + AUSNAHMEN_SUCHE_BUDGET
+    je_klasse: dict[str, list[str]] = {}
+    abgebrochen = False
+    for ordner, unter, dateien in os.walk(quelle):
+        unter.sort()
+        for name in sorted(dateien):
+            if time.monotonic() > ende:
+                abgebrochen = True
+                break
+            pfad = os.path.join(ordner, name)
+            rel = os.path.relpath(pfad, quelle).replace(os.sep, "/")
+            klasse = _standard_ausnahme(rel)
+            if klasse is not None and _hat_textinhalt(pfad):
+                je_klasse.setdefault(klasse, []).append(rel)
+        if abgebrochen:
+            break
+    hinweise = []
+    if je_klasse:
+        teile = []
+        for klasse in (k.name for k in STANDARD_AUSNAHMEN if k.name in je_klasse):
+            dateien = je_klasse[klasse]
+            gezeigt = ", ".join(_t(d) for d in dateien[:MAX_NAMEN_JE_KLASSE])
+            rest = f" (+{len(dateien) - MAX_NAMEN_JE_KLASSE} weitere)" if len(dateien) > MAX_NAMEN_JE_KLASSE else ""
+            teile.append(f"{klasse} ({len(dateien)}: {gezeigt}{rest})")
+        hinweise.append("gitleaks-Standardausnahmen nicht geprüft: " + "; ".join(teile)
+                        + " — dort wird nichts gemeldet und nichts geschwärzt")
+    if abgebrochen:
+        hinweise.append("Suche nach gitleaks-Standardausnahmen abgebrochen (Zeitbudget)")
+    return hinweise
 
 
 # ------------------------------------------------------------------------------------ Schwärzung
@@ -349,8 +456,11 @@ def _gitleaks_dir(quelle: str, lk: str, ende: float) -> list[dict]:
 # ------------------------------------------------------------------------------------ Historie
 
 def _zeitpunkt(text: object) -> float:
+    roh = str(text)
+    if roh.endswith("Z"):                         # Python < 3.11 kennt das abschließende `Z` in fromisoformat nicht
+        roh = roh[:-1] + "+00:00"
     try:
-        wert = datetime.fromisoformat(str(text))
+        wert = datetime.fromisoformat(roh)
     except ValueError:
         return 0.0
     if wert.tzinfo is None:
@@ -482,6 +592,7 @@ def _secrets(a: argparse.Namespace, repo: str, quelle: str, lk: str, marker: str
     try:
         konfig_hinweise, ignore = _repo_konfiguration(quelle)
         hinweise += konfig_hinweise
+        hinweise += _standard_ausnahmen_hinweise(quelle)
         _ignore_entfernen(ignore, quelle)
         anzahl, schwaerz_hinweise = _schwaerze_arbeitskopie(quelle, _gitleaks_dir(quelle, lk, ende_dir))
     except SchwaerzFehler as e:

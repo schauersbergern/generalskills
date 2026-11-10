@@ -9,6 +9,7 @@ Laufzeit erzeugt (keine echt aussehenden Secrets im öffentlichen Repo). Signale
 Code selbst gestartet hat.
 """
 import base64
+import errno
 import json
 import os
 import random
@@ -17,7 +18,9 @@ import stat
 import string
 import subprocess
 import sys
+import tempfile
 import time
+from datetime import datetime, timezone
 from typing import NamedTuple
 
 import pytest
@@ -597,7 +600,8 @@ def test_repo_konfig_hinweise(umg):
     text = "\n".join(out["hinweise"])
     assert ".gitleaks.toml" in text and ".gitleaksignore" in text and "web/osv-scanner.toml" in text
     assert "gitleaks:allow" in text and "src/b.js" in text
-    assert all("ignoriert" in h for h in out["hinweise"] if ".toml" in h or "allow" in h)
+    assert all("ignoriert" in h for h in out["hinweise"] if ("Standardausnahmen" not in h) and (".toml" in h or "allow" in h))
+    assert any(h.startswith("gitleaks-Standardausnahmen nicht geprüft:") and ".gitleaks.toml" in h for h in out["hinweise"])
     assert os.path.exists(os.path.join(v.quelle, ".gitleaks.toml")) and os.path.exists(os.path.join(v.quelle, "web/osv-scanner.toml"))
     assert not os.path.exists(os.path.join(v.quelle, ".gitleaksignore"))        # erkannt, bevor sie gelöscht wurde
 
@@ -647,11 +651,51 @@ def test_schwaerzung_scheitert_exit4_ohne_marker(umg, dir_verhalten):
     r = secrets(umg, v)
     assert r.returncode == 4, r.stdout + r.stderr
     assert "nicht geschwärzt" in r.stdout + r.stderr
+    assert "kategorie: schwaerzung-fehlgeschlagen" in r.stdout.splitlines()
     assert not os.path.lexists(umg.marker())
     assert [a["modus"] for a in umg.aufrufe()] == ["dir"]                         # keine Historie nach gescheiterter Schwärzung
     assert lieferkette_inhalt(umg) == []
     for sentinel in SENTINELS:
         assert sentinel not in r.stdout and sentinel not in r.stderr
+
+
+def test_marker_setzen_in_unbeschreibbarem_ordner_wirft_oserror(tmp_path):
+    ordner = tmp_path / "ro"
+    ordner.mkdir()
+    ordner.chmod(0o500)
+    try:
+        if os.access(ordner, os.W_OK):
+            pytest.skip("Ordner trotz 0500 beschreibbar (root?)")
+        with pytest.raises(OSError):
+            lieferkette._marker_setzen(str(ordner / "geschwaerzt"), 0, "a" * 40)
+    finally:
+        ordner.chmod(0o700)
+    assert not os.path.lexists(ordner / "geschwaerzt")
+
+
+def test_marker_nicht_setzbar_ist_exit4_ohne_marker(umg, monkeypatch, capsys):
+    """Fehlerpfad von `_marker_setzen` im ganzen Befehl (in-process): Exit 4, `kategorie: schwaerzung-fehlgeschlagen`, kein
+    Marker, keine Historie, Aufräumen."""
+    v = vorbereiten(umg, [MINI])
+    monkeypatch.setattr(tempfile, "tempdir", str(umg.tmp))
+    monkeypatch.setattr(lieferkette, "fehlt", lambda name: False)
+    monkeypatch.setattr(lieferkette, "_gitleaks_dir", lambda quelle, lk, ende: [])
+
+    def marker_scheitert(marker, anzahl, sha):
+        raise OSError(errno.EACCES, "Permission denied")
+
+    def historie_darf_nicht_laufen(*args, **kwargs):
+        raise AssertionError("Historie nach gescheiterter Schwärzung")
+
+    monkeypatch.setattr(lieferkette, "_marker_setzen", marker_scheitert)
+    monkeypatch.setattr(lieferkette, "_historie", historie_darf_nicht_laufen)
+    rc = lieferkette.main(["secrets", "--lauf", LAUF, "--repo", v.repo, "--quelle", v.quelle, "--sha", v.sha])
+    aus = capsys.readouterr()
+    assert rc == 4
+    assert "kategorie: schwaerzung-fehlgeschlagen" in aus.out.splitlines()
+    assert "Marker nicht setzbar" in aus.err and "Permission denied" in aus.err
+    assert not os.path.lexists(umg.marker())
+    assert lieferkette_inhalt(umg) == []
 
 
 def test_schwaerzung_scheitert_bei_zeitablauf_des_teilbudgets(umg):
@@ -860,6 +904,134 @@ def test_secrets_ordner_der_quelle_nur_anlegen_wo_erlaubt(umg):
     umg.fake_gitleaks(dir={"report": []}, git={"report": []})
     r = secrets(umg, v)
     assert r.returncode != 0 and (ziel / "wichtig.txt").read_text() == "bleibt" and sorted(os.listdir(ziel)) == ["wichtig.txt"]
+
+
+# ------------------------------------------------------------------------------------ Standardausnahmen, Budget, Zeitstempel
+
+def test_secrets_hinweis_standard_ausnahmen(umg):
+    """Dateien, die gitleaks standardmäßig überspringt (Text, nicht leer, ohne NUL), werden als Klasse mit Anzahl genannt; Inhalte
+    und Binärdateien nicht."""
+    dateien = dict(MINI, **{"package-lock.json": JS_ZEILE, "web/yarn.lock": JS_ZEILE, "node_modules/x/a.js": JS_ZEILE,
+                            "assets/logo.svg": JS_ZEILE, "assets/bild.png": b"\x89PNG\x00\x00" + JS_ZEILE.encode(),
+                            "leer.svg": ""})
+    v = vorbereiten(umg, [dateien])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    out = ausgabe(secrets(umg, v))
+    hinweise = [h for h in out["hinweise"] if h.startswith("gitleaks-Standardausnahmen nicht geprüft:")]
+    assert len(hinweise) == 1, out["hinweise"]
+    hinweis = hinweise[0]
+    assert "Paketsperrdateien (2" in hinweis and "node_modules" in hinweis and "(1" in hinweis
+    assert "package-lock.json" in hinweis and "web/yarn.lock" in hinweis and "assets/logo.svg" in hinweis
+    assert "bild.png" not in hinweis and "leer.svg" not in hinweis                  # binär bzw. leer: nichts zu prüfen
+    assert WERT not in json.dumps(out) and "apiKey" not in json.dumps(out)
+    assert os.path.isfile(umg.marker())                                             # nur Hinweis, kein Abbruch
+
+
+def test_secrets_hinweis_standard_ausnahmen_fehlt_ohne_solche_dateien(umg):
+    v = vorbereiten(umg, [dict(MINI, **{"vendor/a.js": JS_ZEILE, "x.min.js": JS_ZEILE, "x.lock": JS_ZEILE})])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    assert not [h for h in ausgabe(secrets(umg, v))["hinweise"] if "Standardausnahmen" in h]
+
+
+def test_secrets_hinweis_standard_ausnahmen_nennt_hoechstens_drei_namen(umg):
+    dateien = dict(MINI, **{f"node_modules/p{i}/index.js": JS_ZEILE for i in range(6)})
+    v = vorbereiten(umg, [dateien])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    hinweis = [h for h in ausgabe(secrets(umg, v))["hinweise"] if "Standardausnahmen" in h][0]
+    assert "(6" in hinweis and hinweis.count("index.js") == 3 and "(+3 weitere)" in hinweis
+
+
+def test_standard_ausnahme_pfadklassen_unit():
+    f = lieferkette._standard_ausnahme
+    assert f("package-lock.json") and f("a/b/yarn.lock") and f("node_modules/x/y.js") and f("a/node_modules/x.js")
+    assert f("logo.SVG") and f("sub/gitleaks.toml") and f("old-gitleaks.toml") and f("vendor/github.com/a/b.go")
+    assert f("package-lock.json") != f("logo.svg")
+    for pfad in ("src/a.js", "vendor/a.js", "x.min.js", "x.lock", "pnpm-lock.yml", "xnode_modules/a.js", "Gitleaks.toml",
+                 "x.ico", "gradlew.sh", "my-package-lock.json"):
+        assert f(pfad) is None, pfad
+
+
+NICHT_AUSGENOMMEN = ("x.js", "src/a.js", "vendor/a.js", "vendor/other/a.go", "x.min.js", "x.lock", "Cargo.lock", "pnpm-lock.yml",
+                     "xnode_modules/a.js", "node_modules.js", "Gitleaks.toml", "x.ico", "x.dll", "x.webp", "gradlew.sh",
+                     "my-package-lock.json", "Pipfile.lock.bak", "x.docm", "x.tgz", "x.png.js", "x.exe.txt")
+
+
+@echt
+def test_standard_ausnahmen_echt(umg, tmp_path):
+    """Die Liste bleibt wahr: jedes Beispiel jeder Klasse in `STANDARD_AUSNAHMEN` wird von gitleaks tatsächlich übersprungen
+    (`useDefault = true`), jedes Gegenbeispiel gefunden; die Klassenmuster stimmen mit beidem überein."""
+    wurzel = tmp_path / "ausn"
+    (tmp_path / "leer").mkdir()
+    beispiele = [(k, b) for k in lieferkette.STANDARD_AUSNAHMEN for b in k.beispiele]
+    assert len(lieferkette.STANDARD_AUSNAHMEN) >= 8 and all(k.beispiele for k in lieferkette.STANDARD_AUSNAHMEN)
+    pfade = [b for _, b in beispiele] + list(NICHT_AUSGENOMMEN)
+    assert len(set(pfade)) == len(pfade)
+    for i, pfad in enumerate(pfade):                                              # je Pfad ein Ordner: keine Namenskollisionen
+        schreibe(str(wurzel / f"d{i}"), pfad, JS_ZEILE)
+    config = tmp_path / "cfg.toml"
+    config.write_text(lieferkette.GITLEAKS_TOML)
+    bericht = tmp_path / "bericht.json"
+    r = subprocess.run([GITLEAKS, "dir", str(wurzel), "--config", str(config), "--report-format", "json", "--report-path",
+                        str(bericht), "--exit-code", "0", "--no-banner", "--no-color", "--redact"],
+                       cwd=tmp_path / "leer", env=umg.env(), capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr
+    gefunden = {os.path.relpath(t["File"], wurzel).split(os.sep, 1)[1] for t in json.loads(bericht.read_text())}
+    for klasse, pfad in beispiele:
+        assert pfad not in gefunden, f"{klasse.name}: gitleaks prüft {pfad} doch"
+        assert lieferkette._standard_ausnahme(pfad) == klasse.name, pfad
+    for pfad in NICHT_AUSGENOMMEN:
+        assert pfad in gefunden, f"gitleaks überspringt {pfad}"
+        assert lieferkette._standard_ausnahme(pfad) is None, pfad
+
+
+def test_sekunden_ist_nach_oben_gedeckelt(monkeypatch):
+    f = lieferkette._sekunden
+    for wert in ("1e9", "inf", "301", "999999"):
+        monkeypatch.setenv("SECURITY_AUDIT_SECRETS_BUDGET", wert)
+        assert f("SECURITY_AUDIT_SECRETS_BUDGET", 300) == 300, wert
+    for wert in ("0", "-5", "nan", "-inf", "abc", ""):
+        monkeypatch.setenv("SECURITY_AUDIT_SECRETS_BUDGET", wert)
+        assert f("SECURITY_AUDIT_SECRETS_BUDGET", 300) == 300, wert
+    monkeypatch.setenv("SECURITY_AUDIT_SECRETS_BUDGET", "2.5")
+    assert f("SECURITY_AUDIT_SECRETS_BUDGET", 300) == 2.5
+    monkeypatch.delenv("SECURITY_AUDIT_SECRETS_BUDGET")
+    assert f("SECURITY_AUDIT_SECRETS_BUDGET", 300) == 300
+
+
+def test_secrets_budget_variable_kann_das_limit_nicht_erhoehen(umg):
+    """Auch mit riesigen Werten gilt höchstens 300 s / 120 s; der Standard wird in `_sekunden` verwendet."""
+    assert lieferkette.SECRETS_BUDGET == 300 and lieferkette.SECRETS_DIR_BUDGET == 120
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    env = umg.env(SECURITY_AUDIT_SECRETS_BUDGET="1e9", SECURITY_AUDIT_SECRETS_DIR_BUDGET="inf")
+    assert ausgabe(secrets(umg, v, env=env))["befunde_roh"] == []
+
+
+class _AltesDatetime(datetime):
+    """Wie `datetime` vor Python 3.11: `fromisoformat` kennt das abschließende `Z` nicht."""
+
+    @classmethod
+    def fromisoformat(cls, text):
+        if str(text).endswith("Z"):
+            raise ValueError(f"Invalid isoformat string: {text!r}")
+        return super().fromisoformat(text)
+
+
+def test_zeitpunkt_versteht_z_auch_ohne_python_311(monkeypatch):
+    monkeypatch.setattr(lieferkette, "datetime", _AltesDatetime)
+    erwartet = datetime(2026, 1, 1, 12, 30, tzinfo=timezone.utc).timestamp()
+    assert lieferkette._zeitpunkt("2026-01-01T12:30:00Z") == erwartet
+    assert lieferkette._zeitpunkt("2026-01-01T12:30:00+00:00") == erwartet
+    assert lieferkette._zeitpunkt("2026-01-01T14:30:00+02:00") == erwartet
+    assert lieferkette._zeitpunkt("kein datum") == 0.0
+
+
+def test_gruppieren_sortiert_jungen_commit_zuerst_auch_mit_z_datum(monkeypatch):
+    monkeypatch.setattr(lieferkette, "datetime", _AltesDatetime)
+    alt, jung = "a" * 40, "b" * 40
+    bericht = [treffer(commit=alt, zeile=3, datum="2025-01-01T00:00:00Z"), treffer(commit=jung, zeile=9, datum="2026-06-01T00:00:00Z")]
+    [befund] = lieferkette._gruppieren(bericht)
+    assert befund["commits"] == [jung, alt] and befund["zeile"] == 9
 
 
 # ------------------------------------------------------------------------------------ echtes gitleaks
