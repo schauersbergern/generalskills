@@ -658,3 +658,18 @@ def test_hinweis_mit_backticks_oeffnet_keinen_zaun_t2_m6():
     assert all(z != "```" for z in rest)
     for kopf in ("## Karte", "## Befunde im Detail", "## Hinweise"):
         assert kopf in rest
+
+
+# ------------------------------------------------------------------------------------ Fix-Runde 2
+
+def test_hinweis_mit_tilden_oeffnet_keinen_zaun_t2_n3():
+    d = beispiel()
+    d["hinweise"] = ["~~~ x", "a ~~~"]
+    d["karte"] = [{"flaeche": "~~~ F", "dateien": ["~~~"]}]
+    zeilen = bericht.markdown(d).splitlines()
+    ende = zeilen.index("```", 3)
+    rest = zeilen[ende + 1:]
+    assert not any(z.lstrip("- 1.").startswith("~~~") for z in rest)
+    assert "- \\~\\~\\~ x" in rest
+    for kopf in ("## Karte", "## Befunde im Detail", "## Hinweise"):
+        assert kopf in rest

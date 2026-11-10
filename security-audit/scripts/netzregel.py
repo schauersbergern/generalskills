@@ -18,13 +18,15 @@ ERLAUBTE_HOSTS = frozenset({"app", "db", "localhost", "127.0.0.1", "::1", "0.0.0
 
 # Authority nach "://" (unabhängig vom Text davor: `${H}://evil.test`), in zwei Lesarten: eng (bis zum ersten
 # Shell-Sonderzeichen) und erweitert (bis `/ ? #` oder Whitespace, damit `http://app&@evil.test/` nicht als `app` gilt).
-_URL = re.compile(r"://([^\s/?#]*)")
+_URL = re.compile(r"(?P<schema>[A-Za-z0-9+.\-]*):(?P<slashes>[/\\]{2,})(?P<auth>[^\s/?#]*)")
 _URL_ENG = re.compile(r"[^'\"<>()`|;&]*")
 _NACHLAUF = "'\"),;"
 _HOST_HEADER = re.compile(r"(?i)(?<![A-Za-z0-9.])(?:[A-Za-z0-9]+-)*host[ \t]*:[ \t]*([^\s'\"]+)")
 _PROXY_OPTIONEN = frozenset({"-x", "--proxy", "--preproxy", "--proxy1.0", "--socks4", "--socks4a",
                              "--socks5", "--socks5-hostname"})
-_UMLEITUNG = re.compile(r"^&?[<>]+&?$")
+# Operator-Läufe, die Umleitungen sind und nicht trennen: > >> < << <<< >& <& &> &>> <> >|. `&<` und alles
+# andere trennt (in bash ist `&<` ein `&` gefolgt von `<`).
+_UMLEITUNG = re.compile(r"^(?:&?>>?|>>?&|<{1,3}&?|<>|>\|)$")
 
 
 # ------------------------------------------------------------------------------------ Hosts lesen
@@ -71,15 +73,19 @@ def _teile(wert: str, maxsplit: int = -1) -> list[str]:
 
 
 def _urls(text: str) -> list[tuple[str, list[str]]]:
-    """Alle `://`-Stellen (Rohtext und einmal dekodiert) mit ihren Hosts. Die Authority wird eng und erweitert
+    """Alle `:` plus mindestens zwei `/`/`\\`-Stellen (Rohtext und einmal dekodiert) mit ihren Hosts. Bei leerer
+    Authority (`http:///evil.test/`, `http:////evil.test`) ist der Pfadanfang der Host (curl verbindet dorthin),
+    nur `file` bleibt lokal. Die Authority wird eng und erweitert
     gelesen, Backslash zusätzlich als Trenner (`http://app\\@evil.test`); jede Lesart zählt. Mehrfach-`@`:
     Host ist der Teil nach dem letzten `@` (wie curl, WHATWG und urllib)."""
     treffer: list[tuple[str, list[str]]] = []
     gesehen: set[str] = set()
     for variante in (text, unquote(text)):
         for m in _URL.finditer(variante):
-            auth = m.group(1)
+            auth = m.group("auth")
             url = "://" + auth
+            if len(m.group("slashes")) >= 3 and m.group("schema").lower() == "file":
+                continue                                # file:///pfad: leere Authority, lokal
             if url in gesehen:
                 continue
             gesehen.add(url)
@@ -148,13 +154,53 @@ def verstoesse_poc(text: str) -> list[str]:
 
 # ------------------------------------------------------------------------------------ Bash
 
+_OPERATOREN = " \t\r\n;&|()<>"
+
+
+def _ansi_c_ende(text: str, i: int) -> int:
+    """Index hinter dem schließenden `'` eines `$'…'` (i zeigt auf das `'`); ValueError, wenn offen."""
+    j = i + 1
+    while j < len(text):
+        if text[j] == "\\":
+            j += 2
+        elif text[j] == "'":
+            return j + 1
+        else:
+            j += 1
+    raise ValueError("offenes ANSI-C-Anführungszeichen")
+
+
+_ANSI_ESC = re.compile(r"\\(x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|[0-7]{1,3}|c.|.)", re.S)
+_ANSI_EINFACH = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t",
+                 "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
+
+
+def _ansi_c(inhalt: str) -> str:
+    """Escapes eines `$'…'`-Strings auflösen (`\\x2f`, `\\057`, `\\u002f`, `\\'` …); Unbekanntes bleibt stehen."""
+    def ersetze(m: re.Match) -> str:
+        e = m.group(1)
+        try:
+            if e[0] in "xuU":
+                return chr(int(e[1:], 16))
+            if e[0] in "01234567":
+                return chr(int(e, 8) & 0xFF)
+        except (ValueError, OverflowError):
+            return m.group(0)
+        if e[0] == "c" and len(e) == 2:
+            return chr(ord(e[1]) & 0x1F)
+        return _ANSI_EINFACH.get(e, m.group(0))
+    return _ANSI_ESC.sub(ersetze, inhalt)
+
+
 def _auslagern(text: str) -> tuple[str, list[str]]:
     """`$(…)` und Backtick-Substitutionen (auch in doppelten Anführungszeichen, nicht in einfachen)
-    herauslösen: (Text ohne Inhalt der Substitutionen, Liste der Innentexte)."""
+    herauslösen: (Text ohne Inhalt der Substitutionen, Liste der Innentexte). `$'…'` (ANSI-C, `\\'` ist
+    ein Zeichen) und `#`-Kommentare (am Wortanfang, ungequotet, bis Zeilenende) werden unverändert
+    durchgereicht, damit sie keine Quote-Zustände verwechseln."""
     aussen: list[str] = []
     innen: list[str] = []
     i, n = 0, len(text)
-    einfach = doppelt = False
+    einfach = doppelt = wort = False
     while i < n:
         c = text[i]
         if einfach:
@@ -164,14 +210,30 @@ def _auslagern(text: str) -> tuple[str, list[str]]:
         elif c == "\\" and i + 1 < n:
             aussen.append(text[i:i + 2])
             i += 2
+            wort = True
+        elif c == "$" and not doppelt and text.startswith("$'", i):
+            try:
+                ende = _ansi_c_ende(text, i + 1)
+            except ValueError:                         # offen: Rest unverändert lassen (konservativ)
+                ende = n
+            aussen.append(text[i:ende])
+            i = ende
+            wort = True
         elif c == "'" and not doppelt:
             einfach = True
             aussen.append(c)
             i += 1
+            wort = True
         elif c == '"':
             doppelt = not doppelt
             aussen.append(c)
             i += 1
+            wort = True
+        elif c == "#" and not doppelt and not wort:
+            ende = text.find("\n", i)
+            ende = n if ende == -1 else ende
+            aussen.append(text[i:ende])
+            i = ende
         elif text.startswith("$(", i):
             tiefe, j = 1, i + 2
             while j < n and tiefe:
@@ -184,6 +246,7 @@ def _auslagern(text: str) -> tuple[str, list[str]]:
                 innen.append(text[i + 2:j - 1])
                 aussen.append("$()")
                 i = j
+            wort = True
         elif c == "`":
             ende = text.find("`", i + 1)
             if ende == -1:                             # nie geschlossen: Text unverändert lassen (konservativ)
@@ -193,9 +256,11 @@ def _auslagern(text: str) -> tuple[str, list[str]]:
                 innen.append(text[i + 1:ende])
                 aussen.append("``")
                 i = ende + 1
+            wort = True
         else:
             aussen.append(c)
             i += 1
+            wort = doppelt or c not in _OPERATOREN
     return "".join(aussen), innen
 
 
@@ -247,6 +312,14 @@ def _zerlegen(text: str) -> list[list[str]]:
                 wort.append(text[i + 1])
                 im_wort = True
             i += 2
+        elif c == "#" and not im_wort:                 # Kommentar bis Zeilenende (Zeilenumbruch trennt weiter)
+            ende = text.find("\n", i)
+            i = n if ende == -1 else ende
+        elif c == "$" and text.startswith("$'", i):    # ANSI-C-Quoting: `\'` ist ein Zeichen
+            ende = _ansi_c_ende(text, i + 1)
+            wort.append(_ansi_c(text[i + 2:ende - 1]))
+            im_wort = True
+            i = ende
         elif c == "'":
             ende = text.find("'", i + 1)
             if ende == -1:

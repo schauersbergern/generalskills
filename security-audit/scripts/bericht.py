@@ -289,8 +289,8 @@ def pruefe_schema(daten: object) -> list[str]:
 # ------------------------------------------------------------------------------------ Markdown
 
 def _inline(text: object) -> str:
-    """Nicht validierten Text (Karte, Hinweise) einzeilig machen; Backticks escapen (kein Codezaun möglich)."""
-    return " ".join(str(text).split()).replace("`", "\\`")
+    """Nicht validierten Text (Karte, Hinweise) einzeilig machen; Backticks und Tilden escapen (kein Codezaun möglich)."""
+    return " ".join(str(text).split()).replace("`", "\\`").replace("~", "\\~")
 
 
 def _block(inhalt: str) -> list[str]:
