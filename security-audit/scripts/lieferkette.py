@@ -657,20 +657,27 @@ def _secrets(a: argparse.Namespace, repo: str, quelle: str, lk: str, marker: str
 
 # ------------------------------------------------------------------------------------ abhaengigkeiten: Versionen
 
-_SEMVER = re.compile(r"v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?")
+_SEMVER = re.compile(r"v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?", re.ASCII)
 
 
-def _zerlegt(version: str) -> tuple[tuple[int, int, int], list[str] | None] | None:
+def _zahl(ziffern: str) -> tuple[int, str]:
+    """Sortierschlüssel eines Ziffernblocks ohne `int()` (das bei Python >= 3.11 ab 4300 Stellen wirft): ohne führende Nullen
+    ist die längere Zahl die größere, bei gleicher Länge entscheidet der Text."""
+    z = ziffern.lstrip("0")
+    return len(z), z
+
+
+def _zerlegt(version: str) -> tuple[tuple[tuple[int, str], ...], list[str] | None] | None:
     m = _SEMVER.fullmatch(version.strip())
     if not m:
         return None
-    kern = (int(m.group(1)), int(m.group(2) or 0), int(m.group(3) or 0))
+    kern = tuple(_zahl(m.group(i) or "0") for i in (1, 2, 3))
     return kern, (m.group(4).split(".") if m.group(4) else None)
 
 
-def _natuerlich(version: str) -> list[tuple[int, int | str]]:
+def _natuerlich(version: str) -> list[tuple[int, tuple[int, str] | str]]:
     """Notbehelf für Versionen ohne Semver-Form: Zahlen- und Buchstabenblöcke, Zahlen vor Text."""
-    return [(0, int(t)) if t.isdigit() else (1, t.casefold()) for t in re.findall(r"\d+|[A-Za-z]+", version)]
+    return [(0, _zahl(t)) if t.isdigit() else (1, t.casefold()) for t in re.findall(r"\d+|[A-Za-z]+", version, re.ASCII)]
 
 
 def semver_vergleich(a: str, b: str) -> int:
@@ -690,7 +697,7 @@ def semver_vergleich(a: str, b: str) -> int:
         if x == y:
             continue
         if x.isdigit() and y.isdigit():
-            return -1 if int(x) < int(y) else 1
+            return -1 if _zahl(x) < _zahl(y) else 1
         if x.isdigit() != y.isdigit():
             return -1 if x.isdigit() else 1          # Zahlen vor Text
         return -1 if x < y else 1
@@ -816,15 +823,18 @@ def _npm_index(text: str) -> _NpmIndex:
         if isinstance(name, str) and isinstance(version, str):
             dev[(name, version)] = dev.get((name, version), True) and eintrag.get("dev") is True
 
-    def altformat(deps: object) -> None:                 # lockfileVersion 1: verschachtelt unter `dependencies`
-        for name, eintrag in deps.items() if isinstance(deps, dict) else []:
-            if isinstance(eintrag, dict):
-                vermerken(name, eintrag.get("version"), eintrag)
-                altformat(eintrag.get("dependencies"))
+    def altformat(wurzel: object) -> None:               # lockfileVersion 1: verschachtelt unter `dependencies`; iterativ (Tiefe!)
+        offen = [wurzel]
+        while offen:
+            deps = offen.pop()
+            for name, eintrag in deps.items() if isinstance(deps, dict) else []:
+                if isinstance(eintrag, dict):
+                    vermerken(name, eintrag.get("version"), eintrag)
+                    offen.append(eintrag.get("dependencies"))
 
     try:
         daten = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):                 # kaputt oder so tief verschachtelt, dass der Parser aufgibt
         return _NpmIndex({}, {})
     if not isinstance(daten, dict):
         return _NpmIndex({}, {})
@@ -842,16 +852,79 @@ def _npm_index(text: str) -> _NpmIndex:
     return _NpmIndex(dev, schluessel)
 
 
-def _zeile(zeilen: list[str], name: str, version: str, index: _NpmIndex) -> int:
-    """Zeile des Pakets im Lockfile: npm Zeile des Schlüssels `"node_modules/<name>"` der installierten Version, sonst die erste
-    Zeile mit dem Paketnamen, Fallback 1."""
+def _erster_mit_version(zeilen: list[str], koepfe: list[int], version: re.Pattern[str]) -> int:
+    """Von mehreren Eintragsköpfen desselben Pakets der erste, dessen Eintrag (bis zur nächsten Leerzeile, höchstens sechs
+    Zeilen) die installierte Version nennt; sonst der erste Kopf."""
+    for i in koepfe:
+        for z in zeilen[i + 1:i + 7]:
+            if not z.strip():
+                break
+            if version.search(z):
+                return i
+    return koepfe[0]
+
+
+def _kopf_yarn(zeilen: list[str], name: str, version: str) -> int | None:
+    """yarn.lock: Zeile des Eintragskopfs (Spalte 0, endet auf `:`), dessen durch `, ` getrennte Spezifikationen (auch in
+    Anführungszeichen) mit `<name>@` beginnen."""
+    koepfe = [i for i, z in enumerate(zeilen)
+              if z and not z[0].isspace() and z[0] != "#" and z.rstrip().endswith(":")
+              and any(s.strip().strip("\"'").startswith(name + "@") for s in z.rstrip()[:-1].split(", "))]
+    if not koepfe:
+        return None
+    ver = re.escape(version)
+    return _erster_mit_version(zeilen, koepfe, re.compile(r"^\s+version:?\s+[\"']?" + ver + r"[\"']?\s*$"))
+
+
+def _kopf_pnpm(zeilen: list[str], name: str, version: str) -> int | None:
+    """pnpm-lock.yaml: Zeile des Kopfs `/name@ver:`, `name@ver:`, `'/name@ver':` (auch `name@ver(peer)` und `/name/ver`) im
+    Abschnitt `packages:`; fehlt die Version, der erste Kopf des Namens."""
+    start, ende = 0, len(zeilen)
+    for i, z in enumerate(zeilen):
+        if z.rstrip() == "packages:":
+            start = i + 1
+            ende = next((k for k in range(start, len(zeilen)) if zeilen[k] and not zeilen[k][0].isspace() and zeilen[k][0] != "#"),
+                        len(zeilen))
+            break
+    n, v = re.escape(name), re.escape(version)
+    for muster in (re.compile(r"^\s+[\"']?/?" + n + r"[@/]" + v + r"(?:[(_\"':\s]|$)"),
+                   re.compile(r"^\s+[\"']?/?" + n + r"[@/]\S")):
+        for i in range(start, ende):
+            if muster.search(zeilen[i]) and zeilen[i].rstrip().endswith((":", "':", '":')):
+                return i
+    return None
+
+
+def _kopf_npm_v1(zeilen: list[str], name: str, version: str) -> int | None:
+    """npm lockfileVersion 1: Zeile des Schlüssels `"<name>": {` unter `dependencies` (nicht `"<name>": "^1.0"` unter
+    `requires`)."""
+    muster = re.compile(r"^\s*" + re.escape(json.dumps(name, ensure_ascii=False)) + r"\s*:\s*\{")
+    koepfe = [i for i, z in enumerate(zeilen) if muster.match(z)]
+    if not koepfe:
+        return None
+    return _erster_mit_version(zeilen, koepfe, re.compile(r'"version"\s*:\s*"' + re.escape(version) + '"'))
+
+
+def _zeile(zeilen: list[str], name: str, version: str, index: _NpmIndex, lockfile: str = "") -> int:
+    """Zeile des Pakets im Lockfile: npm Zeile des Schlüssels `"node_modules/<name>"` der installierten Version (ab Version 2),
+    sonst der Eintragskopf je Format (yarn, pnpm, npm v1), sonst die erste Zeile mit dem Paketnamen (Namensgrenze schließt `.`
+    ein), Fallback 1."""
     schl = index.schluessel.get((name, version))
     if schl is not None:
         ziel = json.dumps(schl) + ":"
         for i, z in enumerate(zeilen, 1):
             if z.lstrip().startswith(ziel):
                 return i
-    muster = re.compile(r"(?<![\w@./-])" + re.escape(name) + r"(?![\w-])")
+    kopf = None
+    if lockfile == "yarn.lock":
+        kopf = _kopf_yarn(zeilen, name, version)
+    elif lockfile == "pnpm-lock.yaml":
+        kopf = _kopf_pnpm(zeilen, name, version)
+    elif lockfile in NPM_LOCKFILES:
+        kopf = _kopf_npm_v1(zeilen, name, version)
+    if kopf is not None:
+        return kopf + 1
+    muster = re.compile(r"(?<![\w@./-])" + re.escape(name) + r"(?![\w.-])")
     for i, z in enumerate(zeilen, 1):
         if muster.search(z):
             return i
@@ -1009,8 +1082,23 @@ def _scan(rel: str, kopie: str, leer: str, rest: float) -> tuple[str, object]:
         return "hinweis", f"osv-scanner Exit {r.rc}, Lockfile nicht geprüft: {_t(rel)}"
     try:
         return "ok", json.loads(r.out)
-    except ValueError:
+    except (ValueError, RecursionError):
         return "hinweis", f"osv-scanner-Ausgabe unlesbar, Lockfile nicht geprüft: {_t(rel)}"
+
+
+def _lockfile_eintraege(rel: str, name: str, text: bytes, osv_daten: object) -> list[dict]:
+    """Pakete mit Advisories eines Lockfiles (Name, Version, Zeile, Dev, rohe Advisories); erst vollständig, dann übernommen."""
+    pakete = _osv_pakete(osv_daten)
+    if not pakete:
+        return []
+    inhalt = text.decode("utf-8", "replace")
+    zeilen = inhalt.splitlines()
+    index = _npm_index(inhalt) if name in NPM_LOCKFILES else _NpmIndex({}, {})
+    return [{"paket": _t(pname, 214), "version": _t(version, 100), "lockfile": _t(rel, 500),
+             "zeile": _zeile(zeilen, pname, version, index, name),
+             "vulns": vulns, "behoben_in": behoben_in(vulns, pname, version),
+             "dev": index.dev.get((pname, version), False)}
+            for pname, version, vulns in sorted(pakete, key=lambda p: (p[0], _version_key(p[1])))]
 
 
 def _abhaengigkeiten(quelle: str, lk: str, abh: str, ende: float) -> dict:
@@ -1037,27 +1125,22 @@ def _abhaengigkeiten(quelle: str, lk: str, abh: str, ende: float) -> dict:
         except OSError as e:
             hinweise.append(f"Lockfile nicht lesbar, übersprungen: {_t(rel)} ({e.strerror})")
             continue
-        art, wert = _scan(rel, kopie, leer, rest)
-        if art == "zeit":
-            hinweise.append(f"Abhängigkeitsprüfung abgebrochen (Zeitbudget): {offen} (zuerst: {_t(rel)})")
-            break
-        if art == "start":
-            hinweise.append(str(wert))
-            break
-        if art == "hinweis":
-            hinweise.append(str(wert))
-            continue
-        pakete = _osv_pakete(wert)
-        if not pakete:
-            continue
-        inhalt = text.decode("utf-8", "replace")
-        zeilen = inhalt.splitlines()
-        index = _npm_index(inhalt) if name in NPM_LOCKFILES else _NpmIndex({}, {})
-        for pname, version, vulns in sorted(pakete, key=lambda p: (p[0], _version_key(p[1]))):
-            eintraege.append({"paket": _t(pname, 214), "version": _t(version, 100), "lockfile": _t(rel, 500),
-                              "zeile": _zeile(zeilen, pname, version, index),
-                              "vulns": vulns, "behoben_in": behoben_in(vulns, pname, version),
-                              "dev": index.dev.get((pname, version), False)})
+        try:                                      # ein feindliches Lockfile darf die übrigen nie mitreißen
+            art, wert = _scan(rel, kopie, leer, rest)
+            if art == "zeit":
+                hinweise.append(f"Abhängigkeitsprüfung abgebrochen (Zeitbudget): {offen} (zuerst: {_t(rel)})")
+                break
+            if art == "start":
+                hinweise.append(str(wert))
+                break
+            if art == "hinweis":
+                hinweise.append(str(wert))
+                continue
+            eintraege.extend(_lockfile_eintraege(rel, name, text, wert))
+        except PocFehler:
+            raise
+        except Exception as e:                    # nur der Typ, nie Inhalte oder Meldung aus der Kundendatei
+            hinweise.append(f"{_t(rel)}: nicht auswertbar ({type(e).__name__})")
     kev = _kev_laden(lk, ende, hinweise) if eintraege else None
     pakete_aus = []
     for e in eintraege[:MAX_PAKETE]:

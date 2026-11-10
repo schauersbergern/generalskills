@@ -214,6 +214,25 @@ def test_semver_vergleich_unparsebare_versionen_werfen_nicht():
     assert lieferkette.semver_vergleich("2023-01-05", "2022-12-31") == 1
 
 
+def test_semver_vergleich_riesige_ziffern():
+    """Ziffernblöcke jenseits des int-Limits (Python >= 3.11: 4300 Stellen) aus feindlichen Dateien: nie eine Ausnahme."""
+    gross, klein = "1" * 5000, "1"
+    assert lieferkette.semver_vergleich(gross + ".0.0", "1.0.0") == 1
+    assert lieferkette.semver_vergleich("1.0.0", gross + ".0.0") == -1
+    assert lieferkette.semver_vergleich(gross + ".0.0", gross + ".0.0") == 0
+    assert lieferkette.semver_vergleich("9" * 5000 + ".0.0", "1" * 5001 + ".0.0") == -1       # kürzere Zahl ist kleiner
+    assert lieferkette.semver_vergleich("1." + gross + ".0", "1." + gross + "0.0") == -1
+    assert lieferkette.semver_vergleich("0" * 5000 + "7.0.0", "7.0.0") == 0                     # führende Nullen zählen nicht
+    assert lieferkette.semver_vergleich("1.0.0-" + gross, "1.0.0-" + klein) == 1                # Vorabversion, Zahlenblock
+    assert lieferkette.semver_vergleich("1.0.0-" + gross, "1.0.0-" + gross + "1") == -1
+    assert lieferkette.semver_vergleich("1.0.0-" + gross, "1.0.0") == -1
+    assert lieferkette.semver_vergleich("v" + gross + "x", "v" + klein + "x") == 1              # Notbehelf ohne Semver-Form
+    assert lieferkette.semver_vergleich("a" + gross, "a" + gross) == 0
+    assert lieferkette.semver_vergleich("1.0.0.1." + gross, "1.0.0.1.2") == 1
+    for a, b in (("1" * 5000 + ".0.0", "1.0.0"), ("1.0.0-" + gross, "1.0.0-2"), ("a" + gross, "a2")):
+        assert lieferkette.semver_vergleich(a, b) == -lieferkette.semver_vergleich(b, a)
+
+
 def test_behoben_in_versionslinien():
     """Mehrere Versionslinien: die kleinste Fix-Version oberhalb der installierten Version im passenden Bereich, über mehrere
     Advisories das Maximum."""
@@ -466,6 +485,84 @@ def test_abhaengigkeiten_zeile_erste_zeile_mit_dem_namen_in_npm_ohne_schluessel(
     assert ausgabe(umg.abh())["pakete"][0]["zeile"] == 6
 
 
+def _zeile_von(text, praefix):
+    """1-basierte Nummer der ersten Zeile, die mit `praefix` beginnt (Einrückung zählt mit)."""
+    return next(i for i, z in enumerate(text.splitlines(), 1) if z.startswith(praefix))
+
+
+def test_abhaengigkeiten_zeile_yarn_kopf_des_eintrags(umg):
+    """yarn: Zeile des Eintragskopfs (Spalte 0, auch mehrere Spezifikationen und Anführungszeichen), nicht ein Verweis unter
+    `dependencies:`; `lodash` trifft nicht `lodash.merge`."""
+    text = ('# yarn lockfile v1\n\n'
+            '"@babel/helper@^7.0.0":\n  version "7.0.0"\n  dependencies:\n    lodash "^4.17.20"\n    lodash.merge "^4.6.0"\n\n'
+            'lodash.merge@^4.6.0:\n  version "4.6.0"\n\n'
+            'foo@^1.0.0, lodash@^4.17.20, "lodash@>=4.17.0":\n  version "4.17.20"\n\n'
+            '"@scope/lodash@^2.0.0":\n  version "2.0.0"\n')
+    umg.schreibe("yarn.lock", text)
+    umg.fake_osv({"rc": 1, "stdout": osv_ausgabe(("lodash", "4.17.20", [vuln("lodash")]), ("lodash.merge", "4.6.0", [vuln("lodash.merge")]),
+                                                 ("@scope/lodash", "2.0.0", [vuln("@scope/lodash")]))})
+    pakete = je_paket(ausgabe(umg.abh()))
+    assert pakete[("lodash", "4.17.20", "yarn.lock")]["zeile"] == _zeile_von(text, "foo@^1.0.0, lodash@") == 12
+    assert pakete[("lodash.merge", "4.6.0", "yarn.lock")]["zeile"] == _zeile_von(text, "lodash.merge@^4.6.0:") == 9
+    assert pakete[("@scope/lodash", "2.0.0", "yarn.lock")]["zeile"] == _zeile_von(text, '"@scope/lodash@')
+
+
+def test_abhaengigkeiten_zeile_yarn_bevorzugt_den_kopf_der_installierten_version(umg):
+    text = 'lodash@^3.0.0:\n  version "3.10.1"\n\n"lodash@^4.17.15":\n  version "4.17.15"\n'
+    umg.schreibe("yarn.lock", text)
+    umg.fake_osv({"rc": 1, "stdout": osv_ausgabe(("lodash", "4.17.15", [vuln("lodash")]))})
+    assert ausgabe(umg.abh())["pakete"][0]["zeile"] == 4
+
+
+def test_abhaengigkeiten_zeile_pnpm_kopf_unter_packages(umg):
+    """pnpm: Kopf `/name@ver:`, `name@ver:`, `'/name@ver':` unter `packages:`, nicht `importers:` oder `snapshots:`;
+    `lodash` trifft nicht `lodash.merge`."""
+    text = ("lockfileVersion: '6.0'\n\nimporters:\n  .:\n    dependencies:\n      lodash:\n        specifier: ^4.17.10\n"
+            "        version: 4.17.10\n      lodash.merge:\n        specifier: ^4.6.0\n        version: 4.6.0\n\npackages:\n\n"
+            "  /lodash.merge@4.6.0:\n    resolution: {integrity: x}\n    dev: false\n\n"
+            "  /lodash@4.17.10:\n    resolution: {integrity: x}\n    dev: false\n\n"
+            "  'lodash@4.17.5(peer@1.0.0)':\n    resolution: {integrity: x}\n\n"
+            "  '/@scope/pkg@2.0.0':\n    resolution: {integrity: x}\n\n"
+            "  minimist@1.2.5:\n    resolution: {integrity: x}\n\n"
+            "snapshots:\n\n  lodash@4.17.10:\n    dependencies: {}\n")
+    umg.schreibe("pnpm-lock.yaml", text)
+    umg.fake_osv({"rc": 1, "stdout": osv_ausgabe(
+        ("lodash", "4.17.10", [vuln("lodash")]), ("lodash.merge", "4.6.0", [vuln("lodash.merge")]),
+        ("lodash", "4.17.5", [vuln("lodash")]), ("@scope/pkg", "2.0.0", [vuln("@scope/pkg")]),
+        ("minimist", "1.2.5", [vuln("minimist")]))})
+    pakete = je_paket(ausgabe(umg.abh()))
+    assert pakete[("lodash", "4.17.10", "pnpm-lock.yaml")]["zeile"] == _zeile_von(text, "  /lodash@4.17.10:") == 19
+    assert pakete[("lodash.merge", "4.6.0", "pnpm-lock.yaml")]["zeile"] == _zeile_von(text, "  /lodash.merge@4.6.0:")
+    assert pakete[("lodash", "4.17.5", "pnpm-lock.yaml")]["zeile"] == _zeile_von(text, "  'lodash@4.17.5(")
+    assert pakete[("@scope/pkg", "2.0.0", "pnpm-lock.yaml")]["zeile"] == _zeile_von(text, "  '/@scope/pkg@2.0.0'")
+    assert pakete[("minimist", "1.2.5", "pnpm-lock.yaml")]["zeile"] == _zeile_von(text, "  minimist@1.2.5:")
+
+
+def test_abhaengigkeiten_zeile_npm_v1_schluessel_unter_dependencies(umg):
+    """npm v1: Zeile des Schlüssels `"name": {` unter `dependencies`, nicht eine `requires`-Angabe eines anderen Pakets;
+    `lodash` trifft nicht `lodash.merge`."""
+    text = ('{\n  "name": "x",\n  "lockfileVersion": 1,\n  "dependencies": {\n'
+            '    "a": {\n      "version": "1.0.0",\n      "requires": {\n        "lodash": "^4.17.5",\n        "lodash.merge": "^4.6.0"\n      }\n    },\n'
+            '    "lodash": {\n      "version": "4.17.5"\n    },\n'
+            '    "lodash.merge": {\n      "version": "4.6.0"\n    }\n  }\n}\n')
+    umg.schreibe("package-lock.json", text)
+    umg.fake_osv({"rc": 1, "stdout": osv_ausgabe(("lodash", "4.17.5", [vuln("lodash")]), ("lodash.merge", "4.6.0", [vuln("lodash.merge")]))})
+    pakete = je_paket(ausgabe(umg.abh()))
+    assert pakete[("lodash", "4.17.5", "package-lock.json")]["zeile"] == _zeile_von(text, '    "lodash": {') == 12
+    assert pakete[("lodash.merge", "4.6.0", "package-lock.json")]["zeile"] == _zeile_von(text, '    "lodash.merge": {')
+
+
+def test_abhaengigkeiten_zeile_fallback_schliesst_punkt_in_der_namensgrenze_ein(umg):
+    """Ohne Kopfzeile (Fallback): `lodash` trifft nicht `lodash.merge`, aber die erste echte Nennung; sonst Zeile 1."""
+    umg.schreibe("yarn.lock", 'x@1:\n  dependencies:\n    lodash.merge "1"\n    lodash "^4"\n')
+    umg.schreibe("a/yarn.lock", 'x@1:\n  dependencies:\n    lodash.merge "1"\n')
+    umg.fake_osv({"rc": 1, "stdout": osv_ausgabe(("lodash", "4.0.0", [vuln("lodash")]))},
+                 {"rc": 1, "stdout": osv_ausgabe(("lodash", "4.0.0", [vuln("lodash")]))})
+    pakete = je_paket(ausgabe(umg.abh()))
+    assert pakete[("lodash", "4.0.0", "yarn.lock")]["zeile"] == 4
+    assert pakete[("lodash", "4.0.0", "a/yarn.lock")]["zeile"] == 1
+
+
 # ------------------------------------------------------------------------------------ dev
 
 def test_abhaengigkeiten_dev(umg):
@@ -488,6 +585,74 @@ def test_abhaengigkeiten_dev_kaputter_lockfile(umg):
     umg.fake_osv({"rc": 1, "stdout": osv_ausgabe(("lodash", "4.17.20", [vuln("lodash")]))})
     p = ausgabe(umg.abh())["pakete"][0]
     assert p["dev"] is False and p["zeile"] == 1
+
+
+# ------------------------------------------------------------------------------------ feindliche Kundendateien
+
+def _tiefes_v1_lockfile(tiefe):
+    """package-lock.json (lockfileVersion 1) mit `tiefe` Ebenen `dependencies`; entsteht zur Laufzeit, ohne Rekursion."""
+    kopf = '{"version": "1.0.0", "dependencies": {"p": '
+    tief = kopf * tiefe + '{"version": "1.0.0"}' + "}}" * tiefe
+    return ('{"name": "x", "lockfileVersion": 1, "dependencies": {"lodash": {"version": "4.17.5", "dependencies": {"p": '
+            + tief + "}}}}")
+
+
+@pytest.mark.parametrize("tiefe", [3000, 200000], ids=["rekursion-in-altformat", "rekursion-im-json-parser"])
+def test_abhaengigkeiten_tiefes_v1_lockfile(umg, tiefe):
+    """Tief verschachteltes Lockfile (RecursionError im eigenen Durchlauf bzw. im JSON-Parser): kein Absturz, Prüfung läuft
+    weiter, der Rest der Auswertung (behoben_in, Pakete) bleibt erhalten."""
+    text = _tiefes_v1_lockfile(tiefe)
+    umg.schreibe("package-lock.json", text)
+    umg.fake_osv({"rc": 1, "stdout": osv_ausgabe(("lodash", "4.17.5", [vuln("lodash", bereiche=(("0", "4.17.21"),))]))})
+    r = umg.abh()
+    out = ausgabe(r)
+    assert "Traceback" not in r.stderr
+    p = out["pakete"][0]
+    assert (p["paket"], p["version"], p["behoben_in"]) == ("lodash", "4.17.5", "4.17.21")
+    assert p["dev"] is False and isinstance(p["zeile"], int) and p["zeile"] >= 1
+    assert "abh" not in umg.lk_inhalt()                                              # nichts von abh/ bleibt liegen
+
+
+def test_abhaengigkeiten_riesige_version_in_osv_ausgabe(umg):
+    """Eine Version mit 5000 Ziffern (aus dem Lockfile des Kunden) bringt weder behoben_in noch die Sortierung zu Fall."""
+    umg.schreibe("package-lock.json", npm_lock(("node_modules/lodash", "1" * 5000 + ".0.0", False)))
+    umg.fake_osv({"rc": 1, "stdout": osv_ausgabe(("lodash", "1" * 5000 + ".0.0", [vuln("lodash", bereiche=(("0", "1" * 5001 + ".0.0"),))]),
+                                                 ("lodash", "4.17.20", [vuln("lodash", bereiche=(("0", "4.17.21"),))]))})
+    r = umg.abh()
+    out = ausgabe(r)
+    assert "Traceback" not in r.stderr
+    assert len(out["pakete"]) == 2
+    assert out["pakete"][0]["version"] == "4.17.20"                                  # sortiert: klein vor riesig
+    assert out["pakete"][0]["behoben_in"] == "4.17.21" and out["pakete"][1]["behoben_in"] == "1" * 5001 + ".0.0"
+
+
+def test_abhaengigkeiten_ein_kaputtes_lockfile_verliert_die_anderen_nicht(umg, monkeypatch, capsys):
+    """Scheitert die Auswertung eines Lockfiles mit irgendeiner Ausnahme: Hinweis ohne Inhalte, die übrigen Lockfiles bleiben,
+    Arbeitsdateien werden gelöscht."""
+    _in_process_umgebung(umg, monkeypatch)
+    monkeypatch.setenv("SECURITY_AUDIT_KEV_DATEI", str(umg.kev))
+    original = lieferkette._npm_index
+
+    def index(text):
+        if "GEHEIM-SENTINEL" in text:
+            raise RuntimeError("GEHEIM-SENTINEL im Fehlertext")
+        return original(text)
+    monkeypatch.setattr(lieferkette, "_npm_index", index)
+    umg.schreibe("a/package-lock.json", npm_lock(("node_modules/lodash", "4.17.20", False)).replace("\"x\"", "\"GEHEIM-SENTINEL\""))
+    umg.schreibe("b/yarn.lock", 'lodash@^4.17.15:\n  version "4.17.15"\n')
+    umg.schreibe("c/package-lock.json", npm_lock(("node_modules/minimist", "1.2.5", False)))
+    umg.fake_osv(
+        {"rc": 1, "stdout": osv_ausgabe(("lodash", "4.17.20", [vuln("lodash")]))},          # a/package-lock.json: scheitert
+        {"rc": 1, "stdout": osv_ausgabe(("lodash", "4.17.15", [vuln("lodash")]))},          # b/yarn.lock
+        {"rc": 1, "stdout": osv_ausgabe(("minimist", "1.2.5", [vuln("minimist")]))})        # c/package-lock.json
+    assert lieferkette.main(["abhaengigkeiten", "--lauf", LAUF, "--quelle", umg.quelle()]) == 0
+    roh = capsys.readouterr().out
+    out = json.loads(roh)
+    assert sorted((p["paket"], p["lockfile"]) for p in out["pakete"]) == [("lodash", "b/yarn.lock"), ("minimist", "c/package-lock.json")]
+    assert out["hinweise"] == ["a/package-lock.json: nicht auswertbar (RuntimeError)"]
+    assert "GEHEIM-SENTINEL" not in roh
+    assert len(umg.aufrufe()) == 3
+    assert not os.path.exists(os.path.join(umg.lk(), "abh"))
 
 
 # ------------------------------------------------------------------------------------ Texte
@@ -653,6 +818,28 @@ def test_kev_download_ungueltige_antwort(umg, monkeypatch, capsys, antwort):
     out = json.loads(capsys.readouterr().out)
     assert [p["kev"] for p in out["pakete"]] == [None]
     assert not os.path.exists(os.path.join(umg.lk(), "kev.json"))
+
+
+def test_kev_download_gueltiges_json_ueber_dem_limit_wird_verworfen(umg, monkeypatch, capsys):
+    """Das Größenlimit greift auch bei gültigem JSON (nicht nur bei Müll); genau am Limit wird noch angenommen."""
+    _in_process_umgebung(umg, monkeypatch)
+    katalog = json.dumps({"vulnerabilities": [{"cveID": f"CVE-2099-{n:04d}"} for n in range(1, 200)]}).encode()
+    assert json.loads(katalog)["vulnerabilities"]                                    # gültig und strukturell richtig
+    umg.schreibe("package-lock.json", npm_lock(("node_modules/lodash", "4.17.20", False)))
+    umg.fake_osv({"rc": 1, "stdout": osv_ausgabe(("lodash", "4.17.20", [vuln("lodash", aliase=["CVE-2099-0007"])]))})
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _Antwort(katalog))
+
+    monkeypatch.setattr(lieferkette, "KEV_MAX", len(katalog) - 1)
+    assert lieferkette.main(["abhaengigkeiten", "--lauf", LAUF, "--quelle", umg.quelle()]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert [p["kev"] for p in out["pakete"]] == [None]
+    assert any(h.startswith("KEV-Katalog nicht geladen") and "Antwort zu groß" in h for h in out["hinweise"])
+    assert not os.path.exists(os.path.join(umg.lk(), "kev.json"))
+
+    monkeypatch.setattr(lieferkette, "KEV_MAX", len(katalog))
+    umg.fake_osv({"rc": 1, "stdout": osv_ausgabe(("lodash", "4.17.20", [vuln("lodash", aliase=["CVE-2099-0007"])]))})
+    assert lieferkette.main(["abhaengigkeiten", "--lauf", LAUF, "--quelle", umg.quelle()]) == 0
+    assert [p["kev"] for p in json.loads(capsys.readouterr().out)["pakete"]] == [True]
 
 
 def test_kev_download_weiterleitung_auf_http_wird_verworfen(umg, monkeypatch, capsys):
