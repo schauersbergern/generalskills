@@ -19,6 +19,7 @@ async function main() {
   await db.init();
 
   const app = express();
+  app.disable("x-powered-by");
   const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "projektboard-"));
   const logFile = path.join(logDir, "access.log");
 
@@ -40,6 +41,15 @@ async function main() {
   app.use("/api/preview", preview);
   app.use("/api/download", download);
   app.use("/api/avatar", avatar);
+
+  app.use((err, req, res, next) => {
+    if (res.headersSent) return next(err);
+    if (err && (err.type === "entity.parse.failed" || err.status === 400)) {
+      return res.status(400).json({ fehler: "ungültige Anfrage" });
+    }
+    console.error(err && err.message);
+    res.status(500).json({ fehler: "interner Fehler" });
+  });
 
   const port = Number(process.env.PORT || 3000);
   const host = process.env.HOST || "0.0.0.0";

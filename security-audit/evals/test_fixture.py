@@ -21,7 +21,8 @@ import pytest
 HIER = os.path.dirname(os.path.abspath(__file__))
 FIXTURE = os.path.join(HIER, "fixture-web")
 ERWARTUNG = os.path.join(HIER, "expected", "fixture-web.json")
-LOCKFILES = ("package-lock.json", "package-lock.json.tmpl")
+LOCKFILE = "package-lock.json.tmpl"
+LOCKFILES = (LOCKFILE,)
 
 
 def erwartung():
@@ -30,11 +31,8 @@ def erwartung():
 
 
 def lockfile_pfad():
-    for name in LOCKFILES:
-        pfad = os.path.join(FIXTURE, name)
-        if os.path.isfile(pfad):
-            return pfad
-    return None
+    pfad = os.path.join(FIXTURE, LOCKFILE)
+    return pfad if os.path.isfile(pfad) else None
 
 
 def dateien_unter(wurzel):
@@ -52,6 +50,8 @@ def test_fixture_dateien_vollstaendig():
     eintraege = e["eintraege"]
     luecken = [x for x in eintraege if x["typ"] == "luecke"]
     koeder = [x for x in eintraege if x["typ"] == "koeder"]
+    assert isinstance(e["nebenbefunde"], list) and e["nebenbefunde"]
+    assert all(isinstance(x, str) and x for x in e["nebenbefunde"])
     assert len(luecken) == 6
     assert sum(1 for x in luecken if x["stufe"] == "P1") == 4
     assert len(koeder) == 3
@@ -124,7 +124,8 @@ def test_keine_install_skripte():
         assert name not in skripte
     assert paket["dependencies"] == {"express": "4.22.3", "sql.js": "1.15.2"}
     pfad = lockfile_pfad()
-    assert pfad, "package-lock.json oder package-lock.json.tmpl fehlt"
+    assert pfad, "package-lock.json.tmpl fehlt"
+    assert not os.path.exists(os.path.join(FIXTURE, "package-lock.json")), "Lockfile nur als .tmpl ablegen"
     with open(pfad, encoding="utf-8") as f:
         lock = json.load(f)
     pakete = lock["packages"]
@@ -146,20 +147,25 @@ def freier_port():
         return s.getsockname()[1]
 
 
-def anfrage(port, pfad, token=None, methode="GET", daten=None):
-    kopf = {}
+def anfrage(port, pfad, token=None, methode="GET", daten=None, kopf=None, roh=None, mit_kopf=False):
+    kopf = dict(kopf or {})
     if token:
         kopf["x-token"] = token
     koerper = None
     if daten is not None:
         koerper = json.dumps(daten).encode()
         kopf["content-type"] = "application/json"
+    if roh is not None:
+        koerper = roh
+        kopf["content-type"] = "application/json"
     req = urllib.request.Request(f"http://127.0.0.1:{port}{pfad}", data=koerper, headers=kopf, method=methode)
     try:
         with urllib.request.urlopen(req, timeout=15) as r:
-            return r.status, r.read().decode("utf-8", "replace")
+            erg = (r.status, r.read().decode("utf-8", "replace"))
+            return erg + (dict(r.headers),) if mit_kopf else erg
     except urllib.error.HTTPError as e:
-        return e.code, e.read().decode("utf-8", "replace")
+        erg = (e.code, e.read().decode("utf-8", "replace"))
+        return erg + (dict(e.headers),) if mit_kopf else erg
 
 
 @pytest.fixture(scope="module")
@@ -255,6 +261,8 @@ def test_server_startet(app):
     # L6: Download außerhalb des Basisordners
     status, body = anfrage(port, "/api/download?name=../../package.json", "tok-acme")
     assert status == 200 and '"name"' in body
+    status, body = anfrage(port, "/api/download?name=..%2F..%2Fpackage.json", "tok-acme")
+    assert status == 200 and '"name"' in body
     status, body = anfrage(port, "/api/download?name=welcome.txt", "tok-acme")
     assert status == 200
     globex_labels = {r["label"] for r in json.loads(anfrage(port, "/api/invoices", "tok-globex")[1])}
@@ -265,6 +273,20 @@ def test_server_startet(app):
     assert status == 200 and json.loads(body) and not any(r["label"] in globex_labels for r in json.loads(body))
     # K2: Rechnung einer fremden Org
     assert anfrage(port, f"/api/invoices/{rechnung}", "tok-acme")[0] == 404
+    for pfad, kopf in ((f"/api/invoices/{rechnung}?org=2", None), (f"/api/invoices/{rechnung}?org_id=2", None),
+                       (f"/api/invoices/{rechnung}", {"x-org-id": "2"})):
+        assert anfrage(port, pfad, "tok-acme", kopf=kopf)[0] == 404, pfad
+    status, body = anfrage(port, "/api/invoices?org=2", "tok-acme")
+    assert status == 200 and json.loads(body)
+    assert not {r["label"] for r in json.loads(body)} & globex_labels
     # K3: Avatar außerhalb des Basisordners
-    assert anfrage(port, "/api/avatar?name=../package.json", "tok-acme")[0] in (400, 404)
+    for name in ("../package.json", "../../package.json", "..%2F..%2Fpackage.json", "%2e%2e%2f%2e%2e%2fpackage.json"):
+        status, body = anfrage(port, f"/api/avatar?name={name}", "tok-acme")
+        assert status in (400, 404), name
+        assert '"name"' not in body, name
+    # Fehlerbehandlung: kein Stacktrace, kein Framework-Header
+    status, body, kopf = anfrage(port, "/webhooks/stripe", methode="POST", roh=b"{bad", mit_kopf=True)
+    assert status == 400 and json.loads(body) == {"fehler": "ungültige Anfrage"}
+    assert "at " not in body and "/" not in body
+    assert "x-powered-by" not in {k.lower() for k in kopf}
     assert anfrage(port, "/api/avatar?name=acme.png", "tok-acme")[0] == 200
