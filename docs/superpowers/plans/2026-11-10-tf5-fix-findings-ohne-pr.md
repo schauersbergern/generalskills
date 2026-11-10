@@ -89,3 +89,12 @@ Task 1 → Task 2.
   - TF5-D4: Audit-Liste plus „mergen“ → Push und Hinweis, kein Merge.
   - TF5-D5: README-Zeile `fix-findings` nennt den Audit-Eingang.
 - **K9 Verifikation:** Kein `.github/workflows/` → ganze Suite (`python3 -m pytest security-audit auto-feature/scripts -q`) einmal in der Verifikation.
+
+## Nachträge nach Plan-Review R2 (Vorrang)
+
+- **W:** Ablauf 6 und 7 werden auf dem Audit-Weg **ergänzt**, nicht ersetzt: Die Antwortregel per `SendMessage` (Ablauf 7, `from`/„Antwort an:“, neuer Head-SHA) gilt unverändert auch für Audit-Listen (Spec 14). Im Ablauf-1-Unterpunkt heißt es daher „Ablauf 6 und 7 gelten mit den Audit-Ergänzungen unten“.
+- **K1:** K2 bedeutet nur: `fix-findings/SKILL.md` in die Parametrisierung von `test_unterbefehle_existieren` und `test_optionen_existieren` aufnehmen; keine Präfixprüfung für fix-findings.
+- **K2:** Im Review Focus gelten die neuen Namen `test_repo_befehl_*` (nicht die bestehenden `test_repo_*`).
+- **K3:** Die Kopfzeile im Vertragstest stammt aus `_bloecke(bericht.markdown(_beispiel_json()))[0][1].split("\n")[0]` — nie per Suche mit dem Muster aus fix-findings.
+- **K4:** Durchklick-Setup: danach den Link `~/.claude/skills/security-audit` wieder entfernen und `fix-findings` auf den Hauptcheckout zurücksetzen; parallel laufende Sessions nutzen in der Zeit das TF5-`fix-findings`.
+- **K5:** Geschwisterpfad zu `fix-findings/SKILL.md` in `test_skill_text.py` über `os.path.realpath`.
