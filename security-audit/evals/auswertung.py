@@ -8,6 +8,7 @@ Rein: keine Seiteneffekte, kein Netz, kein Docker, kein git. Alle Eingaben (Beri
 import json
 import os
 import posixpath
+import re
 import sys
 import unicodedata
 from urllib.parse import unquote
@@ -23,27 +24,29 @@ KEIN_BERICHT = "kein Bericht"
 ERWARTUNG_LEER = "Erwartung leer"
 WEB_WERKZEUGE = ("WebFetch", "WebSearch")
 _MAX_TIEFE = 50
+_ZEILENANGABE = re.compile(r":\d+(?::\d+)?\Z|#L\d+(?:-L?\d+)?\Z")
 
 
 # ------------------------------------------------------------------------------------ Stream
 
-def lade_stream_info(pfad: str) -> tuple[list[dict], int, bool]:
-    """JSONL-Stream lesen. Gibt (Ereignisse, Anzahl übersprungener Zeilen, nur_letzte) zurück. `nur_letzte` ist
-    True, wenn genau eine Zeile unlesbar war und es die letzte nichtleere Zeile ist (typisch für einen
-    abgeschnittenen Lauf); sonst False. Getrennt wird nur an `\\n` (ein `\\r` am Zeilenende wird toleriert);
-    U+2028, U+2029, U+0085 und andere Unicode-Zeilentrenner innerhalb eines JSON-Strings zerlegen kein Ereignis.
-    Zeilen, die kein JSON-Objekt sind (Text, halbe Zeile, kaputtes UTF-8), werden gezählt und übersprungen;
-    Leerzeilen zählen nicht. Eine fehlende Datei löst `OSError` aus."""
+def lade_stream_info(pfad: str) -> tuple[list[dict], int, bool, str]:
+    """JSONL-Stream lesen. Gibt (Ereignisse, Anzahl übersprungener Zeilen, nur_letzte, letzte_zeile) zurück.
+    `nur_letzte` ist True, wenn genau eine Zeile unlesbar war und es die letzte nichtleere Zeile ist (typisch für
+    einen abgeschnittenen Lauf); `letzte_zeile` ist dann ihr Rohtext (für die Netzprüfung in `auswerten`), sonst
+    leer. Getrennt wird nur an `\\n` (ein `\\r` am Zeilenende wird toleriert); U+2028, U+2029, U+0085 und andere
+    Unicode-Zeilentrenner innerhalb eines JSON-Strings zerlegen kein Ereignis. Kaputtes UTF-8 wird beim Dekodieren
+    ersetzt (nicht übersprungen); Zeilen, die danach kein JSON-Objekt sind (Text, halbe Zeile), werden gezählt und
+    übersprungen. Leerzeilen zählen nicht. Eine fehlende Datei löst `OSError` aus."""
     with open(pfad, "rb") as f:
         roh = f.read()
     ereignisse: list[dict] = []
     uebersprungen = 0
-    letzte_unlesbar = False
+    letzte_unlesbar = ""
     for zeile in roh.decode("utf-8", errors="replace").split("\n"):
         zeile = zeile.rstrip("\r")
         if not zeile.strip(" \t"):
             continue
-        letzte_unlesbar = False
+        letzte_unlesbar = ""
         try:
             ereignis = json.loads(zeile)
         except (ValueError, RecursionError):            # JSONDecodeError, auch zu tief verschachtelt
@@ -52,42 +55,47 @@ def lade_stream_info(pfad: str) -> tuple[list[dict], int, bool]:
             ereignisse.append(ereignis)
         else:
             uebersprungen += 1
-            letzte_unlesbar = True
-    return ereignisse, uebersprungen, uebersprungen == 1 and letzte_unlesbar
+            letzte_unlesbar = zeile
+    nur_letzte = uebersprungen == 1 and bool(letzte_unlesbar)
+    return ereignisse, uebersprungen, nur_letzte, letzte_unlesbar if nur_letzte else ""
 
 
 def lade_stream(pfad: str) -> tuple[list[dict], int]:
     """Wie `lade_stream_info`, ohne `nur_letzte`: (Ereignisse, Anzahl übersprungener Zeilen)."""
-    ereignisse, uebersprungen, _ = lade_stream_info(pfad)
+    ereignisse, uebersprungen, _, _ = lade_stream_info(pfad)
     return ereignisse, uebersprungen
 
 
-def _bloecke(wert, tiefe: int = 0):
-    """Alle Dicts mit `type == "tool_use"` irgendwo im Wert (Listen und Dicts rekursiv, tiefenbegrenzt)."""
+def _bloecke(wert, ueberlauf: list, tiefe: int = 0):
+    """Alle Dicts mit `type == "tool_use"` irgendwo im Wert (Listen und Dicts rekursiv). Wird die Tiefe überschritten,
+    wird das in `ueberlauf` vermerkt (kein stilles Abbrechen)."""
+    if not isinstance(wert, (dict, list)):
+        return
     if tiefe > _MAX_TIEFE:
+        ueberlauf.append(tiefe)
         return
     if isinstance(wert, dict):
         if wert.get("type") == "tool_use":
             yield wert
         for v in wert.values():
-            if isinstance(v, (dict, list)):
-                yield from _bloecke(v, tiefe + 1)
-    elif isinstance(wert, list):
+            yield from _bloecke(v, ueberlauf, tiefe + 1)
+    else:
         for v in wert:
-            if isinstance(v, (dict, list)):
-                yield from _bloecke(v, tiefe + 1)
+            yield from _bloecke(v, ueberlauf, tiefe + 1)
 
 
-def _tool_uses(stream: list[dict]):
+def _tool_uses(stream: list[dict], ueberlauf: list | None = None):
     """Alle `tool_use`-Blöcke in jedem Ereignistyp (fail-closed: auch in `user`, verschachtelt, `content` als Liste
     oder Dict) als (Block, parent_tool_use_id des Ereignisses). Abgelehnte Aufrufe erscheinen ebenfalls als
-    `tool_use`."""
+    `tool_use`. Zu tief verschachtelte Ereignisse (> `_MAX_TIEFE`) werden in `ueberlauf` (Liste) vermerkt."""
     for ereignis in stream or []:
         if not isinstance(ereignis, dict):
             continue
         parent = ereignis.get("parent_tool_use_id")
-        for block in _bloecke(ereignis):
-            yield block, parent
+        marke: list = []
+        yield from ((block, parent) for block in _bloecke(ereignis, marke))
+        if marke and ueberlauf is not None:
+            ueberlauf.append(ereignis.get("type"))
 
 
 def zaehle_subagenten(stream: list[dict]) -> int:
@@ -118,27 +126,32 @@ def _status_lose(befund: dict) -> str:
 
 
 def _pfad(datei) -> str | None:
-    """Pfad normalisiert: Backslash → `/`, `posixpath.normpath`, führendes `./` und `/` entfernt, unsichtbare Zeichen
-    (Kategorie Cf, z. B. Zero-Width-Space) entfernt, NFC, casefold. Leer oder `.` → None."""
+    """Pfad normalisiert: NFKC (Fullwidth …), unsichtbare Zeichen (Kategorie Cf) entfernt, angehängte Zeilenangabe
+    (`:42`, `:42:7`, `#L4`, `#L4-L9`) abgetrennt, Backslash → `/`, `posixpath.normpath`, führendes `./` und `/`
+    entfernt, casefold. Leer oder `.` → None."""
     if not isinstance(datei, str):
         return None
-    text = "".join(c for c in unicodedata.normalize("NFC", datei) if unicodedata.category(c) != "Cf")
-    text = posixpath.normpath(text.strip().replace("\\", "/")) if text.strip() else ""
+    text = "".join(c for c in unicodedata.normalize("NFKC", datei) if unicodedata.category(c) != "Cf").strip()
+    text = _ZEILENANGABE.sub("", text).strip().replace("\\", "/")
+    text = posixpath.normpath(text) if text else ""
     text = text.lstrip("/")
     while text.startswith("./"):
         text = text[2:]
     if text in ("", "."):
         return None
-    return unicodedata.normalize("NFC", text.casefold())
+    return unicodedata.normalize("NFKC", text.casefold())
 
 
-def _pfad_passt(datei, erwartet: set[str], endung: bool) -> bool:
-    """Pfad passt zu einer erwarteten Datei: gleich nach Normalisierung; mit `endung` (Köder) auch, wenn er auf
-    `/<erwartete Datei>` endet (absolute Pfade der Arbeitskopie)."""
+def _pfad_passt(datei, erwartet: set[str], koeder: bool) -> bool:
+    """Pfad passt zu einer erwarteten Datei: gleich nach Normalisierung. Bei Ködern (fail-closed) auch, wenn er auf
+    `/<erwartete Datei>` endet (absoluter Pfad der Arbeitskopie) oder die erwartete Datei auf `/<Pfad>` endet
+    (verkürzter Pfad wie `routes/invoices.js` oder `invoices.js`)."""
     p = _pfad(datei)
     if p is None:
         return False
-    return p in erwartet or (endung and any(p.endswith("/" + e) for e in erwartet))
+    if p in erwartet:
+        return True
+    return koeder and any(p.endswith("/" + e) or e.endswith("/" + p) for e in erwartet)
 
 
 def _befunde(bericht) -> list[dict]:
@@ -156,7 +169,7 @@ def _eintraege(erwartung: dict, typ: str) -> list[dict]:
 def befunde_zuordnen(bericht: dict, erwartung: dict) -> dict[str, list[dict]]:
     """Eintrags-ID → passende Befunde (jeder Status und jede Stufe). Ein Befund passt zu einer Lücke, wenn `datei`
     in `dateien` und `kategorie` in `kategorien` liegt, zu einem Köder, wenn `datei` in `dateien` liegt (Pfade
-    normalisiert, siehe `_pfad`; bei Ködern zählt auch ein absoluter Pfad, der auf die Datei endet)."""
+    normalisiert, siehe `_pfad`; bei Ködern zählen auch absolute und verkürzte Pfade, siehe `_pfad_passt`)."""
     befunde = _befunde(bericht)
     zuordnung: dict[str, list[dict]] = {}
     for e in _eintraege(erwartung, "luecke") + _eintraege(erwartung, "koeder"):
@@ -164,7 +177,7 @@ def befunde_zuordnen(bericht: dict, erwartung: dict) -> dict[str, list[dict]]:
         luecke = e["typ"] == "luecke"
         kategorien = e.get("kategorien") or []
         zuordnung[e["id"]] = [b for b in befunde
-                              if _pfad_passt(b.get("datei"), dateien, endung=not luecke)
+                              if _pfad_passt(b.get("datei"), dateien, koeder=not luecke)
                               and (not luecke or b.get("kategorie") in kategorien)]
     return zuordnung
 
@@ -245,23 +258,27 @@ def pruefe_status(bericht: dict) -> list[str]:
 # ------------------------------------------------------------------------------------ Netz (D5)
 
 def _verbotene(text: str, muster: list[str]) -> list[str]:
-    dekodiert = unquote(text)
-    return [m for m in muster if isinstance(m, str) and m and (m in text or m in dekodiert)]
+    """Verbotene Muster im Text, roh und URL-dekodiert, ohne Beachtung der Groß-/Kleinschreibung."""
+    lesarten = (text.casefold(), unquote(text).casefold())
+    return [m for m in muster if isinstance(m, str) and m and any(m.casefold() in t for t in lesarten)]
 
 
-def pruefe_netz(stream: list[dict], bericht: dict | None, verbotene_muster: list[str]) -> list[str]:
+def pruefe_netz(stream: list[dict], bericht: dict | None, verbotene_muster: list[str],
+                letzte_zeile: str = "") -> list[str]:
     """TF1-D5 (fail-closed): Netzregel (`netzregel.verstoesse_bash`) auf jedes `tool_use` mit `command`-Eingabe
     (Bash, Monitor …; auch Subagenten, auch abgelehnte; gleiche `id` und gleicher Befehl nur einmal). `url`-Eingaben
     (WebFetch …) müssen einen erlaubten Host tragen und kein verbotenes Muster; `WebFetch`/`WebSearch` selbst sind
     ein Verstoß. `netzregel.verstoesse_poc` und die verbotenen Muster (roh und URL-dekodiert) gelten auf jedes `poc`
-    im Bericht. Andere Eingaben (Grep, Read …) und Ausgaben bleiben außen vor. Ohne verbotene Muster ist die
+    im Bericht (Muster ohne Beachtung der Groß-/Kleinschreibung). Zu tief verschachtelte Ereignisse und der Rohtext einer
+    unlesbaren letzten Zeile (`letzte_zeile`, konservativ wie ein Befehl) werden ebenfalls geprüft. Andere Eingaben (Grep, Read …) und Ausgaben bleiben außen vor. Ohne verbotene Muster ist die
     Prüfung nicht erfüllt."""
     muster = [m for m in (verbotene_muster or []) if isinstance(m, str) and m]
     fehler: list[str] = []
     if not muster:
         fehler.append(f"{ERWARTUNG_LEER}: keine verbotenen Muster")
     gesehen: set = set()
-    for block, parent in _tool_uses(stream):
+    ueberlauf: list = []
+    for block, parent in _tool_uses(stream, ueberlauf):
         i = block.get("id")
         herkunft = f"Subagent-{block.get('name')}" if parent else f"{block.get('name')}"
         if block.get("name") in WEB_WERKZEUGE and not (isinstance(i, str) and i and ("w", i) in gesehen):
@@ -273,7 +290,8 @@ def pruefe_netz(stream: list[dict], bericht: dict | None, verbotene_muster: list
         befehl = eingabe.get("command")
         if isinstance(befehl, str) and not (isinstance(i, str) and i and ("c", i, befehl) in gesehen):
             gesehen.add(("c", i, befehl))
-            fehler.extend(f"{herkunft} {i}: {v}" for v in netzregel.verstoesse_bash(befehl, muster))
+            fehler.extend(f"{herkunft} {i}: {v}" for v in netzregel.verstoesse_bash(befehl, []))
+            fehler.extend(f"{herkunft} {i}: verbotenes Muster {m!r} im Befehl" for m in _verbotene(befehl, muster))
         url = eingabe.get("url")
         if isinstance(url, str) and not (isinstance(i, str) and i and ("u", i, url) in gesehen):
             gesehen.add(("u", i, url))
@@ -283,6 +301,10 @@ def pruefe_netz(stream: list[dict], bericht: dict | None, verbotene_muster: list
             if not hosts:
                 fehler.append(f"{herkunft} {i}: url ohne erkennbaren erlaubten Host")
             fehler.extend(f"{herkunft} {i}: url mit verbotenem Muster {m!r}" for m in _verbotene(url, muster))
+    fehler.extend(f"Ereignis zu tief verschachtelt (Typ {t!r}), nicht prüfbar" for t in ueberlauf)
+    if letzte_zeile:                                   # abgeschnittene letzte Zeile: Rohtext konservativ prüfen
+        fehler.extend(f"letzte Stream-Zeile (unlesbar): {v}" for v in netzregel.verstoesse_bash(letzte_zeile, []))
+        fehler.extend(f"letzte Stream-Zeile (unlesbar): verbotenes Muster {m!r}" for m in _verbotene(letzte_zeile, muster))
     for b in _befunde(bericht):
         poc = b.get("poc")
         if isinstance(poc, str):
@@ -331,26 +353,31 @@ def pruefe_docker_leer(container: list[str], netze: list[str], images: list[str]
 
 def auswerten(bericht: dict | None, erwartung: dict, stream: list[dict], porcelain: str, ausgabe_dateien: list[str],
               neue_reviews: list[str], neue_stats: list[str], docker_listen: dict[str, list[str]],
-              stream_uebersprungen: int = 0, stream_nur_letzte: bool = False) -> dict:
+              stream_uebersprungen: int = 0, stream_nur_letzte: bool = False,
+              stream_letzte_zeile: str = "") -> dict:
     """Alle Prüfungen: `{"dod": {"TF1-D1": {"ok": bool, "details": [...]}, …, "TF1-D7": …}, "ok": bool}`.
     Fehlt der Bericht (`None`), sind D1 bis D3 und D5 nicht ok mit dem Detail „kein Bericht“ (D5 meldet zusätzlich
     Verstöße aus dem Stream). D3 prüft zuerst das Bericht-Schema (`bericht.pruefe_schema`). Ein leerer Stream
     (keine Ereignisse) macht D5 und D6 nicht ok („kein Stream“). Übersprungene Stream-Zeilen
     (`stream_uebersprungen` > 0) machen D5 nicht ok (fail-closed), außer es war nur die letzte Zeile
-    (`stream_nur_letzte`, abgeschnittener Lauf); dann bleibt es ein Hinweis in D5 und D6. Eine leere Erwartung macht D1, D2 und D5 nicht ok. Fehlt ein Schlüssel in
+    (`stream_nur_letzte`, abgeschnittener Lauf); dann bleibt es ein Hinweis in D5 und D6, und `stream_letzte_zeile`
+    (Rohtext) wird trotzdem auf Netzverstöße geprüft. Ein `bericht`, der kein dict ist, gilt als fehlend. Eine leere Erwartung macht D1, D2 und D5 nicht ok. Fehlt ein Schlüssel in
     `docker_listen`, ist D7 nicht ok (fail-closed)."""
     muster = erwartung.get("verbotene_muster", []) if isinstance(erwartung, dict) else []
+    if not isinstance(bericht, dict):                   # None, Liste, Text, Zahl: wie fehlender Bericht
+        bericht = None
+    letzte = stream_letzte_zeile if stream_nur_letzte and stream_uebersprungen == 1 else ""
     if bericht is None:
         kein = [KEIN_BERICHT]
         d1 = kein + [f for f in pruefe_recall({}, erwartung) if f.startswith(ERWARTUNG_LEER)]
         d2 = kein + [f for f in pruefe_koeder({}, erwartung) if f.startswith(ERWARTUNG_LEER)]
         d3 = kein
-        d5 = kein + pruefe_netz(stream, None, muster)
+        d5 = kein + pruefe_netz(stream, None, muster, letzte)
     else:
         d1 = pruefe_recall(bericht, erwartung)
         d2 = pruefe_koeder(bericht, erwartung)
         d3 = [f"Schema: {f}" for f in bericht_schema.pruefe_schema(bericht)] + pruefe_status(bericht)
-        d5 = pruefe_netz(stream, bericht, muster)
+        d5 = pruefe_netz(stream, bericht, muster, letzte)
     anzahl = zaehle_subagenten(stream)
     d6 = [f"{anzahl} Subagenten-Starts (höchstens {MAX_SUBAGENTEN})"] if anzahl > MAX_SUBAGENTEN else []
     if not stream:
