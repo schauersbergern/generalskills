@@ -6,7 +6,7 @@ argument-hint: <Frage oder Spec-Abschnitt>
 
 # Architektur-Rat (Forschung und Entwicklung)
 
-> **Status F&E, Stand 2026-11-09.** Dieser Skill ist in keinen Workflow eingebunden und wird nur auf ausdrücklichen Wunsch des Users genutzt. Im ersten Test hat er die Entscheidung nicht verbessert (siehe „Stand der Belege“). Er bleibt für weitere Versuche erhalten. Testbericht und Testmaterial: `~/Projects/tools/agentic_engineering/werkzeuge/2026-11-09-architektur-rat-test.md`.
+> **Status F&E, Stand 2026-11-10.** Dieser Skill ist in keinen Workflow eingebunden und wird nur auf ausdrücklichen Wunsch des Users genutzt. Im ersten Test hat er die Entscheidung nicht verbessert (siehe „Stand der Belege“). Er bleibt für weitere Versuche erhalten. Testbericht und Testmaterial: `~/Projects/tools/agentic_engineering/werkzeuge/2026-11-09-architektur-rat-test.md`.
 
 **Kern:** Zwei frische Subagenten bewerten dieselbe offene Entscheidung unabhängig: **Pragmatiker** und **Risiko**. Die Hauptsession entscheidet und dokumentiert beide Voten. Der Rat ist keine Abstimmung und kein Ersatz für ein Spec-Review.
 
