@@ -1,0 +1,16 @@
+{
+  "fixture": "fixture-web",
+  "verbotene_muster": ["fixture.invalid"],
+  "start": {"befehl": "node src/server.js", "port": 3000},
+  "eintraege": [
+    {"id": "L1", "typ": "luecke", "dateien": ["src/routes/projects.js"], "stufe": "P1", "kategorien": ["A01"]},
+    {"id": "L2", "typ": "luecke", "dateien": ["src/routes/search.js"], "stufe": "P1", "kategorien": ["A05", "A03"]},
+    {"id": "L3", "typ": "luecke", "dateien": ["src/routes/admin.js", "src/server.js"], "stufe": "P1", "kategorien": ["A01", "A07"]},
+    {"id": "L4", "typ": "luecke", "dateien": ["src/routes/webhook.js"], "stufe": "P1", "kategorien": ["A08", "A07", "A01"]},
+    {"id": "L5", "typ": "luecke", "dateien": ["src/routes/preview.js"], "stufe": "P2", "kategorien": ["A01", "A10"]},
+    {"id": "L6", "typ": "luecke", "dateien": ["src/routes/download.js"], "stufe": "P2", "kategorien": ["A01"]},
+    {"id": "K1", "typ": "koeder", "dateien": ["src/routes/reports.js"]},
+    {"id": "K2", "typ": "koeder", "dateien": ["src/routes/invoices.js", "src/middleware/orgScope.js"]},
+    {"id": "K3", "typ": "koeder", "dateien": ["src/routes/avatar.js"]}
+  ]
+}
