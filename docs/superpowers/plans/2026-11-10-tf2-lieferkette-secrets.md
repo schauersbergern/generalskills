@@ -177,3 +177,8 @@ Task 4 → 1 → 2 → 3 → 5 → 6 → 7 (Schema zuerst, weil die Entwürfe au
 - K-h: In `bauen` kommt die Marker-Prüfung **nach** `_daemon_pruefen`.
 - K-i: TF2-D5 → `test_auswertung_fixture_web_ohne_tf1_d1`; TF2-D6 → `test_auswertung_regression_nur_tf1`.
 - K-j: Kurze git-Aufrufe über `gitkopie.git()` (`subprocess.run` mit Timeout, beendet nur das eigene direkte Kind) sind erlaubt; der Spiegel-Klon und die Werkzeuge (gitleaks, osv-scanner) laufen über eigenes `Popen(start_new_session=True)` und beenden bei Timeout nur diese eigene Gruppe. Keine anderen Signale.
+
+## Nachtrag nach Task-3-Review (Vorrang für Task 5)
+
+- `install-skripte-offen`: Schutzmaßnahmen gelten **je Lockfile-Typ** — npm-Lockfile: `.npmrc` `ignore-scripts=true` oder alle npm-Installationszeilen mit `--ignore-scripts`; pnpm-Lockfile: `.npmrc` `ignore-scripts=true`, `onlyBuiltDependencies`/`neverBuiltDependencies`, `packageManager: pnpm@>=10` oder alle pnpm-Installationszeilen mit `--ignore-scripts`. yarn-Lockfiles tragen kein Install-Skript-Merkmal und werden nicht geprüft; yarn berry `enableScripts: false` ist deshalb **keine** Schutzmaßnahme mehr (abweichend von Spec Abschnitt 3 und Task 3 oben). SKILL.md/references (Task 5) nennen `enableScripts` nicht als Schutz.
+- Bekannte Erkennungsgrenzen (für references, Task 5): `su … -c`, `gosu`, `su-exec`, `runuser`, `busybox sh -c`, `/usr/bin/env bash -c`, `corepack pnpm install`, Befehlssubstitution in Anführungszeichen/Backticks, `sh -c` tiefer als 3 Ebenen.

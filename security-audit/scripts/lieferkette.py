@@ -1238,7 +1238,7 @@ class _Zeit(Exception):
 class _Sammler:
     """Sammelt Entwürfe und Hinweise (beide begrenzt). Entwürfe bleiben auch erhalten, wenn das Budget abläuft. Entwürfe, die
     das Befund-Schema ablehnt (feindliche Pfade), werden verworfen und gezählt. Bei mehr als `MAX_ENTWUERFE` Entwürfen bleiben
-    die mit der niedrigsten Stufe (P2 vor P3), bei gleicher Stufe die zuerst gefundenen."""
+    die mit der höchsten Schwere (P2 vor P3), bei gleicher Stufe die zuerst gefundenen."""
 
     def __init__(self) -> None:
         self.entwuerfe: list[dict] = []
@@ -1250,6 +1250,7 @@ class _Sammler:
         self._nummer: list[int] = []           # Fundnummer je Entwurf in `entwuerfe`
         self._je_stufe: Counter = Counter()
         self._gesehen: set[str] = set()
+        self._schema_ok: dict[str, bool] = {}
 
     def hinweis(self, text: str) -> None:
         if text in self._gesehen:
@@ -1261,7 +1262,12 @@ class _Sammler:
             self.zu_viele_hinweise += 1
 
     def entwurf(self, e: dict) -> None:
-        if bericht._befund_fehler({**e, "id": "S-1"}, "entwurf"):
+        # Gültigkeit hängt nicht an `zeile`/`code_pfad` (Zeile ist eine positive Zahl); Prüfung je Rest einmal (sonst
+        # Sekunden je großer Kundendatei).
+        schluessel = json.dumps({k: v for k, v in e.items() if k not in ("zeile", "code_pfad")}, sort_keys=True)
+        if schluessel not in self._schema_ok:
+            self._schema_ok[schluessel] = not bericht._befund_fehler({**e, "id": "S-1"}, "entwurf")
+        if not self._schema_ok[schluessel]:
             self.ungueltig += 1
             return
         self.gefunden += 1
@@ -1282,7 +1288,7 @@ class _Sammler:
         self.entwuerfe.sort(key=lambda e: (KLASSEN_REIHENFOLGE[e["klasse"]], e["datei"], e["zeile"]))
         h = list(self.hinweise)
         if self.gefunden > len(self.entwuerfe):
-            h.append(f"{self.gefunden} Entwürfe gefunden, nur {MAX_ENTWUERFE} ausgegeben (niedrigste Stufe zuerst, dann "
+            h.append(f"{self.gefunden} Entwürfe gefunden, nur {MAX_ENTWUERFE} ausgegeben (P2 vor P3, dann "
                      "Fundreihenfolge)")
         if self.ungueltig:
             h.append(f"{self.ungueltig} Entwürfe mit ungültigem Pfad ausgelassen")

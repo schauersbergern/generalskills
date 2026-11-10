@@ -320,6 +320,8 @@ POSITIV = [
     ("RUN pnpm install --no-frozen-lockfile", "`pnpm install`"),
     # Review I4: sh -c / bash -c auch mit zusammengesetzten Befehlen, Exec-Form
     ('RUN sh -c "cd app && npm install"', "`npm install`"), ("RUN bash -c 'set -e; npm install'", "`npm install`"),
+    ('RUN bash -o pipefail -c "npm install"', "`npm install`"),
+    ('RUN ["/bin/bash", "-o", "pipefail", "-c", "npm install"]', "`npm install`"),
     ('RUN ["/bin/sh","-c","npm install"]', "`npm install`"), ('RUN ["/bin/sh", "-c", "cd a && yarn"]', "nacktes `yarn`"),
     ("RUN /bin/bash -lc 'cd x && pnpm install'", "`pnpm install`"), ("RUN sh -c \"sh -c 'npm install'\"", "`npm install`"),
     ("RUN echo ok && sh -c 'npm install'", "`npm install`"),
@@ -1079,6 +1081,28 @@ def test_minor_kappung_gleiche_stufe_behaelt_die_zuerst_gefundenen(monkeypatch):
     for datei in ("a", "b", "c", "d"):
         s.entwurf(_roh_entwurf(datei))
     assert sorted(e["datei"] for e in s.entwuerfe) == ["a", "b"]
+
+
+def test_kappung_verdraengt_den_zuletzt_gefundenen_der_schlechtesten_stufe(monkeypatch):
+    monkeypatch.setattr(lieferkette, "MAX_ENTWUERFE", 3)
+    s = lieferkette._Sammler()
+    for datei, stufe in [("p3a", "P3"), ("p3b", "P3"), ("p3c", "P3"), ("p2a", "P2")]:
+        s.entwurf(_roh_entwurf(datei, stufe))
+    assert sorted(e["datei"] for e in s.entwuerfe) == ["p2a", "p3a", "p3b"]
+    assert any("P2 vor P3, dann Fundreihenfolge" in h for h in s.abschluss())
+
+
+def test_schemapruefung_einmal_je_datei(monkeypatch):
+    aufrufe = []
+    echt = lieferkette.bericht._befund_fehler
+    monkeypatch.setattr(lieferkette.bericht, "_befund_fehler", lambda b, w: aufrufe.append(b["datei"]) or echt(b, w))
+    s = lieferkette._Sammler()
+    for zeile in range(1, 50):
+        s.entwurf(lieferkette._entwurf("installation-ohne-lockfile-treue", "P2", "Dockerfile", zeile, "T", "B", "S", "E"))
+    s.entwurf(_roh_entwurf("a```b/Dockerfile"))
+    s.entwurf(_roh_entwurf("a```b/Dockerfile"))
+    assert aufrufe == ["Dockerfile", "a```b/Dockerfile"]
+    assert len(s.entwuerfe) == 49 and s.ungueltig == 2
 
 
 def test_i4_verschachtelte_shell_aufrufe_nur_begrenzt_tief(umg):
