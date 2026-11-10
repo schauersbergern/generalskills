@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """Eval-Lauf des Skills security-audit: legt ein Temp-Repo mit der Test-App an, kopiert den Skill hinein, startet
-`claude -p` mit eng gefassten Rechten und wertet das Ergebnis über `auswertung.auswerten` aus (TF1-D1 bis TF1-D7).
+`claude -p` mit eng gefassten Rechten und wertet das Ergebnis über `auswertung.auswerten` aus (TF1-D1 bis TF1-D7, je nach
+Erwartung TF2-D1 bis TF2-D4).
 
-    python3 security-audit/evals/run_eval.py --fixture fixture-web [--ohne LISTE] [--ohne-lockfile]
+    python3 security-audit/evals/run_eval.py --fixture fixture-web [--erwartung DATEI] [--ohne LISTE] [--ohne-lockfile]
         [--timeout 5400] [--behalten] [--prompt-art slash|text]
+
+`--erwartung` wählt die Erwartung (Standard `expected/<fixture>.json`); ihr Feld `fixture` muss zur Test-App passen.
+Mit `secret: true` in der Erwartung committet der Lauf vor dem Start ein Fake-Secret (`config/keys.js`) und löscht es
+im nächsten Commit; der Wert existiert nur im Speicher, die Auswertung bekommt nur `sha256`, Commit und Länge.
 
 Ein Lauf kostet echte Modell-Token. Exit: 0 alles erfüllt, 1 DoD verfehlt (auch Timeout oder Exit ≠ 0 von claude),
 2 Aufruf ungültig, 5 Docker nicht leer oder nicht lesbar, 6 Smoke-Test von `claude -p` gescheitert, 7 ein anderer
@@ -17,11 +22,14 @@ from __future__ import annotations
 import argparse
 import fcntl
 import fnmatch
+import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
+import string
 import subprocess
 import sys
 import tempfile
@@ -202,10 +210,25 @@ def _skill_kopieren(quelle: str, ziel: str) -> None:
         f.write(text.replace(kopf, neu, 1))
 
 
+def _tmpl_umbenennen(repo: str, ohne_lockfile: bool) -> None:
+    """Jede Datei `<name>.tmpl` der Test-App heißt im Temp-Repo `<name>` (verwundbare Lockfiles und Manifeste liegen im
+    öffentlichen Repo nur als `.tmpl`). Mit `ohne_lockfile` wird jedes Lockfile (`package-lock.json.tmpl`) entfernt statt
+    umbenannt. Symlinks werden nicht verfolgt."""
+    for ordner, ordner_namen, dateien in os.walk(repo):
+        for name in dateien:
+            if not name.endswith(".tmpl") or name == ".tmpl":
+                continue
+            pfad = os.path.join(ordner, name)
+            if ohne_lockfile and name == "package-lock.json.tmpl":
+                os.remove(pfad)
+            else:
+                os.rename(pfad, os.path.join(ordner, name[:-len(".tmpl")]))
+
+
 def temp_repo_anlegen(fixture: str, skill_quelle: str, ohne_lockfile: bool) -> tuple[str, str]:
     """Legt `<temp>/<name>/` an (Temp-Wurzel und Repo heißen gleich, `eval-security-audit-…`, beide realpath):
-    Test-App aus `<skill_quelle>/evals/<fixture>/` (`package-lock.json.tmpl` → `package-lock.json`, mit
-    `ohne_lockfile` ohne Lockfile), git-Repo mit einem Commit, Skill ohne `evals/`, `test_*.py`, Caches nach
+    Test-App aus `<skill_quelle>/evals/<fixture>/` (alle `*.tmpl` verlieren die Endung, mit `ohne_lockfile` entfällt
+    `package-lock.json.tmpl`), git-Repo mit einem Commit, Skill ohne `evals/`, `test_*.py`, Caches nach
     `.claude/skills/security-audit-eval/` (Frontmatter `name: security-audit-eval`), `.claude/` in
     `.git/info/exclude`. Gibt (Temp-Wurzel, Repo-Pfad) zurück."""
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", fixture):
@@ -217,12 +240,7 @@ def temp_repo_anlegen(fixture: str, skill_quelle: str, ohne_lockfile: bool) -> t
     repo = os.path.join(wurzel, os.path.basename(wurzel))
     try:
         shutil.copytree(quelle, repo, symlinks=True)
-        tmpl = os.path.join(repo, "package-lock.json.tmpl")
-        if os.path.exists(tmpl):
-            if ohne_lockfile:
-                os.remove(tmpl)
-            else:
-                os.rename(tmpl, os.path.join(repo, "package-lock.json"))
+        _tmpl_umbenennen(repo, ohne_lockfile)
         _skill_kopieren(skill_quelle, os.path.join(repo, ".claude", "skills", SKILL_NAME))
         git = gitkopie.git
         git(repo, "-c", "init.defaultBranch=main", "init", "-q")
@@ -235,6 +253,85 @@ def temp_repo_anlegen(fixture: str, skill_quelle: str, ohne_lockfile: bool) -> t
         shutil.rmtree(wurzel, ignore_errors=True)
         raise
     return wurzel, repo
+
+
+# ------------------------------------------------------------------------------------ Laufzeit-Secret
+
+SECRET_LAENGE = 32
+SECRET_ALPHABET = string.ascii_letters + string.digits         # alphanumerisch: Hex-Werte liegen zu oft unter der gitleaks-Entropie
+SECRET_DATEI = "config/keys.js"
+GIT_KENNUNG = ("-c", "user.name=eval", "-c", "user.email=eval@localhost", "-c", "commit.gpgsign=false")
+
+
+def secret_einbauen(repo: str) -> tuple[str, dict]:
+    """Fake-Secret in die Historie des Temp-Repos: `config/keys.js` mit `const apiKey = "<32 Zeichen [A-Za-z0-9]>";`
+    committen, danach löschen und erneut committen (zwei Commits). Gibt (Wert, `secret_info`) zurück; `secret_info` ist
+    `{"sha256": …, "commit": <voller SHA des Einbau-Commits>, "laenge": 32}`. Der Wert wird nirgends geschrieben außer
+    in diese Datei und damit in die Git-Historie des Temp-Repos; der Aufrufer hält ihn nur im Speicher."""
+    wert = "".join(secrets.choice(SECRET_ALPHABET) for _ in range(SECRET_LAENGE))
+    pfad = os.path.join(repo, *SECRET_DATEI.split("/"))
+    os.makedirs(os.path.dirname(pfad), exist_ok=True)
+    with open(pfad, "w", encoding="utf-8") as f:
+        f.write(f'const apiKey = "{wert}";\n')
+    git = gitkopie.git
+    git(repo, "-c", "core.excludesFile=/dev/null", "add", "-A")
+    git(repo, *GIT_KENNUNG, "commit", "-q", "-m", "Konfiguration ergänzen")
+    commit = git(repo, "rev-parse", "HEAD").stdout.decode("ascii").strip()
+    os.remove(pfad)
+    try:
+        os.rmdir(os.path.dirname(pfad))
+    except OSError:
+        pass
+    git(repo, "-c", "core.excludesFile=/dev/null", "add", "-A")
+    git(repo, *GIT_KENNUNG, "commit", "-q", "-m", "Konfiguration bereinigen")
+    return wert, {"sha256": hashlib.sha256(wert.encode("ascii")).hexdigest(), "commit": commit, "laenge": SECRET_LAENGE}
+
+
+def _text_lesen(pfad: str) -> str | None:
+    """Datei als Text (latin-1: jedes Byte bleibt ein Zeichen, ASCII-Läufe bleiben erhalten); None, wenn nicht lesbar."""
+    try:
+        with open(pfad, "rb") as f:
+            return f.read().decode("latin-1")
+    except OSError:
+        return None
+
+
+def _dateien_unter(wurzel: str, name: str, quellen: dict[str, str | None]) -> None:
+    """Alle regulären Dateien unter `wurzel` (keine Symlinks, `.git` übersprungen) mit dem Namen `<name>/<relativ>`."""
+    for ordner, ordner_namen, dateien in os.walk(wurzel):
+        ordner_namen[:] = [n for n in ordner_namen if n != ".git" and not os.path.islink(os.path.join(ordner, n))]
+        for n in dateien:
+            pfad = os.path.join(ordner, n)
+            if not os.path.islink(pfad):
+                quellen[f"{name}/{os.path.relpath(pfad, wurzel)}"] = _text_lesen(pfad)
+
+
+def arbeitskopien_vorher(temp: str) -> set[str]:
+    """Namen der Zustandsordner `security-audit-*` im Temp-Ordner vor dem Lauf (fremde Läufe zählen nicht mit)."""
+    try:
+        return {n for n in os.listdir(temp) if n.startswith(PRAEFIX)}
+    except OSError:
+        return set()
+
+
+def geheim_quellen_lesen(stream_pfad: str, stderr_pfad: str, ausgabe: str, temp: str,
+                         vorher: set[str]) -> dict[str, str | None]:
+    """Alles, worin der Secret-Wert nicht stehen darf, als Text für `auswerten(geheim_quellen=…)`: Stream-Datei, stderr
+    von claude, alle Dateien im Ausgabeordner (Bericht `.md`/`.json`, Anfragen, Statistik) und die Arbeitskopien
+    `<temp>/security-audit-*/quelle`, die der Lauf angelegt hat (`poc.py aufraeumen` löscht den Zustandsordner samt
+    Arbeitskopie; nach einem sauberen Lauf gibt es sie hier nicht mehr). Nicht lesbare Dateien stehen mit dem Wert `None`
+    drin (die Auswertung meldet das). Der Ausgabeordner liegt im Temp-Ordner des Laufs, nicht in `temp`."""
+    quellen: dict[str, str | None] = {"stream": _text_lesen(stream_pfad), "claude-stderr": _text_lesen(stderr_pfad)}
+    _dateien_unter(ausgabe, "ausgabe", quellen)
+    try:
+        namen = sorted(n for n in os.listdir(temp) if n.startswith(PRAEFIX) and n not in vorher)
+    except OSError:
+        namen = []
+    for n in namen:
+        quelle = os.path.join(temp, n, "quelle")
+        if os.path.isdir(quelle) and not os.path.islink(quelle):
+            _dateien_unter(quelle, f"arbeitskopie/{n}", quellen)
+    return quellen
 
 
 # ------------------------------------------------------------------------------------ Docker
@@ -488,6 +585,8 @@ def _bericht_lesen(ordner: str) -> tuple[dict | None, str | None]:
 def _argumente(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="run_eval.py", description="Eval-Lauf des Skills security-audit (kostet Token).")
     p.add_argument("--fixture", required=True, help="Name der Test-App unter evals/, z. B. fixture-web")
+    p.add_argument("--erwartung", default=None,
+                   help="Erwartung (JSON), Standard evals/expected/<fixture>.json; relativ zum Aufruf-Ordner oder zu evals/")
     p.add_argument("--ohne", default="", help="Kommagetrennte Liste, geht als SECURITY_AUDIT_OHNE an den Skill")
     p.add_argument("--ohne-lockfile", action="store_true", help="Test-App ohne package-lock.json anlegen")
     p.add_argument("--timeout", type=float, default=5400, help="Zeitlimit des Laufs in Sekunden (Standard 5400)")
@@ -575,12 +674,22 @@ def _main(argv: list[str]) -> int:
         os.close(fd)
 
 
+def _erwartung_pfad(a: argparse.Namespace) -> str:
+    """Pfad der Erwartung: `--erwartung` (existiert er relativ zum Aufruf-Ordner nicht, relativ zu `evals/`), sonst
+    `evals/expected/<fixture>.json`."""
+    if a.erwartung is None:
+        return os.path.join(HIER, "expected", f"{a.fixture}.json")
+    if os.path.isfile(a.erwartung):
+        return os.path.abspath(a.erwartung)
+    return os.path.join(HIER, a.erwartung)
+
+
 def _lauf_main(a: argparse.Namespace) -> int:
-    erwartung_pfad = os.path.join(HIER, "expected", f"{a.fixture}.json")
+    erwartung_pfad = _erwartung_pfad(a)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", a.fixture) or not os.path.isfile(erwartung_pfad) \
             or not os.path.isdir(os.path.join(HIER, a.fixture)):
-        print(f"Fixture {a.fixture!r} unbekannt (erwartet evals/{a.fixture}/ und evals/expected/{a.fixture}.json)",
-              file=sys.stderr)
+        print(f"Fixture {a.fixture!r} unbekannt (erwartet evals/{a.fixture}/ und die Erwartung "
+              f"{a.erwartung or f'evals/expected/{a.fixture}.json'})", file=sys.stderr)
         return 2
     try:
         with open(erwartung_pfad, encoding="utf-8") as f:
@@ -588,6 +697,11 @@ def _lauf_main(a: argparse.Namespace) -> int:
         agenten = agents_json(_opus_md_lesen())
     except (OSError, ValueError) as e:
         print(f"Eingaben nicht lesbar: {e}", file=sys.stderr)
+        return 2
+    if not isinstance(erwartung, dict) or erwartung.get("fixture") != a.fixture:
+        gehoert = erwartung.get("fixture") if isinstance(erwartung, dict) else None
+        print(f"Erwartung {erwartung_pfad} gehört zur Test-App {gehoert!r}, nicht zu {a.fixture!r}: "
+              f"--fixture und --erwartung passen nicht zusammen", file=sys.stderr)
         return 2
     ohne = [x.strip() for x in a.ohne.split(",") if x.strip()]
 
@@ -607,6 +721,15 @@ def _lauf_main(a: argparse.Namespace) -> int:
     # 2. Temp-Repo
     _abbruch_pruefen()
     wurzel, repo = temp_repo_anlegen(a.fixture, SKILL_DIR, a.ohne_lockfile)
+    secret_wert, secret_info = None, None
+    if erwartung.get("secret"):
+        try:
+            secret_wert, secret_info = secret_einbauen(repo)
+        except BaseException:
+            shutil.rmtree(wurzel, ignore_errors=True)
+            raise
+    temp = os.path.realpath(tempfile.gettempdir())
+    kopien_vorher = arbeitskopien_vorher(temp)
     skill = os.path.realpath(os.path.join(repo, ".claude", "skills", SKILL_NAME))
     ausgabe = os.path.join(wurzel, "ausgabe")
     os.makedirs(ausgabe)
@@ -663,17 +786,24 @@ def _lauf_main(a: argparse.Namespace) -> int:
         ereignisse, uebersprungen, nur_letzte, letzte = auswertung.lade_stream_info(stream_pfad)
     except OSError:
         ereignisse, uebersprungen, nur_letzte, letzte = [], 0, False, ""
+    quellen = geheim_quellen_lesen(stream_pfad, stderr_pfad, ausgabe, temp, kopien_vorher) if secret_info else None
     ergebnis = auswertung.auswerten(
         bericht, erwartung, ereignisse, porcelain, dateien,
         sorted(reviews_nachher - reviews_vorher), sorted(stats_nachher - stats_vorher), listen,
-        stream_uebersprungen=uebersprungen, stream_nur_letzte=nur_letzte, stream_letzte_zeile=letzte)
+        stream_uebersprungen=uebersprungen, stream_nur_letzte=nur_letzte, stream_letzte_zeile=letzte,
+        secret_info=secret_info, geheim_quellen=quellen)
     lauf_ok = lauf["rc"] == 0 and not lauf["timeout"]
-    ergebnis["lauf"] = {"fixture": a.fixture, "temp": wurzel, "repo": repo, "ausgabe": ausgabe_ordner,
+    ergebnis["lauf"] = {"fixture": a.fixture, "erwartung": erwartung_pfad, "temp": wurzel, "repo": repo, "ausgabe": ausgabe_ordner,
                         "bericht": bericht_pfad, "prompt": PROMPTS[a.prompt_art], "ohne": ohne,
                         "subagenten": auswertung.zaehle_subagenten(ereignisse),
                         "stream_zeilen_uebersprungen": uebersprungen, "ok": lauf_ok, **lauf}
+    if secret_info:
+        ergebnis["lauf"]["secret"] = dict(secret_info)              # sha256, Commit, Länge; nie der Wert
     ergebnis["ok"] = bool(ergebnis["ok"] and lauf_ok)
     text = json.dumps(ergebnis, ensure_ascii=False, indent=2)
+    if secret_wert and secret_wert in text:                         # Gürtel und Hosenträger: der Wert gehört nie in die Ausgabe
+        text = text.replace(secret_wert, "*" * len(secret_wert))
+        ergebnis["ok"] = False
     try:
         with open(os.path.join(wurzel, "ergebnis.json"), "w", encoding="utf-8") as f:
             f.write(text + "\n")

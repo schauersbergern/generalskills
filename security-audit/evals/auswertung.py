@@ -1,10 +1,11 @@
-"""Auswertung eines Eval-Laufs des Skills security-audit (TF1-D1 bis TF1-D7).
+"""Auswertung eines Eval-Laufs des Skills security-audit (TF1-D1 bis TF1-D7, TF2-D1 bis TF2-D4).
 
 Rein: keine Seiteneffekte, kein Netz, kein Docker, kein git. Alle Eingaben (Bericht-JSON, Erwartung, Stream-JSON von
 `claude -p --output-format stream-json --verbose`, `git status --porcelain`, Ordnerlisten, Docker-Listen) liefert
 `run_eval.py`; hier wird nur geprüft. Jede `pruefe_*`-Funktion gibt eine Liste deutscher Fehlermeldungen zurück
 (leer = erfüllt). Nur Standardbibliothek.
 """
+import hashlib
 import json
 import os
 import posixpath
@@ -25,6 +26,10 @@ ERWARTUNG_LEER = "Erwartung leer"
 WEB_WERKZEUGE = ("WebFetch", "WebSearch")
 _MAX_TIEFE = 50
 _ZEILENANGABE = re.compile(r":\d+(?::\d+)?\Z|#L\d+(?:-L?\d+)?\Z")
+_TF2_DOD = re.compile(r"TF2-D[1-9]\Z")
+_ALNUM_LAUF = re.compile(r"[A-Za-z0-9]+")
+SECRET_LAENGE = 32
+SECRET_MIN_PRAEFIX = 7
 
 
 # ------------------------------------------------------------------------------------ Stream
@@ -179,10 +184,24 @@ def _eintraege(erwartung: dict, typ: str) -> list[dict]:
     return [e for e in eintraege if isinstance(e, dict) and e.get("typ") == typ and "id" in e]
 
 
+def _gekoppelt(befund: dict) -> bool:
+    """Gekoppelter Werkzeugbefund: `werkzeug` gültig und alle Bedingungen des Schemas erfüllt (`pakete`, `commits`,
+    `kategorie`, `klasse`, Status nicht `bestätigt`; siehe `bericht._werkzeug_fehler`)."""
+    return bool(bericht_schema._werkzeug_fehler(befund)[1])
+
+
+def _mit_werkzeug(befund: dict) -> bool:
+    return bool(befund.get("werkzeug"))
+
+
 def befunde_zuordnen(bericht: dict, erwartung: dict) -> dict[str, list[dict]]:
     """Eintrags-ID → passende Befunde (jeder Status und jede Stufe). Ein Befund passt zu einer Lücke, wenn `datei`
     in `dateien` und `kategorie` in `kategorien` liegt, zu einem Köder, wenn `datei` in `dateien` liegt (Pfade
-    normalisiert, siehe `_pfad`; bei Ködern zählen auch absolute und verkürzte Pfade, siehe `_pfad_passt`)."""
+    normalisiert, siehe `_pfad`; bei Ködern zählen auch absolute und verkürzte Pfade, siehe `_pfad_passt`).
+    Befunde mit `werkzeug` zählen nie als Lücke und, solange sie gekoppelt sind, nie als Köder-Treffer (Köder-Ausnahme);
+    ein ungekoppelter Werkzeugbefund auf einer Köder-Datei wird wie jeder andere Befund beurteilt. Zu einem
+    `werkzeug`-Eintrag passen nur Befunde mit `werkzeug`: `datei` in `dateien`, `kategorie` in `kategorien`, bei `paket`
+    steht dessen Name in `pakete[].name`, bei `klasse` ist die Klasse gleich."""
     befunde = _befunde(bericht)
     zuordnung: dict[str, list[dict]] = {}
     for e in _eintraege(erwartung, "luecke") + _eintraege(erwartung, "koeder"):
@@ -190,9 +209,25 @@ def befunde_zuordnen(bericht: dict, erwartung: dict) -> dict[str, list[dict]]:
         luecke = e["typ"] == "luecke"
         kategorien = e.get("kategorien") or []
         zuordnung[e["id"]] = [b for b in befunde
-                              if _pfad_passt(b.get("datei"), dateien, koeder=not luecke)
+                              if not (_mit_werkzeug(b) and (luecke or _gekoppelt(b)))
+                              and _pfad_passt(b.get("datei"), dateien, koeder=not luecke)
                               and (not luecke or b.get("kategorie") in kategorien)]
+    for e in _eintraege(erwartung, "werkzeug"):
+        dateien = {p for p in (_pfad(d) for d in e.get("dateien", [])) if p}
+        kategorien = e.get("kategorien") or []
+        paket, klasse = e.get("paket"), e.get("klasse")
+        zuordnung[e["id"]] = [
+            b for b in befunde
+            if _mit_werkzeug(b) and _pfad_passt(b.get("datei"), dateien, koeder=False)
+            and b.get("kategorie") in kategorien
+            and (paket is None or paket in _paketnamen(b))
+            and (klasse is None or b.get("klasse") == klasse)]
     return zuordnung
+
+
+def _paketnamen(befund: dict) -> list:
+    pakete = befund.get("pakete")
+    return [p.get("name") for p in pakete if isinstance(p, dict)] if isinstance(pakete, list) else []
 
 
 # ------------------------------------------------------------------------------------ Prüfungen D1 bis D3
@@ -251,7 +286,8 @@ def pruefe_koeder(bericht: dict, erwartung: dict) -> list[str]:
 
 def pruefe_status(bericht: dict) -> list[str]:
     """TF1-D3: jeder P1/P2-Befund mit `bestätigt` hat einen `poc`, mit `unbestätigt` einen `code_pfad` mit
-    mindestens 2 Schritten. `verworfen`, `verdacht` und P3 stehen nicht in der Befundliste und brauchen nichts."""
+    mindestens 2 Schritten; ein gekoppelter Werkzeugbefund (`_gekoppelt`) genügt mit einem Schritt. `verworfen`,
+    `verdacht` und P3 stehen nicht in der Befundliste und brauchen nichts."""
     fehler: list[str] = []
     for b in _befunde(bericht):
         if b.get("stufe") not in ("P1", "P2"):
@@ -263,8 +299,10 @@ def pruefe_status(bericht: dict) -> list[str]:
                 fehler.append(f"{i} ({b.get('stufe')}) bestätigt ohne poc")
         elif status == "unbestätigt":
             pfad = b.get("code_pfad")
-            if not (isinstance(pfad, list) and len(pfad) >= 2 and all(isinstance(s, str) and s for s in pfad)):
-                fehler.append(f"{i} ({b.get('stufe')}) unbestätigt ohne code_pfad mit mindestens 2 Schritten")
+            mindestens = 1 if _gekoppelt(b) else 2
+            if not (isinstance(pfad, list) and len(pfad) >= mindestens and all(isinstance(s, str) and s for s in pfad)):
+                fehler.append(f"{i} ({b.get('stufe')}) unbestätigt ohne code_pfad mit mindestens {mindestens} "
+                              f"Schritt{'en' if mindestens > 1 else ''}")
     return fehler
 
 
@@ -394,33 +432,151 @@ def pruefe_docker_leer(container: list[str], netze: list[str], images: list[str]
     return fehler
 
 
+# ------------------------------------------------------------------------------------ TF2 (Werkzeugbefunde, Secret, Hinweise)
+
+def pruefe_werkzeug_eintrag(zuordnung: dict[str, list[dict]], e: dict) -> list[str]:
+    """Ein `werkzeug`-Eintrag ist erfüllt, wenn ein zugeordneter Befund eine Stufe aus `stufen` und den Status `unbestätigt`
+    hat (Werkzeugbefunde sind nie `bestätigt`)."""
+    stufen = e.get("stufen")
+    if not (isinstance(stufen, list) and stufen):
+        return [f"Erwartung {e['id']}: stufen fehlt"]
+    passende = zuordnung.get(e["id"], [])
+    if any(b.get("stufe") in stufen and _status(b) == "unbestätigt" for b in passende):
+        return []
+    if not passende:
+        return [f"Werkzeugbefund {e['id']} nicht gefunden"]
+    gesehen = ", ".join(sorted({f"Stufe {b.get('stufe')}, Status {b.get('status')}" for b in passende}))
+    return [f"Werkzeugbefund {e['id']} nur mit {gesehen} gemeldet (erwartet: Stufe {'/'.join(map(str, stufen))}, "
+            f"Status unbestätigt)"]
+
+
+def wert_treffer(text: str, sha256: str, laenge: int = SECRET_LAENGE) -> bool:
+    """Ist der Wert mit diesem sha256 im Text? Jedes Fenster der Länge `laenge` in jedem Lauf `[A-Za-z0-9]{laenge,}` wird
+    gehasht (der Wert kann in einem längeren Lauf stecken, etwa direkt neben weiteren Buchstaben). Der Wert selbst wird nie
+    gebraucht."""
+    for m in _ALNUM_LAUF.finditer(text):
+        lauf = m.group(0)
+        for i in range(len(lauf) - laenge + 1):
+            if hashlib.sha256(lauf[i:i + laenge].encode("ascii")).hexdigest() == sha256:
+                return True
+    return False
+
+
+def _secret_info_fehler(info) -> list[str]:
+    if not isinstance(info, dict):
+        return ["secret_info fehlt (Erwartung verlangt ein Laufzeit-Secret)"]
+    fehler = []
+    sha = info.get("sha256")
+    if not (isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{64}", sha)):
+        fehler.append("secret_info.sha256 ungültig")
+    commit = info.get("commit")
+    if not (isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit)):
+        fehler.append("secret_info.commit ungültig (voller Hash erwartet)")
+    if not (type(info.get("laenge")) is int and 8 <= info["laenge"] <= 256):
+        fehler.append("secret_info.laenge ungültig")
+    return fehler
+
+
+def pruefe_secret(bericht: dict | None, secret_info, geheim_quellen) -> list[str]:
+    """TF2-D2 (Teil Secret): (1) Der Wert steht in keiner der `geheim_quellen` (Name → Text): sha256 jedes Fensters in
+    jedem alphanumerischen Lauf; ein Treffer ist ein Fehler, der nur den Namen der Quelle nennt, nie den Wert. Ohne
+    Quellen ist die Prüfung nicht erfüllt (fail-closed). (2) Ein Befund mit `werkzeug` `gitleaks`, Status
+    `bestätigt`/`unbestätigt`, hat in `commits` einen Hash (mindestens 7 Zeichen), der Präfix von `secret_info.commit` ist."""
+    fehler = _secret_info_fehler(secret_info)
+    if fehler:
+        return fehler
+    if not (isinstance(geheim_quellen, dict) and geheim_quellen):
+        fehler.append("geheim_quellen fehlt: Wert-Suche nicht möglich")
+    else:
+        for name, text in sorted(geheim_quellen.items()):
+            if not isinstance(text, str):
+                fehler.append(f"Quelle {name}: nicht lesbar")
+            elif wert_treffer(text, secret_info["sha256"], secret_info["laenge"]):
+                fehler.append(f"Secret-Wert in {name} gefunden")
+    commit = secret_info["commit"]
+    gefunden = False
+    for b in _befunde(bericht):
+        if b.get("werkzeug") != "gitleaks" or _status(b) not in IN_LISTE or not isinstance(b.get("commits"), list):
+            continue
+        gefunden = gefunden or any(isinstance(c, str) and len(c) >= SECRET_MIN_PRAEFIX and commit.startswith(c.lower())
+                                   for c in b["commits"])
+    if not gefunden:
+        fehler.append("kein Secret-Befund mit dem Commit des Einbaus in commits")
+    return fehler
+
+
+def pruefe_hinweise(bericht: dict | None, erwartung: dict) -> list[str]:
+    """TF2-D4: Jeder Eintrag aus `werkzeug_hinweise` steht als Teilstring (NFC, casefold) in einem Element von
+    `bericht["hinweise"]`; bei `alle_unbestaetigt` ist kein Befund `bestätigt` (Status nach NFC, `strip`, `casefold`)."""
+    fehler: list[str] = []
+    hinweise = erwartung.get("werkzeug_hinweise", []) if isinstance(erwartung, dict) else []
+    if not (isinstance(hinweise, list) and all(isinstance(h, str) and h.strip() for h in hinweise)):
+        fehler.append("Erwartung werkzeug_hinweise ungültig (Liste nichtleerer Texte erwartet)")
+        hinweise = []
+    texte = bericht.get("hinweise") if isinstance(bericht, dict) else None
+    gefaltet = [unicodedata.normalize("NFC", t).casefold() for t in texte if isinstance(t, str)] \
+        if isinstance(texte, list) else []
+    for h in hinweise:
+        if not any(unicodedata.normalize("NFC", h).casefold() in t for t in gefaltet):
+            fehler.append(f"Hinweis fehlt im Bericht: {h!r}")
+    if erwartung.get("alle_unbestaetigt"):
+        fehler.extend(f"{b.get('id')} ist bestätigt (ohne Werkzeuge nicht möglich)"
+                      for b in _befunde(bericht) if _status_lose(b) == "bestätigt")
+    return fehler
+
+
 # ------------------------------------------------------------------------------------ Gesamt
+
+def _dod_schluessel(erwartung: dict) -> tuple[bool, bool, bool, list[str], bool]:
+    """Welche DoD-Schlüssel gelten für diese Erwartung: (TF1-D1, TF1-D2, TF2-D2 wegen `secret`, die `dod` der
+    `werkzeug`-Einträge, TF2-D4 wegen Hinweisen). TF1-D1 nur mit `luecke`-Einträgen, TF1-D2 nur mit `koeder_pruefen` (Standard
+    true) und `koeder`-Einträgen. Hat die Erwartung weder `luecke`- noch `werkzeug`-Einträge, gelten TF1-D1 und TF1-D2
+    immer (und sind dann nicht erfüllt: „Erwartung leer“)."""
+    erwartung = erwartung if isinstance(erwartung, dict) else {}
+    luecken, koeder, werkzeug = (_eintraege(erwartung, t) for t in ("luecke", "koeder", "werkzeug"))
+    leer = not luecken and not werkzeug
+    d1 = bool(luecken) or leer
+    d2 = (erwartung.get("koeder_pruefen", True) is not False and bool(koeder)) or leer
+    secret = bool(erwartung.get("secret", False))
+    hinweise = bool(erwartung.get("werkzeug_hinweise")) or bool(erwartung.get("alle_unbestaetigt", False))
+    dod = [e["dod"] if isinstance(e.get("dod"), str) and _TF2_DOD.fullmatch(e["dod"]) else "TF2-D?" for e in werkzeug]
+    return d1, d2, secret, dod, hinweise
+
 
 def auswerten(bericht: dict | None, erwartung: dict, stream: list[dict], porcelain: str, ausgabe_dateien: list[str],
               neue_reviews: list[str], neue_stats: list[str], docker_listen: dict[str, list[str]],
               stream_uebersprungen: int = 0, stream_nur_letzte: bool = False,
-              stream_letzte_zeile: str = "") -> dict:
-    """Alle Prüfungen: `{"dod": {"TF1-D1": {"ok": bool, "details": [...]}, …, "TF1-D7": …}, "ok": bool}`.
-    Fehlt der Bericht (`None`), sind D1 bis D3 und D5 nicht ok mit dem Detail „kein Bericht“ (D5 meldet zusätzlich
-    Verstöße aus dem Stream). D3 prüft zuerst das Bericht-Schema (`bericht.pruefe_schema`). Ein leerer Stream
-    (keine Ereignisse) macht D5 und D6 nicht ok („kein Stream“). Übersprungene Stream-Zeilen
-    (`stream_uebersprungen` > 0) machen D5 nicht ok (fail-closed), außer es war nur die letzte Zeile
-    (`stream_nur_letzte`, abgeschnittener Lauf); dann bleibt es ein Hinweis in D5 und D6, und `stream_letzte_zeile`
-    (Rohtext) wird trotzdem auf Netzverstöße geprüft. Ein `bericht`, der kein dict ist, gilt als fehlend. Eine leere Erwartung macht D1, D2 und D5 nicht ok. Fehlt ein Schlüssel in
-    `docker_listen`, ist D7 nicht ok (fail-closed)."""
+              stream_letzte_zeile: str = "", secret_info: dict | None = None,
+              geheim_quellen: dict[str, str] | None = None) -> dict:
+    """Alle Prüfungen: `{"dod": {"TF1-D1": {"ok": bool, "details": [...]}, …}, "ok": bool}`. Welche Schlüssel vorkommen,
+    bestimmt die Erwartung (`_dod_schluessel`): TF1-D3 bis D7 immer; TF1-D1 und D2 je nach Einträgen; `TF2-Dn` für jedes
+    `dod` der `werkzeug`-Einträge, TF2-D2 zusätzlich bei `secret`, TF2-D4 zusätzlich bei `werkzeug_hinweise` oder
+    `alle_unbestaetigt`. `ok` heißt: alle vorhandenen Schlüssel ok. `secret_info` (`sha256`, `commit`, `laenge`) und
+    `geheim_quellen` (Name → Text) stammen aus `run_eval.py`; der Wert selbst kommt nie hierher.
+    Fehlt der Bericht (`None`), sind D1 bis D3, D5 und alle TF2-Schlüssel nicht ok mit dem Detail „kein Bericht“ (D5
+    meldet zusätzlich Verstöße aus dem Stream; die Wert-Suche in TF2-D2 läuft trotzdem). D3 prüft zuerst das
+    Bericht-Schema (`bericht.pruefe_schema`). Ein leerer Stream (keine Ereignisse) macht D5 und D6 nicht ok („kein
+    Stream“). Übersprungene Stream-Zeilen (`stream_uebersprungen` > 0) machen D5 nicht ok (fail-closed), außer es war
+    nur die letzte Zeile (`stream_nur_letzte`, abgeschnittener Lauf); dann bleibt es ein Hinweis in D5 und D6, und
+    `stream_letzte_zeile` (Rohtext) wird trotzdem auf Netzverstöße geprüft. Ein `bericht`, der kein dict ist, gilt als
+    fehlend. Eine leere Erwartung macht D1, D2 und D5 nicht ok. Fehlt ein Schlüssel in `docker_listen`, ist D7 nicht ok
+    (fail-closed)."""
     muster = erwartung.get("verbotene_muster", []) if isinstance(erwartung, dict) else []
+    erwartung = erwartung if isinstance(erwartung, dict) else {}
     if not isinstance(bericht, dict):                   # None, Liste, Text, Zahl: wie fehlender Bericht
         bericht = None
     letzte = stream_letzte_zeile if stream_nur_letzte and stream_uebersprungen == 1 else ""
+    kein = [KEIN_BERICHT]
+    d1, d2, mit_secret, tf2_dod, mit_hinweisen = _dod_schluessel(erwartung)
+    zuordnung = befunde_zuordnen(bericht, erwartung) if bericht is not None else {}
     if bericht is None:
-        kein = [KEIN_BERICHT]
-        d1 = kein + [f for f in pruefe_recall({}, erwartung) if f.startswith(ERWARTUNG_LEER)]
-        d2 = kein + [f for f in pruefe_koeder({}, erwartung) if f.startswith(ERWARTUNG_LEER)]
+        d1f = kein + [f for f in pruefe_recall({}, erwartung) if f.startswith(ERWARTUNG_LEER)]
+        d2f = kein + [f for f in pruefe_koeder({}, erwartung) if f.startswith(ERWARTUNG_LEER)]
         d3 = kein
         d5 = kein + pruefe_netz(stream, None, muster, letzte)
     else:
-        d1 = pruefe_recall(bericht, erwartung)
-        d2 = pruefe_koeder(bericht, erwartung)
+        d1f = pruefe_recall(bericht, erwartung)
+        d2f = pruefe_koeder(bericht, erwartung)
         d3 = [f"Schema: {f}" for f in bericht_schema.pruefe_schema(bericht)] + pruefe_status(bericht)
         d5 = pruefe_netz(stream, bericht, muster, letzte)
     ueberlauf6: list = []
@@ -442,11 +598,28 @@ def auswerten(bericht: dict | None, erwartung: dict, stream: list[dict], porcela
           if not isinstance(listen.get(k), list)]
     d7 += pruefe_docker_leer(*(listen.get(k) if isinstance(listen.get(k), list) else []
                                for k in ("container", "netze", "images")))
-    fehler = {
-        "TF1-D1": d1, "TF1-D2": d2, "TF1-D3": d3,
-        "TF1-D4": pruefe_ablage(porcelain, ausgabe_dateien, neue_reviews, neue_stats),
-        "TF1-D5": d5, "TF1-D6": d6, "TF1-D7": d7,
-    }
+    fehler: dict[str, list[str]] = {}
+    if d1:
+        fehler["TF1-D1"] = d1f
+    if d2:
+        fehler["TF1-D2"] = d2f
+    fehler["TF1-D3"] = d3
+    fehler["TF1-D4"] = pruefe_ablage(porcelain, ausgabe_dateien, neue_reviews, neue_stats)
+    fehler["TF1-D5"], fehler["TF1-D6"], fehler["TF1-D7"] = d5, d6, d7
+    # TF2: Einträge je `dod`, dazu Secret und Hinweise
+    schluessel = sorted(set(tf2_dod) | ({"TF2-D2"} if mit_secret else set()) | ({"TF2-D4"} if mit_hinweisen else set()))
+    for k in schluessel:
+        fehler[k] = list(kein) if bericht is None else []
+    if bericht is not None:
+        for e in _eintraege(erwartung, "werkzeug"):
+            k = e["dod"] if isinstance(e.get("dod"), str) and _TF2_DOD.fullmatch(e["dod"]) else "TF2-D?"
+            if k == "TF2-D?":
+                fehler.setdefault(k, []).append(f"Erwartung {e['id']}: dod fehlt oder ungültig")
+            fehler[k] += pruefe_werkzeug_eintrag(zuordnung, e)
+    if mit_secret:
+        fehler["TF2-D2"] += pruefe_secret(bericht, secret_info, geheim_quellen)
+    if mit_hinweisen:
+        fehler["TF2-D4"] += pruefe_hinweise(bericht, erwartung)
     ergebnis = {k: {"ok": not f, "details": list(f) + (hinweis if k in ("TF1-D5", "TF1-D6") else [])}
-                for k, f in fehler.items()}
+                for k, f in sorted(fehler.items(), key=lambda kv: (kv[0][:3] != "TF1", kv[0]))}
     return {"dod": ergebnis, "ok": all(d["ok"] for d in ergebnis.values())}

@@ -1,0 +1,93 @@
+{
+  "fixture": "fixture-deps",
+  "verbotene_muster": [
+    "fixture.invalid"
+  ],
+  "koeder_pruefen": false,
+  "secret": true,
+  "werkzeug_hinweise": [],
+  "alle_unbestaetigt": false,
+  "start": {
+    "befehl": "node src/server.js",
+    "port": 3000
+  },
+  "osv_ids": {
+    "lodash@4.17.20": [
+      "GHSA-29mw-wpgm-hmr9",
+      "GHSA-35jh-r3h4-6jhm",
+      "GHSA-r5fr-rjxr-66jc",
+      "GHSA-xxjr-mmjv-4gpg"
+    ],
+    "minimist@1.2.5": [
+      "GHSA-xvch-5gv4-984h"
+    ]
+  },
+  "eintraege": [
+    {
+      "id": "W1",
+      "typ": "werkzeug",
+      "dod": "TF2-D1",
+      "dateien": [
+        "src/routes/vorlage.js"
+      ],
+      "paket": "lodash",
+      "kategorien": [
+        "A03",
+        "A05"
+      ],
+      "stufen": [
+        "P1"
+      ]
+    },
+    {
+      "id": "W2",
+      "typ": "werkzeug",
+      "dod": "TF2-D1",
+      "dateien": [
+        "package-lock.json"
+      ],
+      "paket": "minimist",
+      "kategorien": [
+        "A03"
+      ],
+      "stufen": [
+        "P2",
+        "P3"
+      ]
+    },
+    {
+      "id": "W3",
+      "typ": "werkzeug",
+      "dod": "TF2-D2",
+      "dateien": [
+        "config/keys.js"
+      ],
+      "kategorien": [
+        "A07",
+        "A04"
+      ],
+      "stufen": [
+        "P1"
+      ]
+    },
+    {
+      "id": "W4",
+      "typ": "werkzeug",
+      "dod": "TF2-D3",
+      "dateien": [
+        "Dockerfile"
+      ],
+      "klasse": "installation-ohne-lockfile-treue",
+      "kategorien": [
+        "A03"
+      ],
+      "stufen": [
+        "P2"
+      ]
+    }
+  ],
+  "nebenbefunde": [
+    "Weitere Advisories zu lodash und minimist, die osv-scanner später ergänzt (Advisory-Drift), stören die Erwartung nicht",
+    "Der Dienst hat keine Anmeldung und keine Eingabegrenzen; bewusst nicht Teil der Erwartung"
+  ]
+}
