@@ -549,7 +549,7 @@ def test_git_nicht_startbar_wird_giterror(tmp_path, monkeypatch):
     ("ls-tree", "Kein HEAD lesbar"),
     ("cat-file", "Symlinks und LFS-Pointern nicht möglich"),
     ("ls-files", "Index nicht lesbar"),
-    ("rev-parse", "Objektformat nicht ermittelbar"),
+    ("--show-object-format", "Objektformat nicht ermittelbar"),       # rev-parse --verify (Commit) darf klappen
 ])
 def test_repo_hinweise_git_fehler_werden_hinweise(tmp_path, monkeypatch, scheitert, erwartet):
     repo = repo_mit(tmp_path, {"a.txt": b"a\n", "l": (SYMLINK, b"a.txt")})
@@ -980,3 +980,51 @@ def test_hinweise_arbeitsbaum_zeitbudget_haertung_b1(tmp_path, monkeypatch):
 
 def test_batch_timeout_liegt_unter_dem_bash_limit_haertung_b1():
     assert gitkopie.BATCH_TIMEOUT + 120 + 60 < 600       # ls-tree + Batch + Reste unter den 600 s des Skills
+
+
+# ---------------------------------------------------------------- Härtung TF1-B3 (Zeitpunkt: gepinnter Commit)
+
+def zwei_staende(tmp_path):
+    """Repo mit zwei Commits; Rückgabe (repo, sha1, sha2). Stand 1: a.txt=eins; Stand 2: a.txt=zwei, Symlink, .mcp.json."""
+    repo = repo_mit(tmp_path, {"a.txt": b"eins\n"})
+    sha1 = roh(repo, "rev-parse", "HEAD").decode().strip()
+    bauen(repo, {"a.txt": b"zwei\n", "l": (SYMLINK, b"a.txt"), ".mcp.json": b"{}\n"})
+    sha2 = roh(repo, "rev-parse", "HEAD").decode().strip()
+    return repo, sha1, sha2
+
+
+def test_arbeitskopie_kopiert_den_gepinnten_commit_haertung_b3(tmp_path):
+    repo, sha1, sha2 = zwei_staende(tmp_path)
+    ziel = tmp_path / "ziel"
+    assert gitkopie.arbeitskopie(str(repo), str(ziel), rev=sha1) == []
+    assert (ziel / "a.txt").read_bytes() == b"eins\n" and alle_dateien(ziel) == ["a.txt"]
+    ziel2 = tmp_path / "ziel2"
+    gitkopie.arbeitskopie(str(repo), str(ziel2))
+    assert (ziel2 / "a.txt").read_bytes() == b"zwei\n"                 # Standard bleibt HEAD
+
+
+def test_repo_konfiguration_und_hinweise_nutzen_den_gepinnten_commit_haertung_b3(tmp_path):
+    repo, sha1, sha2 = zwei_staende(tmp_path)
+    assert gitkopie.repo_konfiguration(str(repo), rev=sha1) == []
+    assert gitkopie.repo_konfiguration(str(repo), rev=sha2) == [".mcp.json"]
+    assert not any("Symlink" in h for h in gitkopie.repo_hinweise(str(repo), rev=sha1))
+    assert any("Symlink" in h for h in gitkopie.repo_hinweise(str(repo), rev=sha2))
+
+
+@pytest.mark.parametrize("rev", ["--output=x", "-x", "HEAD~1", "main", "abc", "A" * 40, "", "0" * 40 + "\n", "HEAD^{tree}"])
+def test_ungueltige_revision_wird_abgelehnt_haertung_b3(tmp_path, rev):
+    repo = repo_mit(tmp_path, {"a.txt": b"a\n"})
+    with pytest.raises(ValueError):
+        gitkopie.arbeitskopie(str(repo), str(tmp_path / "ziel"), rev=rev)
+    with pytest.raises(ValueError):
+        gitkopie.repo_konfiguration(str(repo), rev=rev)
+
+
+def test_revision_die_kein_commit_ist_ist_giterror_haertung_b3(tmp_path):
+    repo = repo_mit(tmp_path, {"a.txt": b"a\n"})
+    baum = roh(repo, "rev-parse", "HEAD^{tree}").decode().strip()
+    for rev in (baum, "0" * 40):
+        with pytest.raises(gitkopie.GitFehler):
+            gitkopie.arbeitskopie(str(repo), str(tmp_path / "ziel"), rev=rev)
+    hinweise = gitkopie.repo_hinweise(str(repo), rev="0" * 40)
+    assert any("Kein HEAD lesbar" in h for h in hinweise), hinweise

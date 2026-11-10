@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Sichere git-Zugriffe und Arbeitskopie für den Skill security-audit (nur Standardbibliothek).
 
-Sicherheitsgrenze: Der Stand von HEAD wird so kopiert, dass kein Code aus dem geprüften Repo auf dem
+Sicherheitsgrenze: Der Stand eines Commits (HEAD oder ein gepinnter Hash) wird so kopiert, dass kein Code aus dem geprüften Repo auf dem
 Host läuft und nichts außerhalb des Zielordners geschrieben oder gelesen wird.
 
 - Alle git-Aufrufe laufen über `git()`: Fsmonitor und Hooks aus, geerbte GIT_*-Umgebung entfernt.
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import stat
 import subprocess
 import threading
@@ -145,9 +146,21 @@ class Eintrag(NamedTuple):
     pfad: str
 
 
-def _baum(repo: str) -> list[Eintrag]:
-    """`git ls-tree -r -z -l --full-tree HEAD` als Liste (Reihenfolge wie git)."""
-    ausgabe = git(repo, "ls-tree", "-r", "-z", "-l", "--full-tree", "HEAD", timeout=120).stdout
+_REV = re.compile(r"HEAD|[0-9a-f]{40}|[0-9a-f]{64}")
+
+
+def _commit(repo: str, rev: str) -> str:
+    """Revision `rev` (`HEAD` oder voller Commit-Hash, nichts sonst: keine Optionen, keine Ausdrücke) als Commit-Hash; wirft
+    ValueError bei ungültiger Schreibweise, GitFehler, wenn es kein Commit des Repos ist. Alle Lesezugriffe eines Audits
+    beziehen sich auf diesen einen Commit, nicht auf das wandernde HEAD."""
+    if not isinstance(rev, str) or not _REV.fullmatch(rev):
+        raise ValueError(f"ungültige Revision (erwartet HEAD oder voller Commit-Hash): {_t(rev)}")
+    return git(repo, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}").stdout.decode().strip()
+
+
+def _baum(repo: str, rev: str = "HEAD") -> list[Eintrag]:
+    """`git ls-tree -r -z -l --full-tree <commit>` als Liste (Reihenfolge wie git)."""
+    ausgabe = git(repo, "ls-tree", "-r", "-z", "-l", "--full-tree", _commit(repo, rev), timeout=120).stdout
     eintraege = []
     for rec in ausgabe.split(b"\0"):
         if not rec:
@@ -332,11 +345,12 @@ def _schreibe(wurzel: str, pfad: str, inhalt: bytes, ausfuehrbar: bool) -> None:
 
 # ------------------------------------------------------------------------------------ Arbeitskopie
 
-def arbeitskopie(repo: str, ziel: str) -> list[str]:
-    """Stand von HEAD als rohe Blobs nach `ziel` schreiben; Rückgabe: Meldungen (deutsch).
+def arbeitskopie(repo: str, ziel: str, rev: str = "HEAD") -> list[str]:
+    """Stand des Commits `rev` (Standard HEAD, besser der im Bericht genannte Hash) als rohe Blobs nach `ziel` schreiben;
+    Rückgabe: Meldungen (deutsch).
 
-    Wirft GitFehler, wenn HEAD nicht lesbar ist."""
-    baum = _baum(repo)
+    Wirft GitFehler, wenn der Commit nicht lesbar ist, ValueError bei ungültiger Revision."""
+    baum = _baum(repo, rev)
     eintraege = {e.pfad: e for e in baum}
     ordner = {"/".join(e.pfad.split("/")[:i]) for e in baum for i in range(1, len(e.pfad.split("/")))}
     os.makedirs(ziel, exist_ok=True)
@@ -412,9 +426,9 @@ def arbeitskopie(repo: str, ziel: str) -> list[str]:
 
 # ------------------------------------------------------------------------------------ Konfiguration
 
-def repo_konfiguration(repo: str) -> list[str]:
-    """In HEAD versionierte Claude-/MCP-Konfiguration (auch verschachtelt); wirft GitFehler ohne HEAD."""
-    ausgabe = git(repo, "ls-tree", "-r", "-z", "--name-only", "--full-tree", "HEAD", timeout=120).stdout
+def repo_konfiguration(repo: str, rev: str = "HEAD") -> list[str]:
+    """Im Commit `rev` versionierte Claude-/MCP-Konfiguration (auch verschachtelt); wirft GitFehler ohne lesbaren Commit."""
+    ausgabe = git(repo, "ls-tree", "-r", "-z", "--name-only", "--full-tree", _commit(repo, rev), timeout=120).stdout
     gefunden = []
     for roh in ausgabe.split(b"\0"):
         if not roh:
@@ -469,11 +483,12 @@ def _index(repo: str) -> tuple[dict[str, tuple[str, str]], list[str]]:
     return index, konflikte
 
 
-def repo_hinweise(repo: str) -> list[str]:
-    """Hinweise zum Repo (deutsch); Fehler und Timeouts werden zu Hinweisen, nie zum Abbruch."""
+def repo_hinweise(repo: str, rev: str = "HEAD") -> list[str]:
+    """Hinweise zum Repo (deutsch), bezogen auf den Commit `rev`; git-/Datei-Fehler und Timeouts werden zu Hinweisen, nie zum
+    Abbruch (eine ungültige Schreibweise von `rev` ist ein Programmierfehler und wirft ValueError)."""
     hinweise: list[str] = []
     try:
-        baum = _baum(repo)
+        baum = _baum(repo, rev)
     except GitFehler as e:
         return [f"Kein HEAD lesbar, Prüfung nicht möglich: {_t(e)}"]
 

@@ -69,8 +69,8 @@ def _repo_name(wurzel: str) -> str:
     return _bereinigen(os.path.basename(ordner)) or "repo"
 
 
-def _teilpfad(wurzel: str, teilpfad: str) -> str:
-    """Teilpfad normalisieren und gegen die in HEAD versionierten Pfade prüfen (Schreibweise des Repos)."""
+def _teilpfad(wurzel: str, teilpfad: str, sha: str = "HEAD") -> str:
+    """Teilpfad normalisieren und gegen die im Commit `sha` versionierten Pfade prüfen (Schreibweise des Repos)."""
     if not teilpfad or teilpfad.startswith("/") or _t(teilpfad, 10**6) != teilpfad:
         raise KontextFehler(f"Ungültiger Teilpfad (leer, absolut oder mit Steuerzeichen): {_t(teilpfad)}")
     p = teilpfad
@@ -82,9 +82,9 @@ def _teilpfad(wurzel: str, teilpfad: str) -> str:
         raise KontextFehler(f"Ungültiger Teilpfad (nur normalisierte relative Pfade ohne '..'): {_t(teilpfad)}")
     ziel = [unicodedata.normalize("NFC", k) for k in komps]
     try:
-        baum = git(wurzel, "ls-tree", "-r", "-z", "--name-only", "--full-tree", "HEAD", timeout=120).stdout
+        baum = git(wurzel, "ls-tree", "-r", "-z", "--name-only", "--full-tree", sha, timeout=120).stdout
     except GitFehler as e:
-        raise KontextFehler(f"Dateiliste von HEAD nicht lesbar: {_t(e)}") from e
+        raise KontextFehler(f"Dateiliste des Commits nicht lesbar: {_t(e)}") from e
     for roh in baum.split(b"\0"):
         if not roh:
             continue
@@ -108,7 +108,7 @@ def kontext(repo: str, teilpfad: str | None, jetzt: datetime | None = None) -> d
         raise KontextFehler(f"Kein git-Repository mit HEAD unter {_t(repo)}: {_t(e)}") from e
     name = _repo_name(wurzel)
     datum = jetzt.strftime("%Y-%m-%d")
-    echt = _teilpfad(wurzel, teilpfad) if teilpfad is not None else None
+    echt = _teilpfad(wurzel, teilpfad, sha) if teilpfad is not None else None
     slug = _slug(echt) if echt is not None else None
 
     basis = os.environ.get("SECURITY_AUDIT_AUSGABE")
@@ -135,13 +135,13 @@ def kontext(repo: str, teilpfad: str | None, jetzt: datetime | None = None) -> d
         stats = os.path.join(os.path.expanduser("~"), ".claude", "agent-stats", name, f"{datum}-security-audit.md")
 
     try:
-        konfig = [_t(p) for p in gitkopie.repo_konfiguration(wurzel)]
+        konfig = [_t(p) for p in gitkopie.repo_konfiguration(wurzel, sha)]
     except GitFehler as e:
         raise KontextFehler(f"Konfiguration in HEAD nicht lesbar: {_t(e)}") from e
     return {
         "repo": name, "wurzel": wurzel, "sha": sha, "sha7": sha[:7], "datum": datum,
         "teilpfad": echt, "teilpfad_slug": slug, "ausgabe_ordner": ordner, "basisname": basisname,
-        "hinweise": gitkopie.repo_hinweise(wurzel), "repo_konfiguration": konfig,
+        "hinweise": gitkopie.repo_hinweise(wurzel, sha), "repo_konfiguration": konfig,
         "agent_stats_datei": stats,
     }
 

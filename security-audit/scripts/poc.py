@@ -666,8 +666,9 @@ def cmd_vorbereiten(a: argparse.Namespace) -> int:
     marker = os.path.join(ordner, "quelle.fertig")
     _entferne(marker, ordner)          # erst der Marker, dann die Kopie: ein Absturz dazwischen hinterlässt keine „fertige“ Kopie
     _entferne(quelle, ordner)
+    sha = a.sha or "HEAD"
     try:
-        meldungen = gitkopie.arbeitskopie(repo, quelle)
+        meldungen = gitkopie.arbeitskopie(repo, quelle, sha)
     except gitkopie.GitFehler as e:
         print("kategorie: git-fehler")
         print(f"git-Fehler: {e}", file=sys.stderr)
@@ -681,7 +682,11 @@ def cmd_vorbereiten(a: argparse.Namespace) -> int:
     if any("Arbeitskopie unvollständig" in m for m in meldungen):
         print("kategorie: arbeitskopie-unvollstaendig")
         return 4
-    _schreibe_atomar(marker, {"fertig": True})
+    try:
+        kopiert = gitkopie.git(repo, "rev-parse", "--verify", f"{sha}^{{commit}}").stdout.decode().strip()
+    except gitkopie.GitFehler:
+        kopiert = sha
+    _schreibe_atomar(marker, {"fertig": True, "sha": kopiert})
     print(quelle)
     return 0
 
@@ -962,6 +967,12 @@ def _typ_lauf(s: str) -> str:
     return s
 
 
+def _typ_sha(s: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", s):
+        raise argparse.ArgumentTypeError("--sha: voller Commit-Hash (40 oder 64 Hex-Zeichen, klein) erwartet")
+    return s
+
+
 def _typ_rolle(s: str) -> str:
     if not ROLLE_RE.fullmatch(s):
         raise argparse.ArgumentTypeError("--rolle: p1 oder p2 erwartet")
@@ -1019,6 +1030,7 @@ def _parser() -> argparse.ArgumentParser:
     neu("pruefen", cmd_pruefen, lauf=False)
     s = neu("vorbereiten", cmd_vorbereiten)
     s.add_argument("--repo", required=True)
+    s.add_argument("--sha", type=_typ_sha, help="Commit, der kopiert wird (der `sha` aus bericht.py kontext); ohne: HEAD")
     s = neu("bauen", cmd_bauen)
     s.add_argument("--build-befehl", type=_typ_text)
     s.add_argument("--node", choices=["20", "22", "24"])

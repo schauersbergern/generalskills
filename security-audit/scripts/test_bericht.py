@@ -166,6 +166,49 @@ def test_fehlender_wert_nach_teilpfad_bleibt_aufruffehler_haertung_a8(tmp_path):
     assert p.returncode == 2 and "Traceback" not in p.stderr
 
 
+def _neuer_commit(repo, dateien):
+    for name, inhalt in dateien.items():
+        voll = repo / name
+        voll.parent.mkdir(parents=True, exist_ok=True)
+        voll.write_text(inhalt)
+    roh(repo, "add", "-A")
+    roh(repo, "commit", "-q", "-m", "weiter")
+
+
+def test_kontext_bleibt_beim_ermittelten_sha_wenn_head_wandert_haertung_b3(tmp_path, monkeypatch):
+    """HEAD wandert zwischen der SHA-Ermittlung und den restlichen Abfragen (Commit eines anderen Prozesses): Hinweise,
+    Konfiguration und Teilpfad beziehen sich weiter auf den gemeldeten SHA."""
+    r = neues_repo(tmp_path / "r", {"a/x.js": "x"})
+    sha1 = roh(r, "rev-parse", "HEAD")
+    echt = bericht._repo_name
+
+    def wanderer(wurzel):
+        _neuer_commit(r, {".mcp.json": "{}", "neu/y.js": "y"})
+        os.symlink("a/x.js", r / "l")
+        roh(r, "add", "-A")
+        roh(r, "commit", "-q", "-m", "symlink")
+        return echt(wurzel)
+
+    monkeypatch.setattr(bericht, "_repo_name", wanderer)
+    k = bericht.kontext(str(r), "a", JETZT)
+    assert k["sha"] == sha1 and k["repo_konfiguration"] == []
+    assert not any("Symlink" in h for h in k["hinweise"]), k["hinweise"]
+    assert roh(r, "rev-parse", "HEAD") != sha1
+
+
+def test_kontext_teilpfad_wird_gegen_den_ermittelten_sha_geprueft_haertung_b3(tmp_path, monkeypatch):
+    r = neues_repo(tmp_path / "r", {"a/x.js": "x"})
+    echt = bericht._repo_name
+
+    def wanderer(wurzel):
+        _neuer_commit(r, {"neu/y.js": "y"})
+        return echt(wurzel)
+
+    monkeypatch.setattr(bericht, "_repo_name", wanderer)
+    with pytest.raises(bericht.KontextFehler, match="Teilpfad nicht im Repo"):   # `neu/` gibt es erst nach dem Wandern
+        bericht.kontext(str(r), "neu", JETZT)
+
+
 def test_kontext_pfad_mit_leerzeichen(tmp_path):
     r = neues_repo(tmp_path / "mein repo mit leerzeichen", {"a b/c d.js": "x"})
     p = lauf("kontext", "--repo", str(r), "--teilpfad", "a b")

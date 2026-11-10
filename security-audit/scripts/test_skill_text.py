@@ -239,6 +239,12 @@ def test_kern_behauptet_keinen_widerlegungsversuch_fuer_jedes_unbestaetigt_haert
     assert "P3" in kern
 
 
+def test_vorbereiten_wird_mit_dem_ermittelten_sha_aufgerufen_haertung_b3():
+    """Die Arbeitskopie stammt vom SHA, den der Bericht nennt: `vorbereiten` bekommt `--sha <sha>` aus dem Kontext."""
+    zeilen = [z for z in _aufrufzeilen(_lies(SKILL_MD)) if "poc.py vorbereiten" in z]
+    assert zeilen and all("--sha <sha>" in z for z in zeilen), zeilen
+
+
 # ------------------------------------------------------------------------------------ Beispiel-JSON
 
 def test_beispiel_json_ist_gueltig():

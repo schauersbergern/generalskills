@@ -1474,3 +1474,35 @@ def test_rollen_sperre_geteilt_erlaubt_anfragen_aber_kein_neustart_haertung_b2(u
     finally:
         os.close(fd)
     assert umg.poc("neustart", "--lauf", LAUF, "--rolle", "p1").returncode == 0     # Sperre frei: geht
+
+
+# ------------------------------------------------------------------------------------ Härtung TF1-B3 (gepinnter Commit)
+
+def test_vorbereiten_kopiert_den_uebergebenen_sha_haertung_b3(umg, tmp_path):
+    repo = repo_mit(tmp_path, {**MINI, "stand.txt": "eins\n"}, name="kunde-pin")
+    sha1 = git(repo, "rev-parse", "HEAD").strip()
+    (tmp_path / "kunde-pin" / "stand.txt").write_text("zwei\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "zwei")
+    r = umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo, "--sha", sha1)
+    assert r.returncode == 0, r.stderr
+    quelle = r.stdout.strip()
+    assert open(os.path.join(quelle, "stand.txt")).read() == "eins\n"
+    with open(os.path.join(umg.zustand(), "quelle.fertig")) as f:
+        assert json.load(f)["sha"] == sha1                                  # der Marker hält fest, was kopiert wurde
+    r = umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo)               # ohne --sha: HEAD (Rückwärtskompatibilität)
+    assert open(os.path.join(r.stdout.strip(), "stand.txt")).read() == "zwei\n"
+
+
+@pytest.mark.parametrize("sha", ["HEAD", "abc", "--output=x", "A" * 40, "0" * 39, "g" * 40])
+def test_vorbereiten_sha_ungueltig_ist_aufruffehler_haertung_b3(umg, tmp_path, sha):
+    repo = repo_mit(tmp_path, MINI, name="kunde-x")
+    r = umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo, "--sha", sha)
+    assert r.returncode == 2
+
+
+def test_vorbereiten_unbekannter_sha_ist_git_fehler_haertung_b3(umg, tmp_path):
+    repo = repo_mit(tmp_path, MINI, name="kunde-x")
+    r = umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo, "--sha", "0" * 40)
+    assert r.returncode == 4 and r.stdout.splitlines()[0] == "kategorie: git-fehler"
+    assert not os.path.exists(os.path.join(umg.zustand(), "quelle.fertig"))

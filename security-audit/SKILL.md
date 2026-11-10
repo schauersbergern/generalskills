@@ -46,10 +46,10 @@ python3 -I ${CLAUDE_SKILL_DIR}/scripts/bericht.py kontext [--teilpfad '<teilpfad
 
 ```
 python3 -I ${CLAUDE_SKILL_DIR}/scripts/poc.py neu
-python3 -I ${CLAUDE_SKILL_DIR}/scripts/poc.py vorbereiten --lauf <id> --repo <wurzel>
+python3 -I ${CLAUDE_SKILL_DIR}/scripts/poc.py vorbereiten --lauf <id> --repo <wurzel> --sha <sha>
 ```
 
-`neu` gibt die Lauf-ID (8 Hex) aus und legt den Zustandsordner an (zwei parallele Audits bekommen nie dieselbe ID), `vorbereiten` auf stdout den Pfad der Arbeitskopie. Die stderr-Meldungen von `vorbereiten` (übersprungene Symlinks, Namenskollisionen, nicht kopierte `.env*`) kommen in die Hinweise. Exit 4 (`kategorie: git-fehler` oder `arbeitskopie-unvollstaendig`): Schritt 8, dann Ende, ein Audit auf unvollständiger Basis wäre irreführend.
+`--sha` ist der `sha` aus dem Kontext: die Arbeitskopie stammt genau von dem Commit, den der Bericht als „geprüft auf“ nennt, auch wenn HEAD inzwischen wandert. `neu` gibt die Lauf-ID (8 Hex) aus und legt den Zustandsordner an (zwei parallele Audits bekommen nie dieselbe ID), `vorbereiten` auf stdout den Pfad der Arbeitskopie. Die stderr-Meldungen von `vorbereiten` (übersprungene Symlinks, Namenskollisionen, nicht kopierte `.env*`) kommen in die Hinweise. Exit 4 (`kategorie: git-fehler` oder `arbeitskopie-unvollstaendig`): Schritt 8, dann Ende, ein Audit auf unvollständiger Basis wäre irreführend.
 
 ### 2. Karte der Angriffsfläche (Hauptsession)
 
