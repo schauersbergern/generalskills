@@ -1197,6 +1197,33 @@ def test_starten_fehler_mit_daemon_stoerung(umg, tmp_path):
     assert r.returncode == 3
     assert r.stdout.splitlines()[0] == "kategorie: docker-fehlt"
 
+def test_starten_fehler_mit_daemon_stoerung_entfernt_rollen_container_haertung_a4(umg, tmp_path):
+    """Fällt der Daemon nach dem Anlegen der Container aus, werden die Container der Rolle (best effort) trotzdem
+    entfernt, bevor Exit 3 kommt."""
+    vorbereitet(umg, tmp_path)
+    umg.konfig({"run": {"rc": 125, "stderr": "docker: Error response from daemon: x\n"},
+                "version": {"folge": [{"rc": 0}, {"rc": 1, "stderr": "Cannot connect to the Docker daemon"}]}})
+    r = umg.poc("starten", "--lauf", LAUF, "--rolle", "p1", "--start-befehl", "x", "--port", "1")
+    assert r.returncode == 3
+    aufrufe = [a["args"] for a in umg.aufrufe()]
+    rm = ["rm", "-f", f"security-audit-{LAUF}-p1-app", f"security-audit-{LAUF}-p1-db"]
+    letzter_run = max(i for i, a in enumerate(aufrufe) if a[0] == "run")
+    assert any(a == rm for a in aufrufe[letzter_run + 1:]), aufrufe
+
+
+def test_start_fehler_docker_fehlt_versucht_aufraeumen_und_wirft_weiter_haertung_a4(monkeypatch):
+    aufrufe = []
+
+    def fake(args, timeout, **kw):
+        aufrufe.append(args[0])
+        raise poc.DockerFehlt("weg")
+
+    monkeypatch.setattr(poc, "_docker", fake)
+    with pytest.raises(poc.DockerFehlt):
+        poc._start_fehler(LAUF, "p1", "x")
+    assert "rm" in aufrufe, aufrufe                       # Aufräumversuch trotz kaputtem Daemon, ohne eigenen Absturz
+
+
 
 @pytest.mark.parametrize("zeichen", [
     "\ufe00", "\ufe0f", "\U000e0100", "\U000e01ef",      # Variation Selectors

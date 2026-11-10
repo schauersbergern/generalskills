@@ -665,7 +665,14 @@ def _anfrage_container(lauf: str, rolle: str, argumente: list[str], daten: bytes
 
 
 def _start_fehler(lauf: str, rolle: str, text: str) -> int:
-    _daemon_pruefen()  # Daemon-Störung ohne Marker im Text: docker-fehlt statt start-fehler
+    try:
+        _daemon_pruefen()  # Daemon-Störung ohne Marker im Text: docker-fehlt statt start-fehler
+    except DockerFehlt:
+        try:
+            _rolle_entfernen(lauf, rolle)  # best effort: bereits angelegte Container der Rolle nicht liegen lassen
+        except DockerFehlt:
+            pass                           # Daemon wirklich weg: `poc.py aufraeumen` holt es später nach
+        raise
     logs = _docker(["logs", "--tail", str(TAIL_ZEILEN), f"{_netz(lauf, rolle)}-app"], KURZ_TIMEOUT)
     _rolle_entfernen(lauf, rolle)
     return _fehler_ende("start-fehler", "\n".join(t for t in (_tail(text), _tail(logs.text) if logs.ok else "") if t))
