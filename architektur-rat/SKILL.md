@@ -51,9 +51,9 @@ Der Rat tritt nur auf Wunsch des Users zusammen. Sinnvoll ist er, wenn **alle dr
      - Pragmatiker: <Empfehlung> – Knackpunkt <…>
      - Risiko: <Empfehlung> – Knackpunkt <…>
      - Übernommen: <Maßnahmen>; verworfen: <Punkt> (<Grund>)
-     - Wirkung: <Wahl geändert | Anforderung ergänzt | offen: ergänzt | keine>
+     - Wirkung: <eine oder mehrere, mit `+` verbunden: Wahl geändert | Anforderung ergänzt | offen: ergänzt | keine>
    ```
-6. **Agent-Statistik** nach `auto-feature`, Abschnitt „Agent-Statistik“: Rollen `Rat-Pragmatiker` und `Rat-Risiko`. In die Spalte `angenommen` kommt die Wirkung aus Schritt 5. So lassen sich spätere Versuche auswerten.
+6. **Agent-Statistik** nach `auto-feature`, Abschnitt „Agent-Statistik“: Rollen `Rat-Pragmatiker` und `Rat-Risiko`. In die Spalte `angenommen` kommt die Wirkung aus Schritt 5, bei mehreren mit `+` verbunden. Die Spalte ist hier ausnahmsweise Freitext statt einer Anzahl (`--angenommen "<Text>"`), die Skript-Auswertung (`summarize`) liest sie nicht. Spätere Versuche werden von Hand ausgewertet.
 
 ## Modellwahl und Kosten
 
