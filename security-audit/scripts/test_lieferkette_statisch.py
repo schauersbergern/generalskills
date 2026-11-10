@@ -291,6 +291,11 @@ NEGATIV = [
     "ENTRYPOINT pnpm", "# RUN npm install", "RUN npm ci && npm run build", "RUN npm install-test-extra-nope-x",
     "RUN [\"npm\", \"ci\"]", "RUN [\"npm\", \"install\", \"-g\", \"x\"]", "RUN npx something", "RUN apt-get install -y npm",
     "ENV npm_config_install=1",
+    # Review I4: Trenner in Anführungszeichen trennen nicht
+    'RUN echo "see docs; npm install foo"', "RUN echo 'a && npm install'", 'RUN sh -c "echo hi; true"',
+    'RUN ["/bin/sh","-c","echo npm install"]',
+    # Review Minor: ausdrücklich lockfile-treu
+    "RUN pnpm install --frozen-lockfile=true", "RUN yarn install --immutable=true", "RUN pnpm i --frozen-lockfile=1",
 ]
 
 
@@ -313,6 +318,20 @@ POSITIV = [
     ("RUN cd /app && pnpm", "nacktes `pnpm`"), ("ONBUILD RUN npm install", "`npm install`"),
     ("run npm install", "`npm install`"), ("RUN npm --prefix web install", "`npm install`"),
     ("RUN pnpm install --no-frozen-lockfile", "`pnpm install`"),
+    # Review I4: sh -c / bash -c auch mit zusammengesetzten Befehlen, Exec-Form
+    ('RUN sh -c "cd app && npm install"', "`npm install`"), ("RUN bash -c 'set -e; npm install'", "`npm install`"),
+    ('RUN ["/bin/sh","-c","npm install"]', "`npm install`"), ('RUN ["/bin/sh", "-c", "cd a && yarn"]', "nacktes `yarn`"),
+    ("RUN /bin/bash -lc 'cd x && pnpm install'", "`pnpm install`"), ("RUN sh -c \"sh -c 'npm install'\"", "`npm install`"),
+    ("RUN echo ok && sh -c 'npm install'", "`npm install`"),
+    # Review Minor: Tab, Kontrollwörter, Klammer, Präfixe, nicht treue Flags
+    ("RUN\tnpm install", "`npm install`"), ("ONBUILD\tRUN npm install", "`npm install`"),
+    ("RUN if [ -f p ]; then npm install; fi", "`npm install`"), ("RUN for d in a b; do npm install; done", "`npm install`"),
+    ("RUN if x; then y; else npm install; fi", "`npm install`"), ("RUN (cd app && npm install)", "`npm install`"),
+    ("RUN timeout 300 npm install", "`npm install`"), ("RUN timeout -s KILL 5m npm install", "`npm install`"),
+    ("RUN sudo -u app npm install", "`npm install`"), ("RUN sudo -E npm install", "`npm install`"),
+    ("RUN sudo -E -u app npm install", "`npm install`"),
+    ("RUN pnpm install --frozen-lockfile=false", "`pnpm install`"), ("RUN yarn install --immutable=false", "`yarn install`"),
+    ("RUN yarn install --frozen-lockfile=false", "`yarn install`"), ("RUN yarn --immutable=false", "nacktes `yarn`"),
 ]
 
 
@@ -610,15 +629,69 @@ def test_install_skripte_offen_pnpm_schluessel_nur_als_kommentar_kein_schutz(umg
     assert len(umg.entwuerfe("install-skripte-offen")) == 1
 
 
-def test_install_skripte_offen_yarn_berry_enable_scripts_false(umg):
+def test_install_skripte_offen_yarn_berry_enable_scripts_false_schuetzt_npm_lockfile_nicht(umg):
+    """Schutz je Lockfile-Typ: npm liest `.yarnrc.yml` nie; yarn-Lockfiles tragen kein Install-Skript-Merkmal und werden nicht
+    geprüft, `enableScripts: false` hat daher keine Wirkung (Review I3)."""
     umg.schreibe("package-lock.json", npm_lock_mit_skripten(["fsevents"]))
     umg.schreibe(".yarnrc.yml", "nodeLinker: node-modules\nenableScripts: false\n")
-    assert umg.entwuerfe("install-skripte-offen") == []
+    assert len(umg.entwuerfe("install-skripte-offen")) == 1
+
+
+def test_install_skripte_offen_yarn_berry_enable_scripts_false_schuetzt_pnpm_lockfile_nicht(umg):
+    umg.schreibe("pnpm-lock.yaml", PNPM_LOCK_V6)
+    umg.schreibe(".yarnrc.yml", "enableScripts: false\n")
+    assert len(umg.entwuerfe("install-skripte-offen")) == 1
 
 
 def test_install_skripte_offen_yarn_berry_enable_scripts_true_kein_schutz(umg):
     umg.schreibe("package-lock.json", npm_lock_mit_skripten(["fsevents"]))
     umg.schreibe(".yarnrc.yml", "enableScripts: true\n")
+    assert len(umg.entwuerfe("install-skripte-offen")) == 1
+
+
+def test_install_skripte_offen_npm_lockfile_package_manager_pnpm_schuetzt_nicht(umg):
+    umg.schreibe("package-lock.json", npm_lock_mit_skripten(["fsevents"]))
+    umg.schreibe("package.json", json.dumps({"name": "x", "packageManager": "pnpm@10.1.0"}))
+    assert len(umg.entwuerfe("install-skripte-offen")) == 1
+
+
+@pytest.mark.parametrize("schluessel", ["onlyBuiltDependencies", "neverBuiltDependencies"])
+def test_install_skripte_offen_npm_lockfile_pnpm_freigabeliste_schuetzt_nicht(umg, schluessel):
+    umg.schreibe("package-lock.json", npm_lock_mit_skripten(["fsevents"]))
+    umg.schreibe("package.json", json.dumps({"name": "x", "pnpm": {schluessel: ["esbuild"]}}))
+    umg.schreibe("pnpm-workspace.yaml", f"{schluessel}:\n  - esbuild\n")
+    assert len(umg.entwuerfe("install-skripte-offen")) == 1
+
+
+def test_install_skripte_offen_pnpm_lockfile_npm_ci_ignore_scripts_schuetzt_nicht(umg):
+    umg.schreibe("pnpm-lock.yaml", PNPM_LOCK_V6)
+    umg.schreibe("Dockerfile", "FROM node\nRUN npm ci --ignore-scripts\n")
+    assert len(umg.entwuerfe("install-skripte-offen")) == 1
+
+
+@pytest.mark.parametrize("zeile", ["RUN pnpm install --ignore-scripts", "RUN pnpm i --frozen-lockfile --ignore-scripts",
+                                   "RUN pnpm --ignore-scripts"])
+def test_install_skripte_offen_pnpm_lockfile_pnpm_zeilen_mit_ignore_scripts_schuetzen(umg, zeile):
+    umg.schreibe("pnpm-lock.yaml", PNPM_LOCK_V6)
+    umg.schreibe("Dockerfile", f"FROM node\n{zeile}\n")
+    assert umg.entwuerfe("install-skripte-offen") == []
+
+
+def test_install_skripte_offen_pnpm_lockfile_eine_pnpm_zeile_ohne_flag_schuetzt_nicht(umg):
+    umg.schreibe("pnpm-lock.yaml", PNPM_LOCK_V6)
+    umg.schreibe("Dockerfile", "FROM node\nRUN pnpm install --ignore-scripts\nRUN pnpm install --frozen-lockfile\n")
+    assert len(umg.entwuerfe("install-skripte-offen")) == 1
+
+
+def test_install_skripte_offen_pnpm_lockfile_npmrc_ignore_scripts_schuetzt(umg):
+    umg.schreibe("pnpm-lock.yaml", PNPM_LOCK_V6)
+    umg.schreibe(".npmrc", "ignore-scripts=true\n")
+    assert umg.entwuerfe("install-skripte-offen") == []
+
+
+def test_install_skripte_offen_npm_zeilen_schuetzen_den_npm_lockfile_pnpm_zeilen_nicht(umg):
+    umg.schreibe("package-lock.json", npm_lock_mit_skripten(["fsevents"]))
+    umg.schreibe("Dockerfile", "FROM node\nRUN pnpm install --ignore-scripts\n")
     assert len(umg.entwuerfe("install-skripte-offen")) == 1
 
 
@@ -913,3 +986,184 @@ def test_budget_abbruch_behaelt_bis_dahin_gefundene_entwuerfe(umg, monkeypatch, 
     mengen = [m for _, m in ergebnisse]
     assert mengen == sorted(mengen)
     assert all(h or m == vollstaendig for h, m in ergebnisse)
+
+
+# ------------------------------------------------------------------------------------ Fix-Runde 1 (Review Task 3)
+
+@pytest.mark.parametrize("zeile,soll", [
+    ("RUN npm install", "`npm ci`"), ("RUN pnpm install", "`pnpm install --frozen-lockfile`"),
+    ("RUN pnpm i", "`pnpm install --frozen-lockfile`"), ("RUN pnpm", "`pnpm install --frozen-lockfile`"),
+    ("RUN yarn install", "yarn install --immutable"), ("RUN yarn", "yarn install --immutable"),
+])
+def test_i1_abhilfe_je_werkzeug(umg, zeile, soll):
+    """pnpm-Befunde bekamen die npm-Abhilfe (`\"npm\" in label` trifft auch `pnpm`)."""
+    umg.schreibe("Dockerfile", f"FROM node\n{zeile}\n")
+    (e,) = umg.entwuerfe("installation-ohne-lockfile-treue")
+    assert soll in e["erwartet"]
+    if not zeile.startswith("RUN npm"):
+        assert "npm ci" not in e["erwartet"]
+
+
+def _entwurf_schema_fehler(e):
+    return bericht._befund_fehler({**e, "id": "S-1"}, "entwurf")
+
+
+@pytest.mark.parametrize("rel", ["a```b/Dockerfile", "a`b/Dockerfile", "Dockerfile:12", "Dockerfile#L5", "x/Dockerfile:3:4",
+                                 "Dockerfile`x"])
+def test_i2_feindliche_pfade_erzeugen_keine_schemaungueltigen_entwuerfe(umg, rel):
+    umg.schreibe(rel, "FROM node\nRUN npm install\n")
+    umg.schreibe("ok/Dockerfile", "FROM node\nRUN npm install\n")
+    r = umg.lauf()
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert [e["datei"] for e in out["entwuerfe"]] == ["ok/Dockerfile"]
+    assert all(_entwurf_schema_fehler(e) == [] for e in out["entwuerfe"])
+    assert any("Pfade mit Steuerzeichen oder ungültigen Zeichen" in h for h in out["hinweise"])
+    assert "```" not in r.stdout and "Dockerfile:12" not in r.stdout and "Dockerfile#L5" not in r.stdout
+
+
+def test_i2_ueberlanger_pfad_wird_ausgelassen_und_gezaehlt(umg):
+    lang = "/".join(["d" * 100] * 4)
+    assert len(lang) + len("/Dockerfile") > lieferkette.PFAD_MAX
+    umg.schreibe(f"{lang}/Dockerfile", "FROM node\nRUN npm install\n")
+    umg.schreibe("Dockerfile", "FROM node\nRUN npm install\n")
+    out = umg.ergebnis()
+    assert [e["datei"] for e in out["entwuerfe"]] == ["Dockerfile"]
+    assert any("überlange Pfade" in h for h in out["hinweise"])
+    assert "d" * 100 not in json.dumps(out)
+
+
+def test_i2_pfad_knapp_unter_der_grenze_bleibt(umg):
+    rel = "/".join(["d" * 90] * 3) + "/Dockerfile"
+    assert len(rel) <= lieferkette.PFAD_MAX
+    umg.schreibe(rel, "FROM node\nRUN npm install\n")
+    assert [e["datei"] for e in umg.entwuerfe()] == [rel]
+
+
+def _roh_entwurf(datei, stufe="P2"):
+    return lieferkette._entwurf("installation-ohne-lockfile-treue", stufe, datei, 2, "Titel", "Beschreibung", "Szenario", "Erwartet")
+
+
+def test_i2_sammler_verwirft_schemaungueltige_entwuerfe_und_zaehlt_ohne_pfad():
+    s = lieferkette._Sammler()
+    gut = _roh_entwurf("Dockerfile")
+    s.entwurf(_roh_entwurf("geheimer-ordner/a```b/Dockerfile"))
+    s.entwurf(gut)
+    hinweise = s.abschluss()
+    assert s.entwuerfe == [gut]
+    assert "1 Entwürfe mit ungültigem Pfad ausgelassen" in hinweise
+    assert "geheimer-ordner" not in json.dumps(hinweise)
+
+
+def test_i2_ungueltige_entwuerfe_belegen_keinen_platz_in_der_kappung(monkeypatch):
+    monkeypatch.setattr(lieferkette, "MAX_ENTWUERFE", 1)
+    s = lieferkette._Sammler()
+    s.entwurf(_roh_entwurf("a```b/Dockerfile"))
+    s.entwurf(_roh_entwurf("Dockerfile"))
+    assert [e["datei"] for e in s.entwuerfe] == ["Dockerfile"]
+    assert not any("gefunden, nur" in h for h in s.abschluss())
+
+
+def test_minor_kappung_nach_stufe_dann_fundreihenfolge(monkeypatch):
+    monkeypatch.setattr(lieferkette, "MAX_ENTWUERFE", 2)
+    s = lieferkette._Sammler()
+    for datei, stufe in [("p3a", "P3"), ("p3b", "P3"), ("p2a", "P2"), ("p2b", "P2"), ("p3c", "P3")]:
+        s.entwurf(_roh_entwurf(datei, stufe))
+    assert sorted(e["datei"] for e in s.entwuerfe) == ["p2a", "p2b"]
+    assert any("5 Entwürfe gefunden" in h for h in s.abschluss())
+
+
+def test_minor_kappung_gleiche_stufe_behaelt_die_zuerst_gefundenen(monkeypatch):
+    monkeypatch.setattr(lieferkette, "MAX_ENTWUERFE", 2)
+    s = lieferkette._Sammler()
+    for datei in ("a", "b", "c", "d"):
+        s.entwurf(_roh_entwurf(datei))
+    assert sorted(e["datei"] for e in s.entwuerfe) == ["a", "b"]
+
+
+def test_i4_verschachtelte_shell_aufrufe_nur_begrenzt_tief(umg):
+    import shlex
+    def verschachtelt(n):
+        befehl = "npm install"
+        for _ in range(n):
+            befehl = f"sh -c {shlex.quote(befehl)}"
+        return befehl
+    umg.schreibe("Dockerfile", f"FROM node\nRUN {verschachtelt(3)}\nRUN {verschachtelt(8)}\n")
+    assert [e["zeile"] for e in umg.entwuerfe("installation-ohne-lockfile-treue")] == [2]
+
+
+def test_minor_ueberlange_logische_zeile_wird_nicht_ausgewertet_und_gezaehlt(umg):
+    lang = "RUN " + "a " * 40000 + "&& npm install"
+    assert len(lang) > lieferkette.ZEILE_MAX
+    umg.schreibe("Dockerfile", f"FROM node\n{lang}\nRUN npm install\n")
+    umg.schreibe("package.json", json.dumps({"name": "x", "scripts": {"s": "x " * 40000 + "&& npm install"}}))
+    umg.schreibe("package-lock.json", NPM_LOCK)
+    out = umg.ergebnis()
+    e = [x for x in out["entwuerfe"] if x["klasse"] == "installation-ohne-lockfile-treue"]
+    assert [x["zeile"] for x in e if x["datei"] == "Dockerfile"] == [3]
+    assert not [x for x in e if x["datei"] == "package.json"]
+    assert "2 überlange Zeilen nicht ausgewertet" in out["hinweise"]
+
+
+def test_minor_zeitbudget_wird_auch_in_der_zeilenschleife_geprueft(umg, monkeypatch, capsys):
+    umg.schreibe("Dockerfile", "FROM node\n" + "RUN npm install\n" * 300)
+    monkeypatch.setattr(tempfile, "tempdir", str(umg.tmp))
+    echte = lieferkette.time
+
+    class Uhr:
+        def __init__(self, n):
+            self.n = n
+
+        def monotonic(self):
+            self.n -= 1
+            return 0.0 if self.n >= 0 else 1e9
+
+        def __getattr__(self, name):
+            return getattr(echte, name)
+
+    ergebnisse = []
+    for n in range(1, 16):
+        monkeypatch.setattr(lieferkette, "time", Uhr(n))
+        assert lieferkette.main(["lieferkette", "--lauf", LAUF, "--quelle", umg.quelle()]) == 0
+        out = json.loads(capsys.readouterr().out)
+        ergebnisse.append(("Lieferketten-Prüfung abgebrochen (Zeitbudget)" in out["hinweise"], len(out["entwuerfe"])))
+    assert any(hinweis and m > 0 for hinweis, m in ergebnisse)            # Abbruch mitten in der Datei, Teilergebnis bleibt
+    assert all(m < 200 for hinweis, m in ergebnisse if hinweis)
+
+
+@pytest.mark.parametrize("kopf,name", [("/esbuild/0.17.0_react@18.0.0", "esbuild"), ("/@scope/pkg/1.2.3_react@18.0.0", "@scope/pkg"),
+                                       ("/@scope/pkg/1.2.3_a@1+b@2", "@scope/pkg"), ("/esbuild/0.17.0", "esbuild"),
+                                       ("/esbuild@0.19.0", "esbuild"), ("esbuild@0.19.0(react@18.0.0)", "esbuild"),
+                                       ("/@scope/pkg@1.2.3(react@18.0.0)", "@scope/pkg"), ("'/@scope/pkg/1.2.3':", "@scope/pkg"),
+                                       ("/foo", "foo")])
+def test_minor_pnpm_name_aus_allen_kopfformaten(kopf, name):
+    assert lieferkette._pnpm_name(kopf) == name
+
+
+def test_minor_pnpm_v5_peer_suffix_ergibt_den_richtigen_namen_im_befund(umg):
+    umg.schreibe("pnpm-lock.yaml", "lockfileVersion: 5.4\n\npackages:\n\n  /esbuild/0.17.0_react@18.0.0:\n    resolution: {x: y}\n"
+                                   "    requiresBuild: true\n    dev: false\n")
+    (e,) = umg.entwuerfe("install-skripte-offen")
+    assert "(esbuild)" in e["beschreibung"] and "ungültige" not in e["beschreibung"]
+
+
+def test_minor_recursion_error_aus_dem_verzeichnislauf_wird_hinweis(umg, monkeypatch, capsys):
+    umg.schreibe("Dockerfile", "FROM node\nRUN npm install\n")
+    quelle = umg.quelle()
+
+    def kaputt(wurzel, *a, **k):
+        yield quelle, [], ["Dockerfile"]
+        raise RecursionError("zu tief")
+    monkeypatch.setattr(os, "walk", kaputt)
+    out = _inproc(umg, monkeypatch, capsys)
+    assert any("Verzeichnissuche abgebrochen (RecursionError)" in h for h in out["hinweise"])
+    assert [e["datei"] for e in out["entwuerfe"]] == ["Dockerfile"]
+
+
+def test_minor_oserror_aus_dem_verzeichnislauf_wird_hinweis(umg, monkeypatch, capsys):
+    def kaputt(wurzel, *a, **k):
+        raise OSError("kaputt")
+        yield
+    monkeypatch.setattr(os, "walk", kaputt)
+    out = _inproc(umg, monkeypatch, capsys)
+    assert any("Verzeichnissuche abgebrochen (OSError)" in h for h in out["hinweise"]) and out["entwuerfe"] == []

@@ -55,10 +55,12 @@ import stat
 import sys
 import time
 import urllib.request
+from collections import Counter
 from datetime import datetime, timezone
 from typing import NamedTuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bericht  # noqa: E402
 import gitkopie  # noqa: E402
 import poc  # noqa: E402
 from gitkopie import GitFehler, ZeitbudgetFehler, _t  # noqa: E402
@@ -1213,10 +1215,19 @@ BEFEHLSTRENNER = re.compile(r"&&|\|\||;|\|")
 KURZ_GLOBAL = re.compile(r"-[A-Za-z]*g[A-Za-z]*")
 WERT_OPTIONEN = frozenset(("--prefix", "-C", "--cwd", "--workspace", "-w", "--registry", "--cache", "--loglevel",
                            "--userconfig", "--filter", "-F", "--dir", "--modules-folder"))
-VORSATZ_BEFEHLE = ("sudo", "env", "exec", "time", "nohup")
-YARNRC_SKRIPTE_AUS = re.compile(r"enableScripts\s*:\s*[\"']?false[\"']?\s*(?:#.*)?")
+VORSATZ_BEFEHLE = ("sudo", "env", "exec", "time", "nohup", "timeout")
+VORSATZ_WERT_OPTIONEN = {"sudo": frozenset(("-u", "-g", "-p", "-C", "-D", "-R", "-T", "-U", "-r", "-t", "--user", "--group")),
+                         "env": frozenset(("-u", "-C", "-S")), "timeout": frozenset(("-s", "-k", "--signal", "--kill-after"))}
+KONTROLLWOERTER = frozenset(("if", "then", "else", "elif", "do", "while", "until", "!", "{"))   # Befehlsanfang in Shell-Konstrukten
+TRENNER_ZEICHEN = frozenset("();|&")        # Token nur aus diesen Zeichen: Shell-Operator (`;`, `&&`, `||`, `|`, `&`, `(`, `)`)
+SHELLS = frozenset(("sh", "bash", "dash", "zsh", "ash"))
+SHELL_C = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
+SHELL_TIEFE = 3                             # so oft werden `sh -c`-Skripte höchstens entpackt
+ZEILE_MAX = 64 * 1024                       # längere logische Zeilen werden nicht tokenisiert (Laufzeit, feindliche Dateien)
+PFAD_MAX = 300                              # längere relative Pfade werden übersprungen
+ZEILE_AM_ENDE = re.compile(r":[0-9]+(?::[0-9]+)?\Z|#L[0-9]+(?:C[0-9]+)?(?:-L?[0-9]+(?:C[0-9]+)?)?\Z")   # wie bericht._ZEILE_IM_PFAD
 PNPM_LISTE = re.compile(r"\s*(?:only|never)BuiltDependencies\s*:")
-KONFIG_NAMEN_LK = (".npmrc", ".yarnrc.yml", "pnpm-workspace.yaml")
+KONFIG_NAMEN_LK = (".npmrc", "pnpm-workspace.yaml")     # `.yarnrc.yml` wird nicht gelesen, siehe `geschuetzt` in `_statisch`
 KLASSEN_REIHENFOLGE = {"lockfile-fehlt": 0, "installation-ohne-lockfile-treue": 1, "install-skripte-offen": 2}
 
 
@@ -1225,13 +1236,19 @@ class _Zeit(Exception):
 
 
 class _Sammler:
-    """Sammelt Entwürfe und Hinweise (beide begrenzt); Entwürfe bleiben auch erhalten, wenn das Budget abläuft."""
+    """Sammelt Entwürfe und Hinweise (beide begrenzt). Entwürfe bleiben auch erhalten, wenn das Budget abläuft. Entwürfe, die
+    das Befund-Schema ablehnt (feindliche Pfade), werden verworfen und gezählt. Bei mehr als `MAX_ENTWUERFE` Entwürfen bleiben
+    die mit der niedrigsten Stufe (P2 vor P3), bei gleicher Stufe die zuerst gefundenen."""
 
     def __init__(self) -> None:
         self.entwuerfe: list[dict] = []
         self.hinweise: list[str] = []
-        self.zu_viele_entwuerfe = 0
         self.zu_viele_hinweise = 0
+        self.gefunden = 0                      # gültige Entwürfe insgesamt
+        self.ungueltig = 0                     # Entwürfe, die das Schema ablehnt
+        self.ueberlang = 0                     # logische Zeilen über ZEILE_MAX
+        self._nummer: list[int] = []           # Fundnummer je Entwurf in `entwuerfe`
+        self._je_stufe: Counter = Counter()
         self._gesehen: set[str] = set()
 
     def hinweis(self, text: str) -> None:
@@ -1244,16 +1261,33 @@ class _Sammler:
             self.zu_viele_hinweise += 1
 
     def entwurf(self, e: dict) -> None:
+        if bericht._befund_fehler({**e, "id": "S-1"}, "entwurf"):
+            self.ungueltig += 1
+            return
+        self.gefunden += 1
         if len(self.entwuerfe) < MAX_ENTWUERFE:
             self.entwuerfe.append(e)
-        else:
-            self.zu_viele_entwuerfe += 1
+            self._nummer.append(self.gefunden)
+            self._je_stufe[e["stufe"]] += 1
+            return
+        schlechteste = max(k for k, v in self._je_stufe.items() if v)
+        if e["stufe"] < schlechteste:           # nur eine bessere Stufe verdrängt (der zuletzt gefundene der schlechtesten)
+            i = max((i for i, x in enumerate(self.entwuerfe) if x["stufe"] == schlechteste), key=lambda i: self._nummer[i])
+            self._je_stufe[schlechteste] -= 1
+            self._je_stufe[e["stufe"]] += 1
+            self.entwuerfe[i] = e
+            self._nummer[i] = self.gefunden
 
     def abschluss(self) -> list[str]:
         self.entwuerfe.sort(key=lambda e: (KLASSEN_REIHENFOLGE[e["klasse"]], e["datei"], e["zeile"]))
         h = list(self.hinweise)
-        if self.zu_viele_entwuerfe:
-            h.append(f"{len(self.entwuerfe) + self.zu_viele_entwuerfe} Entwürfe gefunden, nur die ersten {MAX_ENTWUERFE} ausgegeben")
+        if self.gefunden > len(self.entwuerfe):
+            h.append(f"{self.gefunden} Entwürfe gefunden, nur {MAX_ENTWUERFE} ausgegeben (niedrigste Stufe zuerst, dann "
+                     "Fundreihenfolge)")
+        if self.ungueltig:
+            h.append(f"{self.ungueltig} Entwürfe mit ungültigem Pfad ausgelassen")
+        if self.ueberlang:
+            h.append(f"{self.ueberlang} überlange Zeilen nicht ausgewertet")
         if self.zu_viele_hinweise:
             h.append(f"{self.zu_viele_hinweise} weitere Hinweise ausgelassen")
         return h
@@ -1264,8 +1298,11 @@ def _zeitcheck(ende: float) -> None:
         raise _Zeit()
 
 
-def _sauber(name: str) -> bool:
-    """Name ohne Steuer-, Format- oder unsichtbare Zeichen (und ohne ungültiges UTF-8)."""
+def _sauber(name: str, datei: bool = False) -> bool:
+    """Name ohne Steuer-, Format- oder unsichtbare Zeichen (und ohne ungültiges UTF-8) und ohne Backtick. Dateinamen dürfen
+    außerdem nicht auf eine Zeilenangabe enden (`:12`, `#L5`): das Befund-Schema trennt Pfad und Zeile."""
+    if "`" in name or (datei and ZEILE_AM_ENDE.search(name)):
+        return False
     return (name.isascii() and name.isprintable()) or _t(name, 10**9) == name
 
 
@@ -1309,55 +1346,67 @@ def _art(name: str, ordner: str) -> str | None:
 
 
 def _baum_suchen(quelle: str, ende: float, s: _Sammler) -> _Baum:
-    """`os.walk` ohne Symlinks; `node_modules` und `.git` werden nicht betreten, nur reguläre Dateien, Pfade mit Steuerzeichen
-    werden übersprungen und gezählt."""
+    """`os.walk` ohne Symlinks; `node_modules` und `.git` werden nicht betreten, nur reguläre Dateien. Pfade mit Steuerzeichen,
+    Backtick, Zeilenangabe am Dateinamen oder über `PFAD_MAX` Zeichen werden übersprungen und gezählt; ein Fehler des
+    Verzeichnislaufs (`RecursionError`, `OSError`) beendet die Suche mit einem Hinweis, bisherige Funde bleiben."""
     baum = _Baum()
     besucht = 0
     steuer = 0
-    for ordner, unter, dateien in os.walk(quelle):
-        _zeitcheck(ende)
-        rel_ordner = "" if ordner == quelle else os.path.relpath(ordner, quelle).replace(os.sep, "/")
-        behalten = []
-        for u in sorted(unter):
-            if u in ("node_modules", ".git"):
-                continue
-            if _sauber(u):
-                behalten.append(u)
-            else:
-                steuer += 1
-        unter[:] = behalten
-        for name in sorted(dateien):
-            besucht += 1
-            if besucht > MAX_EINTRAEGE:
-                s.hinweis(f"Suche nach {MAX_EINTRAEGE} Einträgen abgebrochen: weitere Dateien nicht geprüft")
-                return _steuer_hinweis(baum, steuer, s)
-            art = _art(name, rel_ordner)
-            if art is None:
-                continue
-            if not _sauber(name):
-                steuer += 1
-                continue
-            rel = f"{rel_ordner}/{name}" if rel_ordner else name
-            try:
-                st = os.lstat(os.path.join(ordner, name))
-            except OSError:
-                continue
-            if not stat.S_ISREG(st.st_mode):               # Symlinks, FIFOs, Geräte: nie lesen
-                continue
-            if art == "lock":
-                baum.lockfiles.append((rel, st.st_size))
-            elif art == "pkg":
-                baum.pakete.append((rel, st.st_size))
-            elif art == "konfig":
-                baum.konfig[(rel_ordner, name)] = (rel, st.st_size)
-            else:
-                baum.texte.append((rel, art, st.st_size))
-    return _steuer_hinweis(baum, steuer, s)
+    lang = 0
+    try:
+        for ordner, unter, dateien in os.walk(quelle):
+            _zeitcheck(ende)
+            rel_ordner = "" if ordner == quelle else os.path.relpath(ordner, quelle).replace(os.sep, "/")
+            behalten = []
+            for u in sorted(unter):
+                if u in ("node_modules", ".git"):
+                    continue
+                if not _sauber(u):
+                    steuer += 1
+                elif len(rel_ordner) + len(u) + 2 > PFAD_MAX:
+                    lang += 1
+                else:
+                    behalten.append(u)
+            unter[:] = behalten
+            for name in sorted(dateien):
+                besucht += 1
+                if besucht > MAX_EINTRAEGE:
+                    s.hinweis(f"Suche nach {MAX_EINTRAEGE} Einträgen abgebrochen: weitere Dateien nicht geprüft")
+                    return _pfad_hinweise(baum, steuer, lang, s)
+                art = _art(name, rel_ordner)
+                if art is None:
+                    continue
+                if not _sauber(name, True):
+                    steuer += 1
+                    continue
+                rel = f"{rel_ordner}/{name}" if rel_ordner else name
+                if len(rel) > PFAD_MAX:
+                    lang += 1
+                    continue
+                try:
+                    st = os.lstat(os.path.join(ordner, name))
+                except OSError:
+                    continue
+                if not stat.S_ISREG(st.st_mode):               # Symlinks, FIFOs, Geräte: nie lesen
+                    continue
+                if art == "lock":
+                    baum.lockfiles.append((rel, st.st_size))
+                elif art == "pkg":
+                    baum.pakete.append((rel, st.st_size))
+                elif art == "konfig":
+                    baum.konfig[(rel_ordner, name)] = (rel, st.st_size)
+                else:
+                    baum.texte.append((rel, art, st.st_size))
+    except (RecursionError, OSError) as e:
+        s.hinweis(f"Verzeichnissuche abgebrochen ({type(e).__name__}): weitere Dateien nicht geprüft")
+    return _pfad_hinweise(baum, steuer, lang, s)
 
 
-def _steuer_hinweis(baum: _Baum, steuer: int, s: _Sammler) -> _Baum:
+def _pfad_hinweise(baum: _Baum, steuer: int, lang: int, s: _Sammler) -> _Baum:
     if steuer:
         s.hinweis(f"{steuer} Pfade mit Steuerzeichen oder ungültigen Zeichen übersprungen")
+    if lang:
+        s.hinweis(f"{lang} überlange Pfade übersprungen")
     return baum
 
 
@@ -1415,15 +1464,35 @@ def _logische_zeilen(text: str) -> list[tuple[int, str]]:
     return erg
 
 
-def _tokenisieren(teil: str) -> list[str]:
+def _tokenisieren(teil: str) -> list[str] | None:
+    """Shell-Tokens mit Operatoren als eigenen Tokens (`;`, `&&`, `||`, `|`, `(`, `)` in Anführungszeichen bleiben Teil des
+    Worts); None bei ungültigem Quoting."""
     try:
-        return shlex.split(teil, posix=True)
+        lex = shlex.shlex(teil, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        lex.commenters = ""
+        return list(lex)
     except ValueError:
-        return teil.split()
+        return None
+
+
+def _segmente(tokens: list[str]) -> list[list[str]]:
+    """Token-Liste an den Shell-Operator-Tokens in Befehle zerlegen (erst nach der Tokenisierung)."""
+    erg: list[list[str]] = []
+    seg: list[str] = []
+    for t in tokens:
+        if t and set(t) <= TRENNER_ZEICHEN:
+            erg.append(seg)
+            seg = []
+        else:
+            seg.append(t)
+    erg.append(seg)
+    return erg
 
 
 def _ohne_vorsatz(tokens: list[str]) -> list[str]:
-    """Führende Make-Präfixe (`@`, `-`, `+`), Umgebungszuweisungen und `sudo`/`env`/`exec`/`time` übergehen."""
+    """Führende Make-Präfixe (`@`, `-`, `+`), Kontrollwörter (`then`, `do`, `else` …), Umgebungszuweisungen und
+    `sudo`/`env`/`exec`/`time`/`nohup`/`timeout` samt ihren Optionen übergehen."""
     tokens = list(tokens)
     if tokens:
         tokens[0] = tokens[0].lstrip("@-+")
@@ -1432,19 +1501,37 @@ def _ohne_vorsatz(tokens: list[str]) -> list[str]:
     i = 0
     while i < len(tokens):
         t = tokens[i]
-        if ENV_ZUWEISUNG.match(t):
+        if ENV_ZUWEISUNG.match(t) or t in KONTROLLWOERTER:
             i += 1
         elif t in VORSATZ_BEFEHLE:
             i += 1
+            mit_wert = VORSATZ_WERT_OPTIONEN.get(t, frozenset())
             while i < len(tokens) and tokens[i].startswith("-"):
-                i += 1
+                i += 2 if tokens[i] in mit_wert else 1
+            if t == "timeout":
+                i += 1                                       # die Dauer
         else:
             break
     return tokens[i:]
 
 
+def _shell_skript(tok: list[str]) -> str | None:
+    """Das Skript hinter `sh -c`, `bash -lc`, `/bin/sh -ec` …; sonst None."""
+    if not tok or tok[0].rsplit("/", 1)[-1] not in SHELLS:
+        return None
+    i = 1
+    while i < len(tok) and tok[i].startswith(("-", "+")):
+        if SHELL_C.fullmatch(tok[i]):
+            return tok[i + 1] if i + 1 < len(tok) else None
+        i += 2 if tok[i] in ("-o", "+o") else 1
+    return None
+
+
 def _befehle(zeile: str, art: str, tiefe: int = 0) -> list[list[str]]:
-    """Befehlssegmente (Token-Listen) einer logischen Zeile; Präfixe wie Docker-`RUN`, YAML-`- `/`run:`/`script:` entfernt."""
+    """Befehlssegmente (Token-Listen) einer logischen Zeile; Präfixe wie Docker-`RUN`, YAML-`- `/`run:`/`script:` entfernt.
+    `sh -c <skript>` wird (bis `SHELL_TIEFE`) rekursiv ausgewertet, auch in der Exec-Form."""
+    if art == "shell" and "\n" in zeile:                     # Zeilenumbruch im Skript trennt Befehle
+        return [t for z in zeile.splitlines() for t in _befehle(z, art, tiefe)]
     s = zeile.strip()
     if not s or s.startswith("#"):
         return []
@@ -1456,10 +1543,13 @@ def _befehle(zeile: str, art: str, tiefe: int = 0) -> list[list[str]]:
             s = s[m.end():].lstrip()
         if len(s) >= 2 and s[0] in "\"'" and s[-1] == s[0]:
             s = s[1:-1]
+    segmente = None
     if art == "docker":
-        wort, _, rest = s.partition(" ")
+        teile = s.split(None, 1)
+        wort, rest = teile[0], (teile[1] if len(teile) > 1 else "")
         if wort.lower() == "onbuild":
-            wort, _, rest = rest.lstrip().partition(" ")
+            teile = rest.split(None, 1)
+            wort, rest = (teile[0], teile[1] if len(teile) > 1 else "") if teile else ("", "")
         if wort.lower() in DOCKER_ANDERE:
             return []
         if wort.lower() == "run":
@@ -1470,20 +1560,39 @@ def _befehle(zeile: str, art: str, tiefe: int = 0) -> list[list[str]]:
                 except (ValueError, RecursionError):
                     liste = None
                 if isinstance(liste, list) and liste and all(isinstance(x, str) for x in liste):
-                    return [list(liste)]
-    segmente = [_ohne_vorsatz(_tokenisieren(t)) for t in BEFEHLSTRENNER.split(s)]
+                    segmente = [list(liste)]
+    if segmente is None:
+        tokens = _tokenisieren(s)
+        segmente = [t.split() for t in BEFEHLSTRENNER.split(s)] if tokens is None else _segmente(tokens)
     erg = []
-    for tok in segmente:
-        if tiefe < 2 and len(tok) >= 3 and tok[0] in ("sh", "bash") and tok[1] in ("-c", "-lc", "-ec"):
-            erg.extend(_befehle(tok[2], "shell", tiefe + 1))
+    for seg in segmente:
+        tok = _ohne_vorsatz(seg)
+        skript = _shell_skript(tok) if tiefe < SHELL_TIEFE else None
+        if skript is not None:
+            erg.extend(_befehle(skript, "shell", tiefe + 1))
         elif tok:
             erg.append(tok)
     return erg
 
 
+def _flag_an(args: list[str], name: str) -> bool:
+    """Ist die Option `name` gesetzt? `--name`, `--name=true` ja; `--name=false`/`=0`/`=no`/`=off` und `--no-name` nein; die
+    letzte Angabe gilt."""
+    an = False
+    for a in args:
+        if a == name:
+            an = True
+        elif a.startswith(name + "="):
+            an = a.split("=", 1)[1].strip().lower() not in ("", "false", "0", "no", "off")
+        elif a == "--no-" + name[2:]:
+            an = False
+    return an
+
+
 def _bewerte(tok: list[str]) -> tuple[str, str | None, bool | None] | None:
     """(Paketmanager, Label, skripte_aus) für npm-, pnpm- und yarn-Befehle, die installieren; sonst None. Label None: der Aufruf
-    ist lockfile-treu (`npm ci`, `--frozen-lockfile`, `--immutable`) oder ein Sonderfall (global, nur Lockfile)."""
+    ist lockfile-treu (`npm ci`, `--frozen-lockfile`, `--immutable`, jeweils nicht `=false`) oder ein Sonderfall (global,
+    nur Lockfile). `skripte_aus` nur für npm- und pnpm-Installationen: trägt der Aufruf `--ignore-scripts`?"""
     pm = tok[0]
     if pm not in ("npm", "pnpm", "yarn"):
         return None
@@ -1503,18 +1612,17 @@ def _bewerte(tok: list[str]) -> tuple[str, str | None, bool | None] | None:
     if pm == "npm":
         if sub not in ("install", "i", "ci", "clean-install") or ist_global:
             return None
-        aus = "--ignore-scripts" in args or "--ignore-scripts=true" in args
-        return pm, (f"npm {sub}" if sub in ("install", "i") else None), aus
+        return pm, (f"npm {sub}" if sub in ("install", "i") else None), _flag_an(args, "--ignore-scripts")
     if sub is None and flags & {"--version", "-v", "--help", "-h"}:
         return None
     if pm == "pnpm":
         if sub not in (None, "install", "i") or ist_global:
             return None
-        treu = any(a == "--frozen-lockfile" or a.startswith("--frozen-lockfile=") for a in args)
-        return pm, None if treu else ("nacktes `pnpm`" if sub is None else f"pnpm {sub}"), None
+        treu = _flag_an(args, "--frozen-lockfile")
+        return pm, None if treu else ("nacktes `pnpm`" if sub is None else f"pnpm {sub}"), _flag_an(args, "--ignore-scripts")
     if sub not in (None, "install") or ist_global:
         return None
-    treu = bool({"--frozen-lockfile", "--immutable"} & flags)
+    treu = _flag_an(args, "--frozen-lockfile") or _flag_an(args, "--immutable")
     return pm, None if treu else ("nacktes `yarn`" if sub is None else "yarn install"), None
 
 
@@ -1528,12 +1636,22 @@ def _aufrufe_von(zeile: int, befehle: list[list[str]]) -> list[_Aufruf]:
     return erg
 
 
-def _installationen_in(rel: str, text: str, art: str) -> list[_Aufruf]:
-    """Install-Aufrufe in Dockerfile, CI-Datei oder Makefile (`art` docker | ci | make), je Befehlssegment."""
-    erg: list[_Aufruf] = []
+def _zeile_auswerten(logisch: str, art: str, s: _Sammler | None, ende: float | None) -> list[list[str]]:
+    """Befehle einer logischen Zeile; Zeitbudget je Zeile, Zeilen über `ZEILE_MAX` nicht tokenisieren (nur zählen)."""
+    if ende is not None:
+        _zeitcheck(ende)
+    if len(logisch) > ZEILE_MAX:
+        if s is not None:
+            s.ueberlang += 1
+        return []
+    return _befehle(logisch, art)
+
+
+def _installationen_in(rel: str, text: str, art: str, s: _Sammler | None = None, ende: float | None = None):
+    """Install-Aufrufe in Dockerfile, CI-Datei oder Makefile (`art` docker | ci | make), je Befehlssegment; ein Generator,
+    damit bei Budgetablauf mitten in der Datei die bisherigen Funde erhalten bleiben."""
     for zeile, logisch in _logische_zeilen(text):
-        erg.extend(_aufrufe_von(zeile, _befehle(logisch, art)))
-    return erg
+        yield from _aufrufe_von(zeile, _zeile_auswerten(logisch, art, s, ende))
 
 
 def _skript_zeilen(text: str) -> dict[str, int]:
@@ -1558,19 +1676,17 @@ def _skript_zeilen(text: str) -> dict[str, int]:
     return {**alle, **nach}
 
 
-def _skript_aufrufe(text: str, daten: dict) -> list[_Aufruf]:
+def _skript_aufrufe(text: str, daten: dict, s: _Sammler | None = None, ende: float | None = None):
     scripts = daten.get("scripts")
     if not isinstance(scripts, dict):
-        return []
+        return
     zeilen = _skript_zeilen(text)
-    erg: list[_Aufruf] = []
     for name, wert in scripts.items():
         if not isinstance(wert, str):
             continue
         zeile = zeilen.get(name, 1) if isinstance(name, str) else 1
         for teil in wert.splitlines():
-            erg.extend(_aufrufe_von(zeile, _befehle(teil, "skript")))
-    return erg
+            yield from _aufrufe_von(zeile, _zeile_auswerten(teil, "skript", s, ende))
 
 
 # ------------------------------------------------------------------------------------ lieferkette: Lockfiles
@@ -1590,14 +1706,17 @@ def _npm_skript_pakete(text: str) -> list[tuple[str, str]]:
 
 
 def _pnpm_name(kopf: str) -> str:
-    """Paketname aus einem Kopf von `pnpm-lock.yaml` (`/name@1.0.0`, `name@1.0.0(peer)`, `/@scope/name/1.0.0`)."""
+    """Paketname aus einem Kopf von `pnpm-lock.yaml` (`/name@1.0.0`, `name@1.0.0(peer)`, `/@scope/name/1.0.0`,
+    `/name/1.0.0_peer@x`): der Name endet beim ersten `@` oder `/` nach dem Scope."""
     h = kopf.strip().rstrip(":").strip().strip("\"'").lstrip("/")
-    gescopt = h.startswith("@")
-    i = h.find("@", 1 if gescopt else 0)
-    if i > 0:
-        return h[:i]
-    teile = h.split("/")
-    return "/".join(teile[:2] if gescopt else teile[:1])
+    start = 0
+    if h.startswith("@"):
+        schraeg = h.find("/")
+        if schraeg < 0:
+            return h
+        start = schraeg + 1
+    m = re.search(r"[@/]", h[start:])
+    return h if m is None else h[:start + m.start()]
 
 
 def _pnpm_skript_pakete(text: str) -> list[tuple[str, int]]:
@@ -1658,10 +1777,11 @@ def _entwurf(klasse: str, stufe: str, datei: str, zeile: int, titel: str, beschr
             "code_pfad": [f"{datei}:{zeile}"]}
 
 
-def _erwartet_installation(label: str) -> str:
-    if "npm" in label:
+def _erwartet_installation(pm: str) -> str:
+    """Abhilfe je Paketmanager (`npm` | `pnpm` | `yarn`), nicht aus dem Label abgeleitet (`npm` steckt in `pnpm`)."""
+    if pm == "npm":
         return "`npm ci` statt `npm install` verwenden (installiert exakt die Versionen aus dem Lockfile)"
-    if "pnpm" in label:
+    if pm == "pnpm":
         return "`pnpm install --frozen-lockfile` verwenden (bricht ab, wenn das Lockfile nicht passt)"
     return "`yarn install --immutable` (yarn berry) bzw. `yarn install --frozen-lockfile` (yarn 1) verwenden"
 
@@ -1683,13 +1803,13 @@ def _statisch(quelle: str, ende: float, s: _Sammler) -> None:
             kopf = _je_datei(s, rel, lambda r=rel: _kopf_lesen(os.path.join(quelle, r), YARN_V1_KOPF))
             yarn_v1 = yarn_v1 or (kopf is not None and YARN_V1_MARKE in kopf)
 
-    npm_zeilen: list[bool] = []                       # `--ignore-scripts` je npm-Installationszeile (install/i/ci, nicht global)
+    pm_zeilen: dict[str, list[bool]] = {"npm": [], "pnpm": []}   # `--ignore-scripts` je Installationszeile (nicht global)
     pkg_daten: dict[str, object] = {}                 # Ordner -> geparstes package.json (None: nicht auswertbar)
     gesehen: set[tuple[str, int]] = set()
 
     def installation(rel: str, art: str, aufruf: _Aufruf) -> None:
         if aufruf.skripte_aus is not None:
-            npm_zeilen.append(aufruf.skripte_aus)
+            pm_zeilen[aufruf.pm].append(aufruf.skripte_aus)
         if aufruf.label is None or (rel, aufruf.zeile) in gesehen:
             return
         if art == "ci" and (aufruf.pm == "pnpm" or (aufruf.pm == "yarn" and not yarn_v1)):
@@ -1701,7 +1821,7 @@ def _statisch(quelle: str, ende: float, s: _Sammler) -> None:
             f"In {rel}:{aufruf.zeile} installiert {befehl} die Abhängigkeiten, ohne an das Lockfile gebunden zu sein.",
             "Builds und Deployments ziehen beim Installieren neue, ungeprüfte Versionen; ein kompromittiertes oder "
             "manipuliertes Paket gelangt so unbemerkt in Build und Betrieb, und Builds sind nicht reproduzierbar.",
-            _erwartet_installation(befehl)))
+            _erwartet_installation(aufruf.pm)))
 
     # package.json: Abhängigkeiten (lockfile-fehlt) und scripts
     pakete = baum.pakete
@@ -1724,7 +1844,7 @@ def _statisch(quelle: str, ende: float, s: _Sammler) -> None:
                     raise TypeError(type(daten).__name__)
             pkg_daten[ordner] = daten
             if text is not None:
-                for a in _skript_aufrufe(text, daten):
+                for a in _skript_aufrufe(text, daten, s, ende):
                     installation(rel, "skript", a)
 
         _je_datei(s, rel, pruefen)
@@ -1745,7 +1865,7 @@ def _statisch(quelle: str, ende: float, s: _Sammler) -> None:
         def pruefen_text(rel=rel, art=art, groesse=groesse) -> None:
             text = _lese_text(quelle, rel, groesse, s)
             if text is not None:
-                for a in _installationen_in(rel, text, art):
+                for a in _installationen_in(rel, text, art, s, ende):
                     installation(rel, art, a)
 
         _je_datei(s, rel, pruefen_text)
@@ -1757,7 +1877,13 @@ def _statisch(quelle: str, ende: float, s: _Sammler) -> None:
         lockfiles = lockfiles[:MAX_LOCKFILES]
     if not lockfiles:
         return
-    npm_schutz = bool(npm_zeilen) and all(npm_zeilen)
+    # Schutzmaßnahmen gelten je Lockfile-Typ, jeder Paketmanager liest nur seine eigene Konfiguration:
+    #   npm-Lockfile:  `.npmrc` mit `ignore-scripts=true` oder `--ignore-scripts` in allen npm-Installationszeilen
+    #   pnpm-Lockfile: `.npmrc` mit `ignore-scripts=true`, `--ignore-scripts` in allen pnpm-Installationszeilen,
+    #                  `onlyBuiltDependencies`/`neverBuiltDependencies` oder `packageManager: pnpm@>=10`
+    # yarn-Lockfiles tragen kein Install-Skript-Merkmal und werden nicht geprüft; `enableScripts: false` (`.yarnrc.yml`) hat
+    # daher keine Wirkung auf npm- oder pnpm-Lockfiles und wird nicht gelesen.
+    zeilen_schutz = {pm: bool(z) and all(z) for pm, z in pm_zeilen.items()}
     cache: dict[tuple[str, str], str | None] = {}
 
     def konfig_text(ordner: str, name: str) -> str | None:
@@ -1767,16 +1893,15 @@ def _statisch(quelle: str, ende: float, s: _Sammler) -> None:
                                      if eintrag else None)
         return cache[(ordner, name)]
 
-    def geschuetzt(ordner: str) -> bool:
-        if npm_schutz:
+    def geschuetzt(ordner: str, pm: str) -> bool:
+        if zeilen_schutz[pm]:
             return True
         for o in _eltern(ordner):
             npmrc = konfig_text(o, ".npmrc")
             if npmrc is not None and _npmrc_ignore_scripts(npmrc):
                 return True
-            yarnrc = konfig_text(o, ".yarnrc.yml")
-            if yarnrc is not None and any(YARNRC_SKRIPTE_AUS.fullmatch(z) for z in yarnrc.splitlines()):
-                return True
+            if pm != "pnpm":
+                continue
             workspace = konfig_text(o, "pnpm-workspace.yaml")
             if workspace is not None and any(PNPM_LISTE.match(z) for z in workspace.splitlines()):
                 return True
@@ -1808,13 +1933,16 @@ def _statisch(quelle: str, ende: float, s: _Sammler) -> None:
                 betroffen = _npm_skript_pakete(text)
                 namen = [n for n, _ in betroffen]
                 zeile = _zeile(text.splitlines(), betroffen[0][0], betroffen[0][1], _npm_index(text), name) if betroffen else 1
-            if not betroffen or geschuetzt(_ordner_von(rel)):
+            pm = "pnpm" if name == "pnpm-lock.yaml" else "npm"
+            if not betroffen or geschuetzt(_ordner_von(rel), pm):
                 return
+            massnahmen = ("`ignore-scripts=true` in `.npmrc`, `--ignore-scripts` in allen pnpm-Installationen, pnpm-Freigabeliste, "
+                          "`packageManager: pnpm@10` oder neuer" if pm == "pnpm" else
+                          "`ignore-scripts=true` in `.npmrc`, `--ignore-scripts` in allen npm-Installationen")
             s.entwurf(_entwurf(
                 "install-skripte-offen", "P3", rel, zeile, f"Install-Skripte in {rel} nicht abgeschaltet",
                 f"Das Lockfile {rel} enthält {len(betroffen)} Paket(e) mit Install-Skripten ({_paketnamen_text(namen)}), und keine "
-                "Schutzmaßnahme greift (`ignore-scripts=true` in `.npmrc`, `--ignore-scripts` in allen npm-Installationen, "
-                "pnpm-Freigabeliste, yarn `enableScripts: false`).",
+                f"Schutzmaßnahme für {pm} greift ({massnahmen}).",
                 "Beim Installieren laufen die Install-Skripte der Pakete (preinstall, install, postinstall) mit den Rechten des "
                 "Installierenden; ein kompromittiertes Paket führt so Code auf Entwickler- und Build-Rechnern aus.",
                 "Install-Skripte abschalten (`ignore-scripts=true` in `.npmrc`) oder gezielt freigeben "
