@@ -108,11 +108,19 @@ class Umgebung:
     def marker(self, lauf=LAUF):
         return os.path.join(self.zustand(lauf), "lieferkette", "geschwaerzt")
 
-    def marker_setzen(self, lauf=LAUF):
+    def marker_setzen(self, lauf=LAUF, kopie="aus-fertig-marker"):
+        """Schwärzungs-Marker wie `lieferkette.py secrets` ihn setzt: mit der Kennung der Arbeitskopie (`id` aus `quelle.fertig`,
+        sonst ein Platzhalter für Läufe ohne Arbeitskopie)."""
         pfad = self.marker(lauf)
         os.makedirs(os.path.dirname(pfad), exist_ok=True)
+        if kopie == "aus-fertig-marker":
+            try:
+                with open(os.path.join(self.zustand(lauf), "quelle.fertig"), encoding="utf-8") as f:
+                    kopie = json.load(f).get("id", "ohne-id")
+            except OSError:
+                kopie = "ohne-arbeitskopie"
         with open(pfad, "w") as f:
-            f.write("")
+            json.dump({"geschwaerzt": 0, "sha": "0" * 40, "kopie": kopie}, f)
         return pfad
 
 
@@ -1800,3 +1808,62 @@ def test_vorbereiten_mit_ausreichendem_budget_laeuft_normal_haertung_i3(umg, tmp
     r = umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo, env=umg.env(SECURITY_AUDIT_VORBEREITEN_BUDGET="120"))
     assert r.returncode == 0, r.stderr
     assert os.path.isfile(os.path.join(umg.zustand(), "quelle.fertig"))
+
+
+# ---- Härtung TF2: der Marker gehört zu genau einer Arbeitskopie
+
+def fertig_id(umg, lauf=LAUF):
+    with open(os.path.join(umg.zustand(lauf), "quelle.fertig"), encoding="utf-8") as f:
+        return json.load(f)["id"]
+
+
+def test_vorbereiten_vergibt_je_kopie_eine_neue_kennung(umg, tmp_path):
+    repo = repo_mit(tmp_path, MINI, name="kunde-kennung")
+    assert umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo).returncode == 0
+    erste = fertig_id(umg)
+    assert re.fullmatch(r"[0-9a-f]{32}", erste)
+    assert umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo).returncode == 0
+    assert fertig_id(umg) != erste
+
+
+def test_kopie_kennung_liest_die_id_aus_dem_fertig_marker(temp_ordner, tmp_path):
+    zustand = poc.zustand_ordner(LAUF)
+    assert poc.kopie_kennung(LAUF) is None                               # kein Zustandsordner
+    os.makedirs(zustand)
+    assert poc.kopie_kennung(LAUF) is None                               # kein Marker
+    for inhalt in ("", "kein json", "[]", '{"id": 5}', '{"id": ""}', '{"fertig": true}'):
+        with open(os.path.join(zustand, "quelle.fertig"), "w") as f:
+            f.write(inhalt)
+        assert poc.kopie_kennung(LAUF) is None, inhalt
+    with open(os.path.join(zustand, "quelle.fertig"), "w") as f:
+        f.write('{"fertig": true, "id": "abc123"}')
+    assert poc.kopie_kennung(LAUF) == "abc123"
+    os.unlink(os.path.join(zustand, "quelle.fertig"))
+    ziel = tmp_path / "anderswo.json"
+    ziel.write_text('{"id": "fremd"}')
+    os.symlink(ziel, os.path.join(zustand, "quelle.fertig"))
+    assert poc.kopie_kennung(LAUF) is None                               # ein Symlink ist kein Marker
+
+
+def test_bauen_marker_einer_anderen_kopie_verweigert(umg, tmp_path):
+    """Marker aus einer früheren Kopie (z. B. `secrets` lief über ein `vorbereiten` hinweg): kein Bau auf der neuen,
+    ungeschwärzten Kopie."""
+    vorbereitet(umg, tmp_path)
+    umg.fake_gitleaks()
+    umg.marker_setzen(kopie="0" * 32)
+    r = umg.poc("bauen", "--lauf", LAUF, env=umg.env(SECURITY_AUDIT_OHNE=""))
+    assert r.returncode == 4 and r.stdout.splitlines()[0] == "kategorie: nicht-geschwaerzt"
+    assert [a for a in umg.aufrufe() if a["args"][0] == "build"] == []
+
+
+@pytest.mark.parametrize("inhalt", ["", "kein json", "[]", '{"geschwaerzt": 0}', '{"kopie": 5}', '{"kopie": null}'])
+def test_bauen_marker_ohne_kennung_der_kopie_verweigert(umg, tmp_path, inhalt):
+    vorbereitet(umg, tmp_path)
+    umg.fake_gitleaks()
+    pfad = umg.marker()
+    os.makedirs(os.path.dirname(pfad), exist_ok=True)
+    with open(pfad, "w") as f:
+        f.write(inhalt)
+    r = umg.poc("bauen", "--lauf", LAUF, env=umg.env(SECURITY_AUDIT_OHNE=""))
+    assert r.returncode == 4 and r.stdout.splitlines()[0] == "kategorie: nicht-geschwaerzt"
+    assert [a for a in umg.aufrufe() if a["args"][0] == "build"] == []

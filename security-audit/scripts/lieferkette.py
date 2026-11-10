@@ -46,6 +46,8 @@ Prozessgruppe (`start_new_session=True`), die bei Zeitüberschreitung als einzig
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import functools
 import json
 import os
@@ -183,6 +185,24 @@ def _lieferkette_ordner(zustand: str) -> str:
     if not stat.S_ISDIR(st.st_mode):
         raise PocFehler(f"{pfad} ist kein Ordner (Symlink?); abgebrochen", code=1)
     return pfad
+
+
+@contextlib.contextmanager
+def _sperre(lk: str):
+    """Exklusive Sperre (flock, nicht blockierend) auf dem Ordner `<zustand>/lieferkette`: `secrets` und `abhaengigkeiten` auf
+    demselben Lauf laufen nie gleichzeitig (sie räumen sonst gegenseitig ihre Arbeitsdateien und den Marker ab). Verschiedene
+    Läufe haben verschiedene Ordner und blockieren sich nicht. Die Sperre endet mit dem Prozess, es bleibt nie ein Rest zurück;
+    wer sie nicht bekommt, wirft PocFehler (Exit 1), ohne etwas zu löschen."""
+    fd = os.open(lk, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            raise PocFehler("für diesen Lauf läuft bereits ein lieferkette.py-Befehl (secrets oder abhaengigkeiten): "
+                            "nacheinander ausführen, nicht parallel", code=1) from e
+        yield
+    finally:
+        os.close(fd)
 
 
 def _aufraeumen(lk: str) -> None:
@@ -620,10 +640,18 @@ def _kappen(befunde: list[dict], hinweise: list[str]) -> list[dict]:
 
 # ------------------------------------------------------------------------------------ secrets
 
-def _marker_setzen(marker: str, anzahl: int, sha: str) -> None:
+def _marker_setzen(marker: str, anzahl: int, sha: str, kopie: str) -> None:
+    """Marker anlegen (nur, wenn er nicht existiert), mit der Kennung der Arbeitskopie, auf der geschwärzt wurde."""
     fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0), 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump({"geschwaerzt": anzahl, "sha": sha}, f)
+        json.dump({"geschwaerzt": anzahl, "sha": sha, "kopie": kopie}, f)
+
+
+def _kopie_unveraendert(lauf: str, kopie: str) -> None:
+    """SchwaerzFehler, wenn die Arbeitskopie seit dem Start von `secrets` neu erstellt wurde (`poc.py vorbereiten` läuft auch
+    parallel): der Bericht von `gitleaks dir` und die Schwärzung gälten dann einer anderen Kopie."""
+    if poc.kopie_kennung(lauf) != kopie:
+        raise SchwaerzFehler("Arbeitskopie wurde während der Schwärzung neu erstellt (poc.py vorbereiten): secrets erneut ausführen")
 
 
 def _schwaerzung_gescheitert(grund: str) -> int:
@@ -662,7 +690,16 @@ def cmd_secrets(a: argparse.Namespace) -> int:
         _ausgabe({"werkzeug": "gitleaks", "fehlt": True, "hinweis": hinweis, "befunde_roh": [], "hinweise": [hinweis],
                   "geschwaerzt": 0})
         return 0
+    kopie = poc.kopie_kennung(a.lauf)
+    if kopie is None:
+        raise PocFehler("Arbeitskopie ohne Kennung im Fertig-Marker (anderer Stand von `poc.py vorbereiten`): erneut "
+                        "`poc.py vorbereiten --lauf … --repo …`")
     lk = _lieferkette_ordner(zustand)
+    with _sperre(lk):
+        return _secrets_mit_sperre(a, repo, quelle, lk, kopie)
+
+
+def _secrets_mit_sperre(a: argparse.Namespace, repo: str, quelle: str, lk: str, kopie: str) -> int:
     marker = poc.schwaerz_marker(a.lauf)
     start = time.monotonic()
     ende = start + _sekunden("SECURITY_AUDIT_SECRETS_BUDGET", SECRETS_BUDGET)
@@ -671,13 +708,14 @@ def cmd_secrets(a: argparse.Namespace) -> int:
     try:
         poc._entferne(marker, lk)                 # kein Marker ohne diese Schwärzung, auch nicht von einem früheren Lauf
         _aufraeumen(lk)
-        return _secrets(a, repo, quelle, lk, marker, start, teil, ende)
+        return _secrets(a, repo, quelle, lk, marker, kopie, start, teil, ende)
     finally:
         gitkopie.frist_setzen(None)
         _aufraeumen(lk)
 
 
-def _secrets(a: argparse.Namespace, repo: str, quelle: str, lk: str, marker: str, start: float, teil: float, ende: float) -> int:
+def _secrets(a: argparse.Namespace, repo: str, quelle: str, lk: str, marker: str, kopie: str, start: float, teil: float,
+             ende: float) -> int:
     for ordner in ("leer", "leer-ignore"):
         os.mkdir(os.path.join(lk, ordner), 0o700)
     with open(os.path.join(lk, "gitleaks.toml"), "w", encoding="utf-8") as f:
@@ -689,12 +727,15 @@ def _secrets(a: argparse.Namespace, repo: str, quelle: str, lk: str, marker: str
         hinweise += _standard_ausnahmen_hinweise(quelle)
         _ignore_entfernen(ignore, quelle)
         ende_dir = _dir_frist(start, teil, time.monotonic(), ende)
-        anzahl, schwaerz_hinweise = _schwaerze_arbeitskopie(quelle, _gitleaks_dir(quelle, lk, ende_dir), ende)
+        bericht = _gitleaks_dir(quelle, lk, ende_dir)
+        _kopie_unveraendert(a.lauf, kopie)                # vor dem ersten Schreiben: der Bericht gilt dieser Kopie
+        anzahl, schwaerz_hinweise = _schwaerze_arbeitskopie(quelle, bericht, ende)
+        _kopie_unveraendert(a.lauf, kopie)
     except SchwaerzFehler as e:
         return _schwaerzung_gescheitert(str(e))
     hinweise += schwaerz_hinweise
     try:
-        _marker_setzen(marker, anzahl, a.sha)
+        _marker_setzen(marker, anzahl, a.sha, kopie)
     except OSError as e:
         return _schwaerzung_gescheitert(f"Marker nicht setzbar ({e.strerror})")
     befunde: list[dict] = []
@@ -1222,14 +1263,15 @@ def cmd_abhaengigkeiten(a: argparse.Namespace) -> int:
         return 0
     lk = _lieferkette_ordner(zustand)
     abh = os.path.join(lk, "abh")
-    ende = time.monotonic() + _sekunden("SECURITY_AUDIT_ABH_BUDGET", ABH_BUDGET)
-    try:
-        poc._entferne(abh, lk)                    # Reste eines früheren Aufrufs
-        os.mkdir(abh, 0o700)
-        os.mkdir(os.path.join(abh, "leer"), 0o700)
-        ergebnis = _abhaengigkeiten(quelle, lk, abh, ende)
-    finally:
-        poc._entferne(abh, lk)                    # auch bei Fehler und Budgetablauf; scheitert das, endet der Befehl mit Exit 1
+    with _sperre(lk):
+        ende = time.monotonic() + _sekunden("SECURITY_AUDIT_ABH_BUDGET", ABH_BUDGET)
+        try:
+            poc._entferne(abh, lk)                # Reste eines früheren Aufrufs
+            os.mkdir(abh, 0o700)
+            os.mkdir(os.path.join(abh, "leer"), 0o700)
+            ergebnis = _abhaengigkeiten(quelle, lk, abh, ende)
+        finally:
+            poc._entferne(abh, lk)                # auch bei Fehler und Budgetablauf; scheitert das, endet der Befehl mit Exit 1
     _ausgabe(ergebnis)
     return 0
 

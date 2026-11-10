@@ -9,9 +9,11 @@ Lockfiles und alle Testdaten entstehen zur Laufzeit in tmp_path (keine Lockfiles
 mit dem echten osv-scanner läuft nur mit `SECURITY_AUDIT_NETZ=1`. Signale gehen nur an Prozessgruppen, die der getestete Code
 selbst gestartet hat; die Tests enthalten keine Kill-Logik.
 """
+import http.server
 import io
 import json
 import os
+import threading
 import shutil
 import subprocess
 import sys
@@ -28,6 +30,7 @@ import lieferkette  # noqa: E402
 LIEFERKETTE = os.path.join(HIER, "lieferkette.py")
 LAUF = "0a1b2c3d"
 NETZ = os.environ.get("SECURITY_AUDIT_NETZ") == "1"      # vor der autouse-Fixture lesen
+ECHTES_URLOPEN = urllib.request.urlopen                  # die autouse-Fixture sperrt `urlopen`; nur Loopback-Tests nutzen das Original
 KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 KEV_UA = "security-audit/1 (+https://github.com/schauersbergern/generalskills)"
 
@@ -983,3 +986,26 @@ def test_semver_vergleich_vorabversion_fuehrende_nullen_antisymmetrisch(a, b):
 def test_kev_ids_tiefe_verschachtelung_ist_kevfehler():
     with pytest.raises(lieferkette.KevFehler):
         lieferkette._kev_ids(b"[" * 200000)
+
+
+# ------------------------------------------------------------------------------------ Härtung TF2: parallele Befehle
+
+def test_zweites_abhaengigkeiten_auf_demselben_lauf_verweigert_ohne_etwas_zu_loeschen(umg):
+    """`abhaengigkeiten` (und `secrets`) teilen sich je Lauf eine Sperre auf `<zustand>/lieferkette`: wer sie nicht bekommt,
+    endet mit Exit 1, ohne die Arbeitsdateien des laufenden Befehls zu löschen."""
+    import fcntl
+    umg.schreibe("package-lock.json", npm_lock(("node_modules/a", "1.0.0", False)))
+    umg.fake_osv(standard={"rc": 0})
+    ausgabe(umg.abh())
+    laufender = os.path.join(umg.lk(), "abh")
+    os.makedirs(laufender)                                                       # Arbeitsordner des (gedachten) laufenden Befehls
+    fd = os.open(umg.lk(), os.O_RDONLY)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        r = umg.abh()
+        assert r.returncode == 1 and "läuft bereits" in r.stderr, r.stdout + r.stderr
+        assert os.path.isdir(laufender)
+        assert len(umg.aufrufe()) == 1
+    finally:
+        os.close(fd)
+

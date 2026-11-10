@@ -670,7 +670,7 @@ def test_marker_setzen_in_unbeschreibbarem_ordner_wirft_oserror(tmp_path):
         if os.access(ordner, os.W_OK):
             pytest.skip("Ordner trotz 0500 beschreibbar (root?)")
         with pytest.raises(OSError):
-            lieferkette._marker_setzen(str(ordner / "geschwaerzt"), 0, "a" * 40)
+            lieferkette._marker_setzen(str(ordner / "geschwaerzt"), 0, "a" * 40, "k" * 32)
     finally:
         ordner.chmod(0o700)
     assert not os.path.lexists(ordner / "geschwaerzt")
@@ -684,7 +684,7 @@ def test_marker_nicht_setzbar_ist_exit4_ohne_marker(umg, monkeypatch, capsys):
     monkeypatch.setattr(lieferkette, "fehlt", lambda name: False)
     monkeypatch.setattr(lieferkette, "_gitleaks_dir", lambda quelle, lk, ende: [])
 
-    def marker_scheitert(marker, anzahl, sha):
+    def marker_scheitert(marker, anzahl, sha, kopie):
         raise OSError(errno.EACCES, "Permission denied")
 
     def historie_darf_nicht_laufen(*args, **kwargs):
@@ -1329,3 +1329,112 @@ def test_secrets_budget_beim_commit_check_behaelt_die_befunde(umg, monkeypatch, 
     out = json.loads(aus.out)
     assert [(b["datei"], b["in_head"]) for b in out["befunde_roh"]] == [("src/a.js", None)]
     assert "in_head für 1 von 1 Fundstellen nicht ermittelt (Zeitlimit)" in out["hinweise"]
+
+
+# ------------------------------------------------------------------------------------ Härtung TF2: Marker und Arbeitskopie, parallele Befehle
+
+def marker_inhalt(umg):
+    with open(umg.marker(), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def fertig_id(umg):
+    with open(os.path.join(umg.zustand(), "quelle.fertig"), encoding="utf-8") as f:
+        return json.load(f)["id"]
+
+
+def test_marker_traegt_die_kennung_der_arbeitskopie(umg):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    ausgabe(secrets(umg, v))
+    assert marker_inhalt(umg) == {"geschwaerzt": 0, "sha": v.sha, "kopie": fertig_id(umg)}
+
+
+def test_secrets_ohne_kennung_im_fertig_marker_ist_aufruffehler(umg):
+    v = vorbereiten(umg, [MINI])
+    with open(os.path.join(umg.zustand(), "quelle.fertig"), "w") as f:
+        f.write('{"fertig": true}')                                       # Stand vor der Kennung: neu vorbereiten
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    r = secrets(umg, v)
+    assert r.returncode == 2 and "vorbereiten" in r.stderr
+    assert not os.path.lexists(umg.marker()) and umg.aufrufe() == []
+
+
+def test_vorbereiten_waehrend_der_schwaerzung_setzt_keinen_marker(umg, monkeypatch, capsys):
+    """Wird die Arbeitskopie während `secrets` neu erstellt (`poc.py vorbereiten`), gilt der Bericht von `gitleaks dir` nicht
+    mehr für sie: Exit 4, kein Marker (sonst stünde er auf einer ungeschwärzten Kopie)."""
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    echt = lieferkette._gitleaks_dir
+
+    def dir_und_dazwischen_vorbereiten(quelle, lk, ende):
+        bericht = echt(quelle, lk, ende)
+        r = umg.poc("vorbereiten", "--lauf", LAUF, "--repo", v.repo)
+        assert r.returncode == 0, r.stderr
+        return bericht
+
+    monkeypatch.setattr(lieferkette, "_gitleaks_dir", dir_und_dazwischen_vorbereiten)
+    rc, aus = inproc_secrets(umg, v, monkeypatch, capsys)
+    assert rc == 4, aus.out + aus.err
+    assert "kategorie: schwaerzung-fehlgeschlagen" in aus.out.splitlines() and "neu erstellt" in aus.err
+    assert not os.path.lexists(umg.marker())
+
+
+def test_vorbereiten_nach_der_schwaerzung_vor_dem_marker_setzen_wird_erkannt(umg, monkeypatch, capsys):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    echt = lieferkette._schwaerze_arbeitskopie
+
+    def schwaerzen_und_dazwischen_vorbereiten(quelle, bericht, ende=None):
+        erg = echt(quelle, bericht, ende)
+        assert umg.poc("vorbereiten", "--lauf", LAUF, "--repo", v.repo).returncode == 0
+        return erg
+
+    monkeypatch.setattr(lieferkette, "_schwaerze_arbeitskopie", schwaerzen_und_dazwischen_vorbereiten)
+    rc, aus = inproc_secrets(umg, v, monkeypatch, capsys)
+    assert rc == 4 and "neu erstellt" in aus.err and not os.path.lexists(umg.marker())
+
+
+def sperre_halten(pfad):
+    """Hält die gleiche Sperre wie `lieferkette.py` (flock auf dem Ordner `<zustand>/lieferkette`)."""
+    import fcntl
+    fd = os.open(pfad, os.O_RDONLY)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return fd
+
+
+def test_zweites_secrets_auf_demselben_lauf_verweigert_ohne_etwas_zu_loeschen(umg):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    ausgabe(secrets(umg, v))                                                      # Marker und Ordner anlegen
+    alt = lesen(umg.marker())
+    fd = sperre_halten(umg.lieferkette_ordner())
+    try:
+        r = secrets(umg, v)
+        assert r.returncode == 1 and "läuft bereits" in r.stderr, r.stdout + r.stderr
+        assert lesen(umg.marker()) == alt                                         # der laufende Befehl behält seinen Marker
+        assert len(umg.aufrufe()) == 2                                            # nur die beiden Aufrufe des ersten Laufs
+    finally:
+        os.close(fd)
+    assert ausgabe(secrets(umg, v))["geschwaerzt"] == 0                           # Sperre frei: läuft wieder
+
+
+def test_sperre_gehoert_zum_zustandsordner_des_laufs(umg):
+    """Zwei Audits auf verschiedenen Läufen blockieren sich nicht."""
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    ausgabe(secrets(umg, v))
+    anderer = umg.zustand("ffeeddcc")
+    os.makedirs(anderer, mode=0o700)
+    fd = sperre_halten(umg.lieferkette_ordner())
+    try:
+        with lieferkette._sperre(lieferkette._lieferkette_ordner(anderer)):
+            pass
+        with pytest.raises(lieferkette.PocFehler):
+            with lieferkette._sperre(umg.lieferkette_ordner()):
+                pass
+    finally:
+        os.close(fd)
+    with lieferkette._sperre(umg.lieferkette_ordner()):                         # nach dem Loslassen wieder frei
+        pass
+

@@ -679,7 +679,7 @@ def test_skill_marker_primaerquelle_ist_die_ausgabe_m1():
     assert "prüfbar mit `ls`;" not in zeile and "`ls <zustand>/lieferkette/geschwaerzt`" in zeile
     # Vertrag mit dem Skript: Marker vor der Ausgabe, `geschwaerzt` ist eine Anzahl
     quelle = _lies(os.path.join(HIER, "lieferkette.py"))
-    assert 'json.dump({"geschwaerzt": anzahl, "sha": sha}, f)' in quelle
+    assert 'json.dump({"geschwaerzt": anzahl, "sha": sha, "kopie": kopie}, f)' in quelle
 
 
 def test_skill_zeitbudget_der_schwaerzung_ist_abbruch_m2():
