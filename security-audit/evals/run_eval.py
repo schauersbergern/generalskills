@@ -61,7 +61,7 @@ def erlaubte_regeln(skill_ordner: str, ausgabe: str, home: str, tmp: str | None 
       Temp-Ordners), nicht auf das ganze Temp-Repo; `Glob`/`Grep` ohne Pfadregel (die CLI hat dafür keine
       dokumentierte Pfadsyntax; Offener Punkt im Bericht).
     - Write/Edit nur im Ausgabeordner (`//` = absoluter Pfad ab Wurzel).
-    - Bash: `poc.py` (kopierter Skill), `bericht.py kontext`, `bericht.py rendern <ausgabe>/*`, `agent-stats.py add
+    - Bash: `poc.py` (kopierter Skill), `bericht.py kontext`, `bericht.py repo` (beide read-only), `bericht.py rendern <ausgabe>/*`, `agent-stats.py add
       <ausgabe>/*` (mit `~` und mit absolutem `home`) und `ls`. Die `*`-Muster treffen auch `..`-Pfade (Restrisiko)."""
     absolut = lambda pfad: "/" + pfad                    # "//<absoluter Pfad ohne führenden />"
     if tmp is None:
@@ -79,6 +79,8 @@ def erlaubte_regeln(skill_ordner: str, ausgabe: str, home: str, tmp: str | None 
         f"Bash(python3 -I {skill_ordner}/scripts/poc.py *)",
         f"Bash({bericht} kontext)",
         f"Bash({bericht} kontext *)",
+        f"Bash({bericht} repo)",
+        f"Bash({bericht} repo *)",
         f"Bash({bericht} rendern {ausgabe}/*)",
         f"Bash(python3 {stats} add {ausgabe}/*)",
         f"Bash(python3 {stats_abs} add {ausgabe}/*)",

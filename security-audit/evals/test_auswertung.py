@@ -876,7 +876,7 @@ def test_regeln_passen_zu_skill():
     regeln = run_eval.erlaubte_regeln(skill, aus, home)
     bash = [r for r in regeln if r.startswith("Bash(")]
     zeilen = _aufrufzeilen()
-    gesehen = {"poc": 0, "kontext": 0, "rendern": 0, "add": 0}
+    gesehen = {"poc": 0, "kontext": 0, "repo": 0, "rendern": 0, "add": 0}
     assert len(zeilen) >= 5
     for z in zeilen:
         z = z.replace("${CLAUDE_SKILL_DIR}", skill).replace("<SKILL_DIR>", skill)
@@ -884,13 +884,15 @@ def test_regeln_passen_zu_skill():
         if "<skript>" in z or z.rstrip().endswith(".py …"):              # allgemeine Vorlagen in Grundregel 8
             continue
         assert any(_regel_passt(r, z) for r in bash), f"keine Regel für: {z}"
-        for schluessel, marke in (("poc", "/poc.py "), ("kontext", "bericht.py kontext"), ("rendern", "bericht.py rendern "),
+        for schluessel, marke in (("poc", "/poc.py "), ("kontext", "bericht.py kontext"), ("repo", "bericht.py repo"), ("rendern", "bericht.py rendern "),
                                   ("add", "agent-stats.py add ")):
             gesehen[schluessel] += marke in z
     assert all(gesehen.values()), gesehen                                # jede Form kommt im Skill-Text vor
     assert f"Bash(python3 -I {skill}/scripts/poc.py *)" in regeln
     assert f"Bash(python3 -I {skill}/scripts/bericht.py kontext)" in regeln
     assert f"Bash(python3 -I {skill}/scripts/bericht.py kontext *)" in regeln
+    assert f"Bash(python3 -I {skill}/scripts/bericht.py repo)" in regeln
+    assert f"Bash(python3 -I {skill}/scripts/bericht.py repo *)" in regeln
     assert f"Bash(python3 -I {skill}/scripts/bericht.py rendern {aus}/*)" in regeln
     assert f"Bash(python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py add {aus}/*)" in regeln
     assert f"Bash(python3 {home}/.claude/skills/auto-feature/scripts/agent-stats.py add {aus}/*)" in regeln
