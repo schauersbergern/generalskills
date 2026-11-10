@@ -33,6 +33,8 @@ EINZEILIG = ("titel", "szenario", "erwartet", "klasse")
 WERKZEUGE = ("osv-scanner", "gitleaks", "lieferkette")
 LIEFERKETTE_KLASSEN = ("lockfile-fehlt", "installation-ohne-lockfile-treue", "install-skripte-offen")
 MAX_COMMITS = 20
+MAX_PAKETE = 300          # Pakete je Befund (so viele gibt `lieferkette.py abhaengigkeiten` insgesamt aus)
+MAX_ADVISORIES = 20       # Advisories je Paket (so viele gibt `lieferkette.py abhaengigkeiten` je Paket aus)
 MARKDOWN_COMMITS = 5      # Commits je Befund im Detailabschnitt, der Rest als „+n“
 MAX_JSON_BYTES = 16 * 1024 * 1024
 KONTEXT_BUDGET = 300      # Sekunden für `kontext` insgesamt (SECURITY_AUDIT_KONTEXT_TIMEOUT überschreibt es); Bash-Limit des Skills: 600 s
@@ -235,11 +237,15 @@ def _unter_teilpfad(datei: str, teilpfad: str) -> bool:
 
 
 def _pakete_fehler(pakete: object) -> list[str]:
-    """Fehlertexte (ohne Label) für `pakete`: Liste von Objekten mit `name`, `version` (einzeilige Texte), `advisories`
-    (Liste einzeiliger Texte), optional `behoben_in` (Text) und `kev` (true/false/null)."""
+    """Fehlertexte (ohne Label) für `pakete`: Liste von höchstens `MAX_PAKETE` Objekten mit `name`, `version` (einzeilige Texte),
+    `advisories` (Liste von höchstens `MAX_ADVISORIES` einzeiligen Texten), optional `behoben_in` (Text) und `kev`
+    (true/false/null)."""
     if not isinstance(pakete, list) or not pakete:
         return ["muss eine nichtleere Liste von Objekten {name, version, advisories} sein"]
     f: list[str] = []
+    if len(pakete) > MAX_PAKETE:
+        f.append(f"darf höchstens {MAX_PAKETE} Einträge haben, hat {len(pakete)}")
+        pakete = pakete[:MAX_PAKETE]
     for i, p in enumerate(pakete):
         if not isinstance(p, dict):
             f.append(f"[{i}] muss ein Objekt {{name, version, advisories}} sein")
@@ -255,7 +261,9 @@ def _pakete_fehler(pakete: object) -> list[str]:
         elif not isinstance(adv, list):
             f.append(f"[{i}].advisories muss eine Liste von Texten sein")
         else:
-            f.extend(f"[{i}].advisories[{j}] {msg}" for j, a in enumerate(adv) if (msg := _text_fehler(a, True)))
+            if len(adv) > MAX_ADVISORIES:
+                f.append(f"[{i}].advisories darf höchstens {MAX_ADVISORIES} Einträge haben, hat {len(adv)}")
+            f.extend(f"[{i}].advisories[{j}] {msg}" for j, a in enumerate(adv[:MAX_ADVISORIES]) if (msg := _text_fehler(a, True)))
         if "behoben_in" in p and (msg := _text_fehler(p["behoben_in"], True)):
             f.append(f"[{i}].behoben_in {msg}")
         if "kev" in p and p["kev"] is not None and type(p["kev"]) is not bool:

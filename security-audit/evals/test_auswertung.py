@@ -1989,6 +1989,24 @@ def test_auswertung_tf2_d2_commit_nicht_von_anderem_befund(deps_bericht, erw_dep
     assert alles2(deps_bericht, erw_deps, stream, secret_info)["dod"]["TF2-D2"]["ok"] is False
 
 
+def test_auswertung_tf2_d2_commit_gehoert_zum_befund_der_secret_datei(deps_bericht, erw_deps, stream, secret_info):
+    """Task 6 M-4: Der Commit muss im Befund der Secret-Datei (W3, `config/keys.js`) stehen; ein zweiter gitleaks-Befund auf
+    einer anderen Datei mit dem richtigen Commit genügt nicht."""
+    befund(deps_bericht, "config/keys.js")["commits"] = ["abcdef0"]
+    deps_bericht["befunde"].append(wbefund(9, "gitleaks", "src/anderes.js", 3, "P1"))             # trägt SECRET_COMMIT
+    d2 = alles2(deps_bericht, erw_deps, stream, secret_info)["dod"]["TF2-D2"]
+    assert d2["ok"] is False and any("Commit" in x for x in d2["details"]), d2
+
+
+def test_auswertung_tf2_d2_ohne_werkzeug_eintrag_zaehlt_jeder_gitleaks_befund(deps_bericht, erw_deps, stream, secret_info):
+    """Ohne `werkzeug`-Eintrag mit `dod` TF2-D2 gibt es keine Datei, an die der Commit zu binden wäre: wie bisher jeder
+    gitleaks-Befund."""
+    erw = {**erw_deps, "eintraege": [e for e in erw_deps["eintraege"] if e["id"] != "W3"]}
+    deps_bericht["befunde"] = [b for b in deps_bericht["befunde"] if b["datei"] != "config/keys.js"]
+    deps_bericht["befunde"].append(wbefund(9, "gitleaks", "src/anderes.js", 3, "P1"))
+    assert alles2(deps_bericht, erw, stream, secret_info)["dod"]["TF2-D2"]["ok"] is True
+
+
 def test_auswertung_tf2_d2_ohne_secret_info_oder_quellen_rot(deps_bericht, erw_deps, stream, secret_info):
     assert alles2(deps_bericht, erw_deps, stream, None)["dod"]["TF2-D2"]["ok"] is False
     assert alles2(deps_bericht, erw_deps, stream, {**secret_info, "sha256": "zz"})["dod"]["TF2-D2"]["ok"] is False
@@ -2315,7 +2333,37 @@ def test_geheim_quellen_lesen(tmp_path):
     assert run_eval.arbeitskopien_vorher(str(tmp_path / "gibt-es-nicht")) == set()
     q = run_eval.geheim_quellen_lesen(str(tmp_path / "fehlt"), str(tmp_path / "fehlt2"), str(tmp_path / "fehlt3"), str(temp),
                                       set(os.listdir(temp)))
-    assert q == {"stream": None, "claude-stderr": None}
+    assert q["stream"] is None and q["claude-stderr"] is None
+    assert q.get("ausgabe/<Ordner nicht lesbar>") is None and "ausgabe/<Ordner nicht lesbar>" in q    # fehlender Ausgabeordner: rot
+
+
+def test_geheim_quellen_lesen_unlesbarer_ordner_und_temp_ist_rot_statt_still(tmp_path, monkeypatch):
+    """Ein Ordner, den die Suche nicht lesen kann (os.walk schweigt dazu), und ein nicht lesbarer Temp-Ordner dürfen die Wert-Suche
+    nicht stillschweigend verkürzen: jeweils ein Eintrag mit Wert None (die Auswertung meldet „nicht lesbar“)."""
+    temp = tmp_path / "tmp"
+    temp.mkdir()
+    ausgabe = tmp_path / "ausgabe"
+    (ausgabe / "geheim").mkdir(parents=True)
+    (ausgabe / "geheim" / "a.md").write_text("Bericht")
+    os.chmod(ausgabe / "geheim", 0)
+    stream, fehler = tmp_path / "stream.jsonl", tmp_path / "stderr.log"
+    stream.write_text("x")
+    fehler.write_text("x")
+    echt = os.listdir
+
+    def listdir(pfad="."):
+        if os.fspath(pfad) == str(temp):
+            raise PermissionError("kein Zugriff")
+        return echt(pfad)
+
+    monkeypatch.setattr(os, "listdir", listdir)
+    try:
+        q = run_eval.geheim_quellen_lesen(str(stream), str(fehler), str(ausgabe), str(temp), set())
+    finally:
+        os.chmod(ausgabe / "geheim", 0o700)
+    assert q["arbeitskopien"] is None
+    if os.geteuid() != 0:
+        assert q["ausgabe/geheim"] is None
 
 
 # --- run_eval: --erwartung ---

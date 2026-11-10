@@ -1867,3 +1867,12 @@ def test_bauen_marker_ohne_kennung_der_kopie_verweigert(umg, tmp_path, inhalt):
     r = umg.poc("bauen", "--lauf", LAUF, env=umg.env(SECURITY_AUDIT_OHNE=""))
     assert r.returncode == 4 and r.stdout.splitlines()[0] == "kategorie: nicht-geschwaerzt"
     assert [a for a in umg.aufrufe() if a["args"][0] == "build"] == []
+
+
+def test_poc_verweist_nur_auf_vorhandene_unterbefehle_von_lieferkette():
+    """Task 4 (Vorwärtsreferenz): Der Docstring von `poc.py` nennt `lieferkette.py secrets`; das Skript und der Unterbefehl
+    müssen existieren (die Referenz war bis Task 1 voraus)."""
+    quelle = open(os.path.join(SKILL, "scripts", "poc.py"), encoding="utf-8").read()
+    assert "`lieferkette.py secrets`" in quelle
+    lieferkette = open(os.path.join(SKILL, "scripts", "lieferkette.py"), encoding="utf-8").read()
+    assert 'sub.add_parser("secrets"' in lieferkette

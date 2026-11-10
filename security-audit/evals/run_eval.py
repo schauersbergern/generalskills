@@ -299,8 +299,13 @@ def _text_lesen(pfad: str) -> str | None:
 
 
 def _dateien_unter(wurzel: str, name: str, quellen: dict[str, str | None]) -> None:
-    """Alle regulären Dateien unter `wurzel` (keine Symlinks, `.git` übersprungen) mit dem Namen `<name>/<relativ>`."""
-    for ordner, ordner_namen, dateien in os.walk(wurzel):
+    """Alle regulären Dateien unter `wurzel` (keine Symlinks, `.git` übersprungen) mit dem Namen `<name>/<relativ>`. Ein Ordner,
+    den `os.walk` nicht lesen kann (es schweigt sonst dazu), steht mit dem Wert `None` drin: nicht lesbar ist rot, nicht still."""
+    def nicht_lesbar(fehler: OSError) -> None:
+        rel = os.path.relpath(fehler.filename, wurzel) if isinstance(fehler.filename, str) and fehler.filename != wurzel else ""
+        quellen[f"{name}/{rel}" if rel and not rel.startswith("..") else f"{name}/<Ordner nicht lesbar>"] = None
+
+    for ordner, ordner_namen, dateien in os.walk(wurzel, onerror=nicht_lesbar):
         ordner_namen[:] = [n for n in ordner_namen if n != ".git" and not os.path.islink(os.path.join(ordner, n))]
         for n in dateien:
             pfad = os.path.join(ordner, n)
@@ -329,6 +334,7 @@ def geheim_quellen_lesen(stream_pfad: str, stderr_pfad: str, ausgabe: str, temp:
         namen = sorted(n for n in os.listdir(temp) if n.startswith(PRAEFIX) and n not in vorher)
     except OSError:
         namen = []
+        quellen["arbeitskopien"] = None                              # Temp-Ordner nicht lesbar: Arbeitskopien ungeprüft = rot
     for n in namen:
         quelle = os.path.join(temp, n, "quelle")
         if os.path.isdir(quelle) and not os.path.islink(quelle):

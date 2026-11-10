@@ -579,6 +579,21 @@ def test_schema_pakete_optionale_felder():
     assert bericht.pruefe_schema(mit(osv_befund(pakete=pakete))) == []
 
 
+def test_schema_pakete_und_advisories_sind_gekappt():
+    """Auch die Befund-Liste ist begrenzt: höchstens 300 Pakete je Befund, höchstens 20 Advisories je Paket (wie die Ausgabe von
+    `lieferkette.py abhaengigkeiten`); sonst wuchse das Markdown nur durch das 16-MiB-Limit begrenzt."""
+    assert bericht.MAX_PAKETE == 300 and bericht.MAX_ADVISORIES == 20
+    paket = {"name": "x", "version": "1", "advisories": ["GHSA-1"]}
+    assert bericht.pruefe_schema(mit(osv_befund(pakete=[paket] * 300))) == []
+    zu_viele = bericht.pruefe_schema(mit(osv_befund(pakete=[paket] * 301)))
+    assert any("pakete darf höchstens 300 Einträge haben, hat 301" in f for f in zu_viele), zu_viele
+    viele = {"name": "x", "version": "1", "advisories": [f"GHSA-{i}" for i in range(20)]}
+    assert bericht.pruefe_schema(mit(osv_befund(pakete=[viele]))) == []
+    viele["advisories"].append("GHSA-21")
+    f = bericht.pruefe_schema(mit(osv_befund(pakete=[viele])))
+    assert any("pakete[0].advisories darf höchstens 20 Einträge haben, hat 21" in x for x in f), f
+
+
 @pytest.mark.parametrize("fehlerhaft", [
     lambda: befund(commits=["abcdef1"]),
     lambda: befund(pakete=[{"name": "x", "version": "1", "advisories": []}]),

@@ -477,11 +477,13 @@ def _secret_info_fehler(info) -> list[str]:
     return fehler
 
 
-def pruefe_secret(bericht: dict | None, secret_info, geheim_quellen) -> list[str]:
+def pruefe_secret(bericht: dict | None, secret_info, geheim_quellen, secret_befunde: list[dict] | None = None) -> list[str]:
     """TF2-D2 (Teil Secret): (1) Der Wert steht in keiner der `geheim_quellen` (Name → Text): sha256 jedes Fensters in
     jedem alphanumerischen Lauf; ein Treffer ist ein Fehler, der nur den Namen der Quelle nennt, nie den Wert. Ohne
     Quellen ist die Prüfung nicht erfüllt (fail-closed). (2) Ein Befund mit `werkzeug` `gitleaks`, Status
-    `bestätigt`/`unbestätigt`, hat in `commits` einen Hash (mindestens 7 Zeichen), der Präfix von `secret_info.commit` ist."""
+    `bestätigt`/`unbestätigt`, hat in `commits` einen Hash (mindestens 7 Zeichen), der Präfix von `secret_info.commit` ist; mit
+    `secret_befunde` (die dem `werkzeug`-Eintrag von TF2-D2 zugeordneten Befunde, also die der Secret-Datei) zählen nur diese,
+    sonst jeder gitleaks-Befund."""
     fehler = _secret_info_fehler(secret_info)
     if fehler:
         return fehler
@@ -495,7 +497,7 @@ def pruefe_secret(bericht: dict | None, secret_info, geheim_quellen) -> list[str
                 fehler.append(f"Secret-Wert in {name} gefunden")
     commit = secret_info["commit"]
     gefunden = False
-    for b in _befunde(bericht):
+    for b in (_befunde(bericht) if secret_befunde is None else secret_befunde):
         if b.get("werkzeug") != "gitleaks" or _status(b) not in IN_LISTE or not isinstance(b.get("commits"), list):
             continue
         gefunden = gefunden or any(isinstance(c, str) and len(c) >= SECRET_MIN_PRAEFIX and commit.startswith(c.lower())
@@ -617,7 +619,9 @@ def auswerten(bericht: dict | None, erwartung: dict, stream: list[dict], porcela
                 fehler.setdefault(k, []).append(f"Erwartung {e['id']}: dod fehlt oder ungültig")
             fehler[k] += pruefe_werkzeug_eintrag(zuordnung, e)
     if mit_secret:
-        fehler["TF2-D2"] += pruefe_secret(bericht, secret_info, geheim_quellen)
+        zum_secret = [e["id"] for e in _eintraege(erwartung, "werkzeug") if e.get("dod") == "TF2-D2"]
+        fehler["TF2-D2"] += pruefe_secret(bericht, secret_info, geheim_quellen,
+                                          [b for i in zum_secret for b in zuordnung.get(i, [])] if zum_secret else None)
     if mit_hinweisen:
         fehler["TF2-D4"] += pruefe_hinweise(bericht, erwartung)
     ergebnis = {k: {"ok": not f, "details": list(f) + (hinweis if k in ("TF1-D5", "TF1-D6") else [])}
