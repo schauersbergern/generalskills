@@ -18,10 +18,10 @@ from urllib.parse import unquote
 
 ERLAUBTE_HOSTS = frozenset({"app", "db", "localhost", "127.0.0.1", "::1", "0.0.0.0"})
 
-# URL: `http(s)`/`ws(s)`/`ftp(s)`, `:`, ein oder mehr `/`/`\` (curl liest auch `http:/evil.test`); jedes andere
+# URL: Netzschema (`http(s)`, `ws(s)`, `ftp(s)`, `telnet`, `gopher`, `ldap` …; curl liest sie alle), `:`, ein oder mehr `/`/`\` (curl liest auch `http:/evil.test`); jedes andere
 # Schema oder gar keines (`${H}://evil.test`) mit zwei oder mehr `/`/`\`. Schema-Länge begrenzt (linear). Die Authority (Text bis `/ ? #` oder Whitespace) wird in zwei Lesarten gelesen: eng
 # (bis zum ersten Shell-Sonderzeichen) und erweitert, damit `http://app&@evil.test/` nicht als `app` gilt.
-_URL = re.compile(r"(?:(?P<schema>(?i:https?|wss?|ftps?)):(?P<s1>[/\\]+)"
+_URL = re.compile(r"(?:(?P<schema>(?i:https?|wss?|ftps?|telnet|gopher|dict|ldaps?|imaps?|smtps?|pop3s?|tftp|mqtt|rtsp|smbs?|sftp|scp)):(?P<s1>[/\\]+)"
                   r"|(?P<schema2>[A-Za-z][A-Za-z0-9+.\-]{0,31})?:(?P<s2>[/\\]{2,}))(?P<auth>[^\s/?#]*)")
 _URL_ENG = re.compile(r"[^'\"<>()`|;&]*")
 _NACHLAUF = "'\"),;"
@@ -158,7 +158,8 @@ def _zusatz_hosts(text: str) -> list[str]:
     """Hosts aus `Host:`-Headern (roh, dekodiert, ohne exotisches Whitespace) und aus `--resolve`,
     `--connect-to`, `-x`/`--proxy`."""
     hosts: list[str] = []
-    for variante in _varianten(text)[:2] + [_ohne_whitespace(v) for v in _varianten(text)[:2]]:
+    roh, dekodiert = text, unquote(text)
+    for variante in (roh, dekodiert, _ohne_whitespace(roh), _ohne_whitespace(dekodiert), unquote(_ohne_whitespace(roh))):
         for m in _HOST_HEADER.finditer(variante):
             h = _host_aus_authority(m.group(1))
             if h:
@@ -188,9 +189,16 @@ def verstoesse_poc(text: str) -> list[str]:
 _UNSICHER = frozenset(";&|<>$`(){}#\\\"!*")
 # Pfad absolut (`/…`) oder `~/…`, nie mit `-` beginnend (sonst `-W/x/scripts/poc.py` als Python-Option).
 _POC_ANFANG = re.compile(r"python3 (?:-I )?~?/(?:[^\s']*/)?scripts/poc\.py(?: |\Z)")
-_NETZWERKWERKZEUG = re.compile(
-    r"(?:\A|[;&|(`\n])[ \t]*(?:(?:sudo|env|xargs|command|exec|nohup|time)(?:[ \t]+(?:-[^\s;&|()`]*|\w+=[^\s;&|()`]*))*[ \t]+)*(?:[^\s;&|()`]*/)?"
-    r"(?:curl|wget|nc|ncat|netcat|telnet|ssh|scp|socat|ftp|http|httpie)(?![A-Za-z0-9_.\-/])")
+# Befehlsposition: Segmente zwischen `; & | ( ) ` \\n`, `$(` und `{` (als Wort); vorangestellt sein dürfen
+# Präfixwörter samt Optionen, Zahlen und `VAR=wert`. Wörter werden ohne `\\ ' "` und ohne Pfad verglichen.
+_BEFEHLSTRENNER = re.compile(r"[;&|()`\n]|\{(?=\s|\Z)")
+_WERKZEUGE = frozenset({"curl", "wget", "nc", "ncat", "netcat", "telnet", "ssh", "scp", "socat", "ftp", "http",
+                        "httpie"})
+_PRAEFIXE = frozenset({"!", "then", "do", "else", "elif", "if", "while", "until", "time", "nohup", "command", "exec",
+                       "busybox", "sudo", "env", "xargs", "nice", "timeout"})
+_OPTIONEN_MIT_ARGUMENT = frozenset({"-u", "-g", "-U", "-C", "-n", "-I", "-L", "-P", "-s", "-k", "-r", "-p", "-t"})
+_ZUWEISUNG = re.compile(r"[A-Za-z_]\w*=")
+_ZAHL = re.compile(r"\d+(?:\.\d+)?[smhd]?\Z")
 _DEV_NETZ = re.compile(r"/dev/(?:tcp|udp)/")
 
 
@@ -216,6 +224,34 @@ def ist_poc_aufruf(befehl: str) -> bool:
     return not in_einfach
 
 
+def _wort(wort: str) -> str:
+    """Wort ohne `\\`, `'`, `"` und ohne Pfadanteil (`\\curl`, `c\\url`, `'curl'`, `/usr/bin/curl` -> `curl`)."""
+    return wort.replace("\\", "").replace("'", "").replace('"', "").rsplit("/", 1)[-1]
+
+
+def _hat_netzwerkwerkzeug(befehl: str) -> bool:
+    """Netzwerkwerkzeug in Befehlsposition, auch hinter Präfixen (`FOO=1`, `sudo -u x`, `timeout 5`, `nice -n 3` …).
+    Jedes Wort der Präfixkette wird zuerst als Werkzeug geprüft, bevor es als Option-Argument übersprungen wird."""
+    for segment in _BEFEHLSTRENNER.split(befehl):
+        woerter = segment.split()
+        i, kette = 0, False
+        while i < len(woerter):
+            roh, w = woerter[i], _wort(woerter[i])
+            if w in _WERKZEUGE:
+                return True
+            if w in _PRAEFIXE:
+                kette = True
+            elif _ZUWEISUNG.match(roh):
+                kette = True
+            elif kette and (roh.startswith("-") or _ZAHL.match(w)):
+                if roh in _OPTIONEN_MIT_ARGUMENT and i + 1 < len(woerter) and _wort(woerter[i + 1]) not in _WERKZEUGE:
+                    i += 1
+            else:
+                break
+            i += 1
+    return False
+
+
 def _kurz(text: str) -> str:
     """Text für Meldungen: gekürzt, Steuerzeichen als Escape (kein Rohtext aus dem Befehl in der Meldung)."""
     return json.dumps(text[:80], ensure_ascii=True)
@@ -239,7 +275,7 @@ def verstoesse_bash(befehl: str, verbotene_muster: list[str]) -> list[str]:
                           for url in _urls_im_befehl(befehl))
         verstoesse.extend(f"Nicht erlaubter Host in Befehl ohne einfachen poc.py-Aufruf: {_kurz(h)}"
                           for h in dict.fromkeys(_zusatz_hosts(befehl)) if h not in ERLAUBTE_HOSTS)
-        if not verstoesse and (_NETZWERKWERKZEUG.search(befehl) or _DEV_NETZ.search(befehl)):
+        if not verstoesse and (_hat_netzwerkwerkzeug(befehl) or _DEV_NETZ.search(befehl)):
             verstoesse.append("Netzwerkwerkzeug außerhalb poc.py")
     dekodiert = unquote(befehl)
     for muster in verbotene_muster:

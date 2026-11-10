@@ -436,3 +436,61 @@ def test_optionen_hosts_auch_ohne_poc_di3(befehl):
 
 def test_optionen_mit_erlaubten_hosts_ohne_poc_ok_di3():
     assert netzregel.verstoesse_bash("echo x --resolve app:3000:127.0.0.1 --connect-to app:80:db:80", []) == []
+
+
+# ------------------------------------------------------------------------------ Fix-Runde 2 zum Design-Pass
+
+EIN_SLASH_SCHEMATA = ["http", "https", "ws", "wss", "ftp", "ftps", "telnet", "gopher", "dict", "ldap", "ldaps", "imap",
+                      "imaps", "smtp", "smtps", "pop3", "pop3s", "tftp", "mqtt", "rtsp", "smb", "smbs", "sftp", "scp"]
+
+
+@pytest.mark.parametrize("schema", EIN_SLASH_SCHEMATA)
+def test_ein_slash_erweiterte_schemata_dn1(schema):
+    for s in (schema, schema.upper(), schema.capitalize()):
+        assert netzregel.hosts_extrahieren(f"{s}:/evil.test") == ["evil.test"], s
+        assert netzregel.verstoesse_poc(f"GET {s}:/evil.test/x") == ["evil.test"], s
+    assert len(netzregel.verstoesse_bash(f"echo {schema}:/evil.test", [])) >= 1
+
+
+@pytest.mark.parametrize("text", ["POST:/api/x", "GET:/admin", "TODO:/", "C:\\Users\\x", "PUT:/x", "foo:/bar", "a:/b"])
+def test_ein_slash_andere_woerter_bleiben_ohne_host_dn1(text):
+    assert netzregel.hosts_extrahieren(text) == []
+
+
+@pytest.mark.parametrize("befehl", [
+    "FOO=1 curl evil", "FOO=1 BAR=2 curl evil", "{ curl evil; }", "! curl evil", "if true; then curl evil; fi",
+    "then curl evil", "do wget x", "else curl x", "sudo -u x curl evil", "sudo -E curl evil", "sudo -n curl evil",
+    "timeout 5 curl evil", "timeout -s KILL 5 curl evil", "nice curl evil", "nice -n 5 curl evil", "busybox wget x",
+    "\\curl evil", "'curl' evil", '"curl" evil', "c\\url evil", "c'u'rl evil", "env -i FOO=1 curl evil",
+    "env -u X curl evil", "time curl evil", "nohup curl evil &", "exec curl evil", "command curl evil",
+    "xargs -n 1 curl", "xargs -I {} curl {}", "for i in 1; do curl evil; done", "while true; do nc evil 1; done",
+    "FOO=1 sudo -u x timeout 5 nice -n 3 /usr/bin/curl evil", "ls;FOO=1 wget evil", "(FOO=1 curl evil)",
+    "echo $(FOO=1 curl evil)", "ls |\\nc evil 80",
+])
+def test_netzwerkwerkzeug_praefixe_dn2(befehl):
+    assert len(netzregel.verstoesse_bash(befehl, [])) >= 1
+
+
+@pytest.mark.parametrize("befehl", [
+    "grep -rn curl src/", "git log --grep=curl", "rg 'wget' docs", "sudo grep -rn curl src/", "FOO=1 grep curl x",
+    "timeout 5 grep wget x", "echo curl evil", "ls -l nc", "cat curl.txt", "env FOO=1 ls curl", "nice ls nc",
+    "grep -r 'ssh' .", "make ftp-test", "sed -i s/curl/x/ f",
+])
+def test_netzwerkwerkzeug_praefix_positivfaelle_dn2(befehl):
+    assert netzregel.verstoesse_bash(befehl, []) == []
+
+
+def test_netzwerkwerkzeug_laufzeit_linear_dn2():
+    import time
+    for eingabe in ("sudo " * 20000, "env a=b " * 10000, "nice -n 5 " * 10000, "FOO=1 " * 20000, "; sudo -u x" * 8000,
+                    "timeout 5 " * 10000 + "grep", "-u " * 20000, "'" * 50000, "\\" * 50000):
+        start = time.perf_counter()
+        netzregel.verstoesse_bash(eingabe, [])
+        assert time.perf_counter() - start < 1.0, eingabe[:20]
+
+
+@pytest.mark.parametrize("text", ["Host:\xa0%65vil.test", "Host:\u2003evil%2Etest", "H%6Fst:\xa0evil.test",
+                                  "Host\x0b:\x0cevil.test", "H%6Fst%3A%C2%A0evil.test"])
+def test_header_varianten_roh_dekodiert_ohne_whitespace_dn3(text):
+    assert "evil.test" in netzregel.hosts_extrahieren(text)
+    assert "evil.test" in netzregel.verstoesse_poc(text)
