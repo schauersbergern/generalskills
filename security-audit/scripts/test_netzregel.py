@@ -502,7 +502,7 @@ def test_header_varianten_roh_dekodiert_ohne_whitespace_dn3(text):
     'grep -rnE "curl|wget|fetch" src/', "rg 'http|ssh' src", 'git log --grep="fix; curl"', 'echo "a & curl"',
     "echo 'a ; curl'", 'echo "a\\"; curl"', "echo \"a(b) curl\"", "grep 'x|y' f | wc -l", 'echo "a" "b|curl"',
     "command -v curl", "command -V wget", "command -v curl ssh", "sudo command -v nc", "echo $'a\\'; curl'",
-    "find . -name x -exec grep curl {} \\;", 'echo "$(ls) curl x"', 'echo "`ls` curl x"',
+    "find . -name x -exec grep curl {} \\;", 'echo $( (ls) ) curl x', 'echo "$(ls) curl x"', 'echo "`ls` curl x"',
     'git log --format="%h|%s" --grep "curl|wget"', "awk '{ print }' f", "echo a\\;curl",
 ])
 def test_netzwerkwerkzeug_nur_an_ungequoteten_operatoren_a1(befehl):

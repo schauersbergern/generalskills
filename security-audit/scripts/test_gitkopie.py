@@ -588,7 +588,7 @@ def test_batch_ungueltige_groesse_ist_giterror_haertung_a3(tmp_path, monkeypatch
     assert any("Symlinks und LFS-Pointern nicht möglich" in h for h in hinweise), hinweise
 
 
-@pytest.mark.parametrize("groesse", ["1000000000000000", "99999999999999999999999", "9" * 5000])
+@pytest.mark.parametrize("groesse", ["999999999999999", "1000000000000000", "99999999999999999999999", "9" * 5000])
 def test_batch_absurde_groesse_ist_giterror_ohne_speicherfehler_haertung_a3(tmp_path, monkeypatch, groesse):
     repo = repo_mit(tmp_path, {"a.txt": b"a\n"})
     shim_git(tmp_path, monkeypatch, vorab='case " $* " in *" cat-file "*) read x; '
