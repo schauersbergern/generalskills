@@ -95,9 +95,13 @@ Unterbefehle mit `--lauf <id>` (außer `neu`). Namen `security-audit-<id>[-<roll
 
 ### Netzregel (eine Regel für Schema und Eval)
 
-Erlaubte Hosts: `app`, `db`, `localhost`, `127.0.0.1`, `::1`, `0.0.0.0`. Hosts werden aus URLs mit Schema gelesen, auch URL-kodiert (einmal dekodiert) und aus `-H Host:`, `--resolve`, `--connect-to`, `-x`/`--proxy`.
-- Im `poc` eines Befunds und in Bash-Befehlen, die `poc.py` aufrufen: nur erlaubte Hosts.
-- In allen anderen Bash-Befehlen: keine URL mit Schema.
+Erlaubte Hosts: `app`, `db`, `localhost`, `127.0.0.1`, `::1`, `0.0.0.0`. Hosts werden aus URLs gelesen (Schema, `:`, mindestens ein `/` oder `\`; auch URL-kodiert, einmal dekodiert; Userinfo bis zum letzten `@`) und aus `-H Host:`, `--resolve`, `--connect-to`, `-x`/`--proxy`.
+
+**Design-Pass (nach Task-Review T2 und zwei Fix-Runden):** Die Netzregel versucht nicht mehr, Shell-Syntax nachzubauen. Zwei Fix-Runden mit eigenem Zerleger erzeugten jeweils neue Umgehungen (Quotes, `$'…'`, Kommentare in `${…}`, NUL). Stattdessen gilt eine konservative Ganz-Befehl-Regel:
+- **Ein Bash-Befehl ist ein poc.py-Aufruf** nur, wenn der *ganze* Befehl ein einfacher Befehl ist: Er beginnt mit `python3 `, optional `-I `, dann einem Pfad, der auf `/scripts/poc.py` endet, und enthält außerhalb von einfachen Anführungszeichen `'…'` keines der Zeichen `; & | < > $ \` ( ) { } # \ " ! *` und keinen Zeilenumbruch. Innerhalb von `'…'` ist alles außer `'` erlaubt (bash kennt dort keine Escapes). Für solche Befehle gilt: nur erlaubte Hosts.
+- **Jeder andere Bash-Befehl** (auch zusammengesetzte mit poc.py) ist ein Nicht-poc-Befehl: Jede URL ist ein Verstoß, unabhängig von Segmenten.
+- **`poc`-Text eines Befunds:** nur erlaubte Hosts.
+- Konsequenz für den Skill: poc.py wird immer als einzelner einfacher Befehl aufgerufen; Argumente mit Sonderzeichen stehen in `'…'`; Request-Daten über `--daten-datei`.
 - Eval zusätzlich: verbotene Muster der Fixture (`fixture.invalid`) in keinem Bash-Befehl und keinem `poc`.
 
 ### Ausgabe (`scripts/bericht.py`)
