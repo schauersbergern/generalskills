@@ -460,12 +460,38 @@ def test_leerer_stream(bericht, erwartung):
     assert e["dod"]["TF1-D1"]["ok"] is True
 
 
-def test_stream_uebersprungen_sichtbar(bericht, erwartung, stream):
-    e = alles(bericht, erwartung, stream, stream_uebersprungen=2)
-    assert e["ok"] is True
+def test_stream_uebersprungen_macht_d5_rot(bericht, erwartung, stream):
+    """I3b: Übersprungene Zeilen mitten im Stream könnten einen Verstoß verbergen: D5 rot."""
+    e = alles(bericht, erwartung, stream, stream_uebersprungen=2, stream_nur_letzte=False)
+    assert e["ok"] is False and e["dod"]["TF1-D5"]["ok"] is False
     assert any("2 Stream-Zeilen" in d for d in e["dod"]["TF1-D5"]["details"])
-    assert any("2 Stream-Zeilen" in d for d in e["dod"]["TF1-D6"]["details"])
+    assert e["dod"]["TF1-D6"]["ok"] is True
     assert alles(bericht, erwartung, stream)["dod"]["TF1-D5"]["details"] == []
+    # nur_letzte gilt nur für genau eine Zeile
+    assert alles(bericht, erwartung, stream, stream_uebersprungen=2, stream_nur_letzte=True)["ok"] is False
+    assert alles(bericht, erwartung, stream, stream_uebersprungen=1)["dod"]["TF1-D5"]["ok"] is False
+
+
+def test_stream_nur_letzte_zeile_ist_hinweis(bericht, erwartung, stream):
+    e = alles(bericht, erwartung, stream, stream_uebersprungen=1, stream_nur_letzte=True)
+    assert e["ok"] is True
+    for d in ("TF1-D5", "TF1-D6"):
+        assert any("letzte Stream-Zeile" in x for x in e["dod"][d]["details"])
+
+
+def test_lade_stream_info_nur_letzte(tmp_path):
+    zeile = json.dumps(bash("a", "ls"))
+    def lade(inhalt):
+        p = tmp_path / "s.jsonl"
+        p.write_text(inhalt, encoding="utf-8")
+        return auswertung.lade_stream_info(str(p))
+    assert lade(f"{zeile}\n{zeile[:20]}") == ([bash("a", "ls")], 1, True)
+    assert lade(f"{zeile}\n{zeile[:20]}\n\n") == ([bash("a", "ls")], 1, True)   # Leerzeilen danach
+    assert lade(f"{zeile[:20]}\n{zeile}\n")[1:] == (1, False)                      # Zeile mitten im Stream
+    assert lade(f"nix\n{zeile}\n{zeile[:20]}")[1:] == (2, False)
+    assert lade(f"{zeile}\n")[1:] == (0, False)
+    events, n, nur = auswertung.lade_stream_info(os.path.join(TESTDATEN, "stream_abgeschnitten.jsonl"))
+    assert (len(events), n, nur) == (3, 2, False)                                  # "not json" und halbe letzte
 
 
 def test_schema_gate(bericht, erwartung, stream):

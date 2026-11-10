@@ -27,29 +27,38 @@ _MAX_TIEFE = 50
 
 # ------------------------------------------------------------------------------------ Stream
 
-def lade_stream(pfad: str) -> tuple[list[dict], int]:
-    """JSONL-Stream lesen. Gibt (Ereignisse, Anzahl übersprungener Zeilen) zurück. Getrennt wird nur an `\\n`
-    (ein `\\r` am Zeilenende wird toleriert); U+2028, U+2029, U+0085 und andere Unicode-Zeilentrenner innerhalb
-    eines JSON-Strings zerlegen kein Ereignis. Zeilen, die kein JSON-Objekt sind (Text, halbe letzte Zeile bei
-    Abbruch, kaputtes UTF-8), werden gezählt und übersprungen; Leerzeilen zählen nicht. Eine fehlende Datei löst
-    `OSError` aus."""
+def lade_stream_info(pfad: str) -> tuple[list[dict], int, bool]:
+    """JSONL-Stream lesen. Gibt (Ereignisse, Anzahl übersprungener Zeilen, nur_letzte) zurück. `nur_letzte` ist
+    True, wenn genau eine Zeile unlesbar war und es die letzte nichtleere Zeile ist (typisch für einen
+    abgeschnittenen Lauf); sonst False. Getrennt wird nur an `\\n` (ein `\\r` am Zeilenende wird toleriert);
+    U+2028, U+2029, U+0085 und andere Unicode-Zeilentrenner innerhalb eines JSON-Strings zerlegen kein Ereignis.
+    Zeilen, die kein JSON-Objekt sind (Text, halbe Zeile, kaputtes UTF-8), werden gezählt und übersprungen;
+    Leerzeilen zählen nicht. Eine fehlende Datei löst `OSError` aus."""
     with open(pfad, "rb") as f:
         roh = f.read()
     ereignisse: list[dict] = []
     uebersprungen = 0
+    letzte_unlesbar = False
     for zeile in roh.decode("utf-8", errors="replace").split("\n"):
         zeile = zeile.rstrip("\r")
         if not zeile.strip(" \t"):
             continue
+        letzte_unlesbar = False
         try:
             ereignis = json.loads(zeile)
         except (ValueError, RecursionError):            # JSONDecodeError, auch zu tief verschachtelt
-            uebersprungen += 1
-            continue
+            ereignis = None
         if isinstance(ereignis, dict):
             ereignisse.append(ereignis)
         else:
             uebersprungen += 1
+            letzte_unlesbar = True
+    return ereignisse, uebersprungen, uebersprungen == 1 and letzte_unlesbar
+
+
+def lade_stream(pfad: str) -> tuple[list[dict], int]:
+    """Wie `lade_stream_info`, ohne `nur_letzte`: (Ereignisse, Anzahl übersprungener Zeilen)."""
+    ereignisse, uebersprungen, _ = lade_stream_info(pfad)
     return ereignisse, uebersprungen
 
 
@@ -322,12 +331,13 @@ def pruefe_docker_leer(container: list[str], netze: list[str], images: list[str]
 
 def auswerten(bericht: dict | None, erwartung: dict, stream: list[dict], porcelain: str, ausgabe_dateien: list[str],
               neue_reviews: list[str], neue_stats: list[str], docker_listen: dict[str, list[str]],
-              stream_uebersprungen: int = 0) -> dict:
+              stream_uebersprungen: int = 0, stream_nur_letzte: bool = False) -> dict:
     """Alle Prüfungen: `{"dod": {"TF1-D1": {"ok": bool, "details": [...]}, …, "TF1-D7": …}, "ok": bool}`.
     Fehlt der Bericht (`None`), sind D1 bis D3 und D5 nicht ok mit dem Detail „kein Bericht“ (D5 meldet zusätzlich
     Verstöße aus dem Stream). D3 prüft zuerst das Bericht-Schema (`bericht.pruefe_schema`). Ein leerer Stream
-    (keine Ereignisse) macht D5 und D6 nicht ok („kein Stream“). `stream_uebersprungen` > 0 erscheint als Hinweis
-    in D5 und D6, ohne sie zu verwerfen. Eine leere Erwartung macht D1, D2 und D5 nicht ok. Fehlt ein Schlüssel in
+    (keine Ereignisse) macht D5 und D6 nicht ok („kein Stream“). Übersprungene Stream-Zeilen
+    (`stream_uebersprungen` > 0) machen D5 nicht ok (fail-closed), außer es war nur die letzte Zeile
+    (`stream_nur_letzte`, abgeschnittener Lauf); dann bleibt es ein Hinweis in D5 und D6. Eine leere Erwartung macht D1, D2 und D5 nicht ok. Fehlt ein Schlüssel in
     `docker_listen`, ist D7 nicht ok (fail-closed)."""
     muster = erwartung.get("verbotene_muster", []) if isinstance(erwartung, dict) else []
     if bericht is None:
@@ -346,8 +356,13 @@ def auswerten(bericht: dict | None, erwartung: dict, stream: list[dict], porcela
     if not stream:
         d5 = d5 + ["kein Stream"]
         d6 = d6 + ["kein Stream"]
-    hinweis = ([f"Hinweis: {stream_uebersprungen} Stream-Zeilen übersprungen (kein JSON-Objekt)"]
-               if stream_uebersprungen > 0 else [])
+    hinweis = []
+    if stream_uebersprungen > 0:
+        text = f"{stream_uebersprungen} Stream-Zeilen übersprungen (kein JSON-Objekt)"
+        if stream_nur_letzte and stream_uebersprungen == 1:
+            hinweis = [f"Hinweis: nur die letzte Stream-Zeile unlesbar (abgeschnitten?), {text}"]
+        else:
+            d5 = d5 + [text]
     listen = docker_listen if isinstance(docker_listen, dict) else {}
     d7 = [f"docker_listen: Liste {k!r} fehlt" for k in ("container", "netze", "images")
           if not isinstance(listen.get(k), list)]
