@@ -69,7 +69,7 @@ def _aufrufzeilen(text: str) -> list[str]:
     return [z for z in _code_zeilen(text) if z.startswith("python3")]
 
 
-def _frontmatter(text: str) -> dict[str, str]:
+def _frontmatter_roh(text: str) -> dict[str, str]:
     m = re.match(r"^---\n(.*?)\n---\n", text, re.DOTALL)
     assert m, "Frontmatter fehlt"
     werte = {}
@@ -78,6 +78,12 @@ def _frontmatter(text: str) -> dict[str, str]:
         if doppelpunkt:
             werte[schluessel.strip()] = wert.strip()
     return werte
+
+
+def _frontmatter(text: str) -> dict[str, str]:
+    """Werte ohne die einfachen Anführungszeichen, mit denen YAML sie einfasst."""
+    return {k: (v[1:-1].replace("''", "'") if len(v) >= 2 and v[0] == v[-1] == "'" else v)
+            for k, v in _frontmatter_roh(text).items()}
 
 
 def _hilfe(skript: str, *unterbefehl: str) -> str:
@@ -114,6 +120,22 @@ def test_frontmatter():
     assert fm["disallowed-tools"] == "WebFetch, WebSearch"
     assert fm["argument-hint"] == '[teilpfad] [projekt="…"] [repo-konfig-geprueft]'
     assert fm.get("description"), "description fehlt"
+
+
+def test_frontmatter_ist_gueltiges_yaml():
+    """Ungequotete Werte dürfen nicht mit `[`, `{`, `"`, `'`, `*`, `&`, `!`, `|`, `>`, `%`, `@` oder `` ` `` beginnen und
+    kein `: ` oder ` #` enthalten (YAML-Plain-Scalar); mit PyYAML, falls vorhanden, wird zusätzlich echt geparst."""
+    text = _lies(SKILL_MD)
+    for schluessel, wert in _frontmatter_roh(text).items():
+        if wert[:1] == "'":
+            assert wert[-1] == "'" and len(wert) >= 2, f"{schluessel}: Anführungszeichen nicht geschlossen"
+            continue
+        assert wert[:1] not in set("[{\"*&!|>%@`"), f"{schluessel}: Plain-Scalar beginnt mit {wert[:1]!r}"
+        assert ": " not in wert and " #" not in wert, f"{schluessel}: Plain-Scalar enthält ': ' oder ' #'"
+    yaml = pytest.importorskip("yaml")
+    daten = yaml.safe_load(re.match(r"^---\n(.*?)\n---\n", text, re.DOTALL).group(1))
+    assert daten["argument-hint"] == '[teilpfad] [projekt="…"] [repo-konfig-geprueft]'
+    assert all(isinstance(v, str) for v in daten.values())
 
 
 # ------------------------------------------------------------------------------------ Aufrufformen

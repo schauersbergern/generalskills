@@ -95,7 +95,7 @@ Neutrale Pfade, keine echte Anwendung.
       "erwartet": "Abfragen enthalten den Mandantenfilter aus der Sitzung; fremde IDs liefern 404",
       "klasse": "Datenzugriff ohne Mandantenfilter in Handlern mit ID-Parameter",
       "ohne_anmeldung": false, "mandantenuebergreifend": true,
-      "poc": "poc.py anfrage --rolle p1 --methode GET --pfad /api/orders/9 --header 'x-token: <TOKEN_A>' -> 200, Body enthält die Bestellung 9 mit org_id 2 (Organisation B)"
+      "poc": "poc.py anfrage --rolle p1 --methode GET --pfad /api/orders/9 --header 'Authorization: Bearer <TOKEN_A>' -> 200, Body enthält die Bestellung 9 mit org_id 2 (Organisation B)"
     },
     {
       "id": "S-2", "stufe": "P2", "status": "unbestätigt",
