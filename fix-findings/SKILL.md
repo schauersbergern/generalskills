@@ -69,7 +69,7 @@ Die teuersten Fixer-Threads von Haas Runde 2 (#174, #176) kamen auf 150 bzw. 192
    - **Hat der PR eine CI, macht sie den Rest.** Grüne CI ist ohnehin die Abbruchbedingung der Review-Schleife.
 6. **Pushen** auf den PR-Branch, ohne nachzufragen.
 7. **Abschluss:** Tabelle unten. Kam die Liste per Nachricht aus einem Reviewer-Thread, dorthin per `SendMessage` antworten und den neuen Head-SHA nennen. Adresse: `from` der Nachricht, sonst die Zeile „Antwort an:“ aus der Liste (`SendMessage` nimmt auch `local_…`-IDs). Fehlt beides, die Tabelle in den Chat.
-8. **Retro**, nur wenn die Liste vom User kam und nicht von einem Reviewer-Thread (der macht sie dann selbst): nach `~/.claude/skills/auto-feature/references/retro.md`, als eigener Block unter der Tabelle. Material sind angenommene P1/P2, auch die „angenommen, anders umgesetzt“, sowie Design-Hinweise. P3 zählen nach der P3-Regel in `retro.md`.
+8. **Retro**, nur wenn die Liste vom User kam, nicht von einem Reviewer-Thread (der macht sie selbst). Eine Liste von `pr-review-loop` erkennst du an der Zeile „Antwort an:“ und der Kopfzeile „… · Runde <r> · geprüft auf <sha>“, auch wenn der User sie als Block aus dem Chat einfügt. Die Retro läuft nach `~/.claude/skills/auto-feature/references/retro.md`, als eigener Block unter der Tabelle. Material sind angenommene P1/P2, auch die „angenommen, anders umgesetzt“, sowie Design-Hinweise. P3 zählen nach der P3-Regel in `retro.md`.
 
 ## Agent-Statistik
 

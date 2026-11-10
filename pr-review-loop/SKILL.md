@@ -21,7 +21,7 @@ Ob gemergt wird, entscheidet der User im Chat.
 
 ## Harte Grenzen (gelten auch für Mini-Fixes und bei grüner CI)
 
-- **Keine Datei ändern**, nicht committen, nicht pushen. Auch keine „Ein-Zeilen-Fixes, weil der Fixer langsam ist“. Ist kein Fixer-Thread erreichbar oder startbar, geht die Liste an den User, nicht in den Code. Einzige Ausnahme ist die eigene Agent-Statistik unter `~/.claude/agent-stats/`, außerhalb des Repos.
+- **Keine Datei ändern**, nicht committen, nicht pushen. Auch keine „Ein-Zeilen-Fixes, weil der Fixer langsam ist“. Ist kein Fixer-Thread erreichbar oder startbar, geht die Liste an den User, nicht in den Code. Einzige Ausnahmen liegen außerhalb des Repos: die eigene Agent-Statistik unter `~/.claude/agent-stats/` und die Kandidatendatei der Retro (Schritt 7) samt `.lock`, geschrieben nur über `fehlerklassen.py`.
 - **Nicht mergen**, kein Auto-Merge, nicht deployen. Keine PR-Reviews oder -Kommentare auf GitHub posten, außer der User verlangt es in diesem Chat.
 - **Arbeitsverzeichnis nicht umschalten:** kein `git checkout`, `switch`, `stash`, `reset` oder `rebase` im geteilten Verzeichnis.
 - **Code nur lesen** per `gh pr diff`, `git show <sha>:<pfad>` und `git diff <a>..<b>`.
@@ -76,7 +76,7 @@ Die Art legst du in Schritt 1 anhand der geänderten Dateien fest und nennst sie
 Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die Prüfer eines anderen.
 - **Bevorzugt:** Dieser Thread koordiniert nur und startet **im ersten Zug alles auf einmal**, je PR:
   - ohne Fixer-Namen zuerst den Fixer-Thread `fix-<n>` (Vorlage in Schritt 1),
-  - dann einen Reviewer-Thread (in der Desktop-App `mcp__ccd_session__start_session`, Brief: `/pr-review-loop <PR> "<Fixer>" [runden=<n>]` mit dem Fixer-Namen des Users bzw. `fix-<n>`; `initiation: "user_asked"`, `context: "fresh"`, `use_worktree: false` (Reviewer schreiben nicht), `background` mit Repo und PR-Liste).
+  - dann einen Reviewer-Thread (in der Desktop-App `mcp__ccd_session__start_session`, Brief: `/pr-review-loop <PR> "<Fixer>" [runden=<n>]` mit dem Fixer-Namen des Users bzw. `fix-<n>`; `initiation: "user_asked"`, `context: "fresh"`, `use_worktree: false` (Reviewer ändern keine Repo-Dateien), `background` mit Repo und PR-Liste).
   - Der Reviewer-Thread bekommt also immer einen Fixer-Namen und startet selbst keinen. Grund: Die App verweigert Starts in Zügen, die ein automatisches Ereignis ausgelöst hat, und ein Reviewer-Thread kommt erst in so einem Zug zu seiner ersten Liste.
   - Die Turn-Ende-Meldungen der Fixer landen beim Koordinator, weil er sie gestartet hat. Er nimmt sie nur zur Kenntnis und leitet nichts weiter; die Fixer antworten den Reviewer-Threads per `SendMessage` (`fix-findings`, Schritt 7).
 - **Gestapelte und Geschwister-PRs laufen ebenfalls parallel**, nicht nacheinander. Jeder Reviewer prüft den Diff gegen seine eigene PR-Basis.
@@ -172,6 +172,8 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
    - **Material:** bestätigte P1/P2 aller Runden, die nicht verworfen sind, dazu P3 nach der P3-Regel in `retro.md`. Verdachte zählen nicht, ebenso wenig CI rot und Konflikt.
    - **„Durchgerutscht“** misst du am verlinkten Plan („Review Focus“) und am Härtungsabschnitt des PR-Bodys, sofern der PR aus `auto-feature` stammt, sonst am Reviewer-Briefing.
    - **Mehrere PRs:** Die Retro macht jeder Reviewer-Thread für seinen PR, der Koordinator macht keine.
+   - **Eine Retro je PR:** Gibt der User nach der Abschlussmeldung eine weitere Runde frei und der PR endet erneut, belegt die zweite Retro nur Befunde der neuen Runden (`retro.md`, „Ablauf“).
+   - **Schreibzugriff:** Du schreibst nur über `fehlerklassen.py` in die Kandidatendatei (Harte Grenzen). Auf „übernimm K-<n>“ baust du nichts selbst, sondern gehst nach `retro.md`, „Übernahme“ vor.
 
 **Schweregrade:**
 - **P1** blockiert den Merge: Datenverlust, Sicherheit/Mandantengrenze, falsches Verhalten in einem Pfad, der im Normalbetrieb erreichbar ist.
