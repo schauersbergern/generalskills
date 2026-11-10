@@ -8,8 +8,10 @@ Die Regel baut keine Shell-Syntax nach, sondern gilt für den ganzen Befehl (Gan
 
 Hosts werden aus URLs gelesen (Schema, `:`, ein oder mehr `/`/`\\`; auch einmal URL-dekodiert und ohne
 Anführungszeichen gelesen, damit `http:''//evil.test` nicht verbirgt), aus `Host:`-Headern sowie aus den Werten
-von `--resolve`, `--connect-to`, `-x`/`--proxy`. Die Prüfung ist absichtlich konservativ: im Zweifel ein
-Verstoß, nie ein stilles Durchlassen. Nur Standardbibliothek.
+von `--resolve`, `--connect-to`, `-x`/`--proxy`. Die Prüfung ist absichtlich konservativ (im Zweifel ein Verstoß), aber
+nicht vollständig und keine Sandbox: sie erkennt URLs, Host-Optionen und bekannte Netzwerkwerkzeuge in Befehlsposition,
+nicht jeden Weg ins Netz (etwa ein Interpreter mit eigenem Socket-Code). Die echte Sperre ist die Rechtekonfiguration der
+Session (SKILL.md, Regel 9). Nur Standardbibliothek.
 """
 import json
 import re

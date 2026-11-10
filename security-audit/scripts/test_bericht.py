@@ -313,7 +313,7 @@ def test_schema_gueltig_alle_status():
 
 def test_schema_teilpfad_und_projekt_gesetzt():
     d = beispiel()
-    d["teilpfad"] = "src/api"
+    d["teilpfad"] = "src"
     d["projekt"] = None
     assert bericht.pruefe_schema(d) == []
 
@@ -826,3 +826,115 @@ def test_rendern_hinterlaesst_bei_internem_fehler_keine_tmp_datei_haertung_b5(tm
     with pytest.raises(RuntimeError):
         bericht._rendern(str(pfad))
     assert sorted(os.listdir(tmp_path / "w")) == ["bericht.json"]
+
+
+# ------------------------------------------------------------------------------------ Härtung TF1-B6 (zwei Worker)
+
+def test_kontext_reserviert_den_basisnamen_haertung_b6(tmp_path):
+    """Zwei Audits desselben Repos am selben Tag und Commit bekommen verschiedene Dateinamen, auch bevor eines schreibt."""
+    r = neues_repo(tmp_path / "kunde-portal", origin="https://github.com/a/kunde-portal.git")
+    k1 = bericht.kontext(str(r), None, JETZT)
+    k2 = bericht.kontext(str(r), None, JETZT)
+    assert k2["basisname"] == k1["basisname"] + "-2"
+    for k in (k1, k2):
+        assert os.path.isfile(os.path.join(k["ausgabe_ordner"], k["basisname"] + ".reserviert"))
+
+
+def test_kontext_parallel_vergibt_eindeutige_basisnamen_haertung_b6(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    r = neues_repo(tmp_path / "kunde-portal", origin="https://github.com/a/kunde-portal.git")
+    with ThreadPoolExecutor(8) as pool:
+        namen = list(pool.map(lambda _: bericht.kontext(str(r), None, JETZT)["basisname"], range(16)))
+    assert len(set(namen)) == 16, namen
+
+
+def test_rendern_gibt_die_reservierung_frei_haertung_b6(tmp_path):
+    r = neues_repo(tmp_path / "kunde-portal", origin="https://github.com/a/kunde-portal.git")
+    k = bericht.kontext(str(r), None, JETZT)
+    d = beispiel()
+    pfad = os.path.join(k["ausgabe_ordner"], k["basisname"] + ".json")
+    with open(pfad, "w", encoding="utf-8") as f:
+        json.dump(d, f)
+    marker = os.path.join(k["ausgabe_ordner"], k["basisname"] + ".reserviert")
+    assert os.path.exists(marker)
+    assert lauf("rendern", pfad).returncode == 0
+    assert not os.path.exists(marker) and os.path.exists(os.path.join(k["ausgabe_ordner"], k["basisname"] + ".md"))
+    assert lauf("rendern", pfad).returncode == 0              # erneutes Rendern ohne Marker: kein Fehler
+
+
+def test_rendern_ohne_reservierung_bleibt_moeglich_haertung_b6(tmp_path):
+    (tmp_path / "w").mkdir()
+    pfad = tmp_path / "w" / "frei.json"
+    pfad.write_text(json.dumps(beispiel()), encoding="utf-8")
+    assert lauf("rendern", str(pfad)).returncode == 0
+
+
+# ------------------------------------------------------------------------------------ Härtung TF1-B7 (Zusagen)
+
+def test_kontext_verweigert_ausgabeordner_im_geprueften_repo_haertung_b7(tmp_path, monkeypatch):
+    """„Der Skill ändert nie das geprüfte Repo“: der Ausgabeordner darf nicht darin liegen (auch nicht über HOME)."""
+    r = neues_repo(tmp_path / "kunde-portal")
+    monkeypatch.setenv("SECURITY_AUDIT_AUSGABE", str(r / "out"))
+    with pytest.raises(bericht.KontextFehler, match="im geprüften Repo"):
+        bericht.kontext(str(r), None, JETZT)
+    assert not (r / "out").exists(), "der Ordner darf nicht einmal angelegt werden"
+    p = lauf("kontext", "--repo", str(r))
+    assert p.returncode == 3 and "im geprüften Repo" in p.stderr
+    monkeypatch.delenv("SECURITY_AUDIT_AUSGABE")
+    monkeypatch.setenv("HOME", str(r))                                  # Dotfile-Repo: ~/.claude/… läge im Repo
+    with pytest.raises(bericht.KontextFehler, match="im geprüften Repo"):
+        bericht.kontext(str(r), None, JETZT)
+    assert not (r / ".claude").exists()
+
+
+def test_kontext_ausgabeordner_ueber_symlink_ins_repo_wird_erkannt_haertung_b7(tmp_path, monkeypatch):
+    r = neues_repo(tmp_path / "kunde-portal")
+    (tmp_path / "aussen").mkdir()
+    os.symlink(r, tmp_path / "aussen" / "kunde-portal")                 # <ausgabe>/<name> ist ein Link ins Repo
+    monkeypatch.setenv("SECURITY_AUDIT_AUSGABE", str(tmp_path / "aussen"))
+    with pytest.raises(bericht.KontextFehler, match="im geprüften Repo"):
+        bericht.kontext(str(r), None, JETZT)
+
+
+def test_kontext_ausgabeordner_neben_dem_repo_ist_ok_haertung_b7(tmp_path, monkeypatch):
+    r = neues_repo(tmp_path / "kunde-portal")
+    monkeypatch.setenv("SECURITY_AUDIT_AUSGABE", str(tmp_path / "kunde-portal-ausgabe"))   # gleicher Präfix, anderer Ordner
+    assert bericht.kontext(str(r), None, JETZT)["ausgabe_ordner"].startswith(os.path.realpath(tmp_path / "kunde-portal-ausgabe"))
+
+
+def teil(datei, teilpfad="src/api"):
+    d = beispiel()
+    d["teilpfad"] = teilpfad
+    for b in d["befunde"]:
+        b["datei"], b["zeile"] = teilpfad + "/x.js", 3
+        if b["status"] == "unbestätigt":
+            b["code_pfad"] = ["a.js:1", "b.js:2"]            # der Weg darf außerhalb liegen
+    d["befunde"][0]["datei"] = datei
+    return d
+
+
+@pytest.mark.parametrize("datei", ["src/api/orders.ts", "src/api/a/b/c.ts", "src/api"])
+def test_schema_befund_unter_teilpfad_ok_haertung_b7(datei):
+    assert bericht.pruefe_schema(teil(datei)) == []
+
+
+@pytest.mark.parametrize("datei", ["src/lib/x.ts", "src/apix/orders.ts", "src/api2", "src", "README.md", "SRC/api/x.ts"])
+def test_schema_befund_ausserhalb_des_teilpfads_ist_fehler_haertung_b7(datei):
+    fehler = bericht.pruefe_schema(teil(datei))
+    assert any("S-1" in f and "teilpfad" in f for f in fehler), (datei, fehler)
+
+
+def test_schema_teilpfad_repo_weit_und_ohne_teilpfad_haertung_b7():
+    d = teil("src/api/x.ts")
+    d["befunde"][0].update(datei=None, zeile=None)               # repo-weiter Befund bleibt erlaubt
+    assert bericht.pruefe_schema(d) == []
+    d = beispiel()                                                # ohne teilpfad: jeder Pfad
+    assert d["teilpfad"] is None and bericht.pruefe_schema(d) == []
+
+
+def test_schema_teilpfad_mit_nfd_und_schraegstrich_am_ende_haertung_b7():
+    import unicodedata
+    d = teil("src/Äpfel/x.ts", teilpfad="src/Äpfel")
+    d["teilpfad"] = unicodedata.normalize("NFD", "src/Äpfel") + "/"
+    assert unicodedata.normalize("NFD", d["teilpfad"]) != "src/Äpfel/"
+    assert bericht.pruefe_schema(d) == []

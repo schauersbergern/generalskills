@@ -534,3 +534,9 @@ def test_gophers_und_rtmp_familie_mit_einem_slash_a1():
     # alle Netzschemata von `curl --version` (Protocols), die nicht `file` sind
     for schema in ("gophers", "rtmp", "rtmpe", "rtmps", "rtmpt", "rtmpte", "rtmpts", "gopher", "pop3s"):
         assert netzregel.hosts_extrahieren(f"{schema}:/evil.test/x") == ["evil.test"], schema
+
+
+def test_docstring_verspricht_keine_vollstaendigkeit_haertung_b7():
+    """Die Regel erkennt nur URLs, Host-Optionen und bekannte Werkzeuge; sie ist keine Sandbox (SKILL.md, Regel 9)."""
+    assert "nie ein stilles Durchlassen" not in netzregel.__doc__
+    assert "keine Sandbox" in netzregel.__doc__

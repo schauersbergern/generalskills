@@ -112,20 +112,30 @@ def kontext(repo: str, teilpfad: str | None, jetzt: datetime | None = None) -> d
     slug = _slug(echt) if echt is not None else None
 
     basis = os.environ.get("SECURITY_AUDIT_AUSGABE")
+    ordner = os.path.join(basis, name) if basis else os.path.join(os.path.expanduser("~"), ".claude", "security-reviews", name)
     try:
-        if basis:
-            ordner = os.path.join(basis, name)
-            os.makedirs(ordner, exist_ok=True)
-            ordner = os.path.realpath(ordner)
-        else:
-            ordner = os.path.join(os.path.expanduser("~"), ".claude", "security-reviews", name)
-            os.makedirs(ordner, exist_ok=True)
+        ziel_real = os.path.realpath(ordner)
+        if os.path.commonpath([ziel_real, os.path.realpath(wurzel)]) == os.path.realpath(wurzel):
+            raise KontextFehler(f"Ausgabeordner liegt im geprüften Repo ({_t(ziel_real)}): der Skill schreibt nie ins Repo. "
+                                "Setze SECURITY_AUDIT_AUSGABE auf einen Ordner außerhalb.")
+        os.makedirs(ordner, exist_ok=True)
+        ordner = os.path.realpath(ordner)
     except OSError as e:
         raise KontextFehler(f"Ausgabeordner nicht anlegbar: {_t(e)}") from e
 
     stamm = f"{datum}-{sha[:7]}" + (f"-{slug}" if slug else "")
     basisname, n = stamm, 1
-    while any(os.path.lexists(os.path.join(ordner, basisname + ext)) for ext in (".md", ".json")):
+    while True:
+        # Der Name ist erst vergeben, wenn die Reservierung (O_EXCL) angelegt ist: zwei Audits desselben Repos am selben Tag
+        # schreiben sonst beide `<basisname>.json` und überschreiben sich.
+        if not any(os.path.lexists(os.path.join(ordner, basisname + ext)) for ext in (".md", ".json")):
+            try:
+                os.close(os.open(os.path.join(ordner, basisname + ".reserviert"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
+                break
+            except FileExistsError:
+                pass
+            except OSError as e:
+                raise KontextFehler(f"Namen im Ausgabeordner nicht reservierbar: {_t(e)}") from e
         n += 1
         basisname = f"{stamm}-{n}"
 
@@ -179,7 +189,14 @@ def _pfad_fehler(pfad: object) -> str | None:
     return None
 
 
-def _befund_fehler(b: dict, label: str) -> list[str]:
+def _unter_teilpfad(datei: str, teilpfad: str) -> bool:
+    """`datei` ist der Teilpfad selbst oder liegt darunter (NFC-normalisiert, `/` am Ende des Teilpfads egal)."""
+    t = unicodedata.normalize("NFC", teilpfad).rstrip("/")
+    d = unicodedata.normalize("NFC", datei)
+    return d == t or d.startswith(t + "/")
+
+
+def _befund_fehler(b: dict, label: str, teilpfad: str | None = None) -> list[str]:
     f: list[str] = []
 
     def fehler(feld: str, text: str) -> None:
@@ -201,6 +218,9 @@ def _befund_fehler(b: dict, label: str) -> list[str]:
             fehler("datei", msg)
         elif feld in b and isinstance(b[feld], str) and _ZEILE_IM_PFAD.search(b[feld]):
             fehler("datei", "enthält eine Zeilenangabe: Zeile gehört in `zeile`, `datei` ist nur der Pfad")
+    if (teilpfad and isinstance(b.get("datei"), str) and not _pfad_fehler(b["datei"])
+            and not _unter_teilpfad(b["datei"], teilpfad)):
+        fehler("datei", f"liegt außerhalb von teilpfad {_t(teilpfad)!r} (Befunde nur unter dem Teilpfad)")
     if "zeile" in b:
         z = b["zeile"]
         if z is not None and not (type(z) is int and z >= 1):
@@ -298,7 +318,7 @@ def pruefe_schema(daten: object) -> list[str]:
                     label = f"befunde[{i}]"
                     f.append(f"{label}: " + ("Pflichtfeld fehlt: id" if "id" not in b
                                               else f"id muss S-<Zahl> sein, ist {_t(bid)!r}"))
-                f.extend(_befund_fehler(b, label))
+                f.extend(_befund_fehler(b, label, daten["teilpfad"] if isinstance(daten.get("teilpfad"), str) else None))
     return f
 
 
@@ -402,6 +422,12 @@ def _rendern(pfad: str) -> int:
     finally:
         if tmp is not None and os.path.lexists(tmp):       # Fehler zwischen mkstemp und replace: keine Reste im Ausgabeordner
             os.unlink(tmp)
+    try:
+        os.unlink(os.path.splitext(pfad)[0] + ".reserviert")       # Reservierung von `kontext` freigeben
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        print(f"Hinweis: Reservierung nicht entfernt: {_t(e)}", file=sys.stderr)
     print(ziel)
     return 0
 

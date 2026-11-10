@@ -267,6 +267,28 @@ def test_request_dateien_der_pruefer_kollidieren_nicht_haertung_b6():
     assert "<ROLLE>" in next(z for z in _lies(BRIEFINGS).splitlines() if "Request-Body kommt nie per --daten" in z)
 
 
+# ------------------------------------------------------------------------------------ Härtung TF1-B7 (Zusagen)
+
+def test_briefings_versprechen_keine_nachtraegliche_erkennung_im_echten_lauf_haertung_b7():
+    """Nur Eval und `rendern` erkennen Verstöße im Nachhinein; in einem echten Audit gibt es das nicht."""
+    text = _lies(BRIEFINGS)
+    assert "sie wird im Nachhinein erkannt" not in text
+    for zeile in (z for z in text.splitlines() if z.startswith("GRUNDREGELN")):
+        assert "Eval" in zeile, zeile
+
+
+def test_regel_9_nennt_die_grenze_der_bestaetigt_pruefung_haertung_b7():
+    regel = next(z for z in _lies(SKILL_MD).splitlines() if z.startswith("9. **Die Netzregel"))
+    assert "nicht, dass der Request lief" in regel and "Gegenlesen" in regel
+
+
+def test_skill_md_nennt_teilpfad_pruefung_und_reservierung_haertung_b7():
+    text = _lies(SKILL_MD)
+    assert ".reserviert" in _lies(BERICHT_FORMAT)
+    assert "Ausgabeordner" in text and "im geprüften Repo" in text           # Exit 3 auch dafür
+    assert "rendern" in next(z for z in text.splitlines() if "Befunde außerhalb von `teilpfad`" in z)
+
+
 # ------------------------------------------------------------------------------------ Beispiel-JSON
 
 def test_beispiel_json_ist_gueltig():

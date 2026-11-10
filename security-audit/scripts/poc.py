@@ -2,7 +2,9 @@
 """Docker-PoC für den Skill security-audit (nur Standardbibliothek).
 
 Sicherheitsgrenze: Kundencode läuft ausschließlich in Docker-Containern ohne Zugang nach außen
-(`--internal`-Netz je Rolle) und nie auf dem Host. PoC-Requests gehen nur an `http://app:<port>` aus einem
+(`--internal`-Netz je Rolle) und nie auf dem Host. Der Bau holt nur die Pakete der Lockfile per `npm ci
+--ignore-scripts` aus der npm-Registry (keine Install-Skripte, Quelle per Lockfile-Prüfung auf die Registry beschränkt);
+der Build-Befehl des Kunden läuft ohne Netz. PoC-Requests gehen nur an `http://app:<port>` aus einem
 Wegwerf-Container im Netz der Rolle. Es gibt keine Host-Mounts und keine veröffentlichten Ports. Gelöscht wird
 nur, was `security-audit-<lauf>` heißt (Container, Netze, Images) und der eigene Zustandsordner.
 

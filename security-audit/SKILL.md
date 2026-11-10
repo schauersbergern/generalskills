@@ -29,7 +29,7 @@ Argumente: `$ARGUMENTS`.
    - `poc.py` immer als **einzelner einfacher Befehl**: kein `&&`, `|`, `;`, `2>&1`, `$(…)`, keine Umlaute oder Nicht-ASCII-Zeichen. Argumente mit Sonderzeichen (auch Leerzeichen) in `'…'`. Request-Body nur über `--daten-datei` (Datei vorher mit Write im Ausgabeordner anlegen).
    - `poc.py vorbereiten`, `poc.py bauen`, `poc.py starten`, `poc.py neustart`, `poc.py ausfuehren`, `poc.py aufraeumen` und `bericht.py kontext` mit Bash-`timeout: 600000`. Jeder dieser Aufrufe hat ein eigenes Zeitbudget unter 600 s und endet mit einer Meldung (`start-fehler` mit „Zeitbudget“, Exit 1 bei `aufraeumen`), statt vom Bash-Limit abgebrochen zu werden.
    - Bash sonst nur für `bericht.py`, `agent-stats.py` und `ls`. Write nur im Ausgabeordner.
-9. **Die Netzregel ist Erkennung, keine Sandbox:** Das Eval und `bericht.py rendern` melden Verstöße im Nachhinein. Die echte Sperre ist die Rechtekonfiguration der Session. Ob `disallowed-tools` auf Subagenten durchschlägt, ist offen; dort gilt die Sperre per Briefing.
+9. **Die Netzregel ist Erkennung, keine Sandbox:** Das Eval und `bericht.py rendern` melden Verstöße im Nachhinein. Die echte Sperre ist die Rechtekonfiguration der Session. Ob `disallowed-tools` auf Subagenten durchschlägt, ist offen; dort gilt die Sperre per Briefing. Schema und Eval prüfen bei `bestätigt` nur, dass ein `poc`-Text mit erlaubten Hosts vorhanden ist, nicht, dass der Request lief: `bestätigt` beruht auf dem Ergebnis des Prüfers und dem Gegenlesen der Hauptsession (Schritt 6).
 
 ## Ablauf
 
@@ -39,7 +39,7 @@ Argumente: `$ARGUMENTS`.
 python3 -I ${CLAUDE_SKILL_DIR}/scripts/bericht.py kontext [--teilpfad '<teilpfad>']
 ```
 
-- Exit 3 (kein Repo/HEAD, ungültiger Teilpfad): stderr dem User melden, Ende.
+- Exit 3 (kein Repo/HEAD, ungültiger Teilpfad, Ausgabeordner im geprüften Repo): stderr dem User melden, Ende.
 - Die JSON-Ausgabe liefert `repo`, `wurzel`, `sha`, `sha7`, `datum`, `teilpfad`, `teilpfad_slug`, `ausgabe_ordner`, `basisname`, `hinweise`, `repo_konfiguration`, `agent_stats_datei`. **Halte `ausgabe_ordner`, `basisname`, `agent_stats_datei`, `sha`, `repo`, `datum`, `teilpfad` direkt als Notiz fest (TodoWrite oder Text).** Rufe `kontext` später nicht erneut auf: Nach dem Schreiben des JSON liefert es einen anderen `basisname` (`-2`).
 - **Repo-Konfiguration:** Ist `repo_konfiguration` nicht leer und fehlt `repo-konfig-geprueft`, brichst du **sofort** ab (kein `neu`, kein `vorbereiten`) mit genau dieser Meldung, danach eine Zeile „Gefunden: <Liste>“: „Dieses Repo bringt eigene Claude-Konfiguration mit, die in dieser Session Code auf dem Host ausführen kann. Prüfe sie und starte die Session mit `claude --setting-sources user --strict-mcp-config`, dann `/security-audit … repo-konfig-geprueft`.“ Mit Schalter läufst du weiter und vermerkst im Bericht, dass der User sie geprüft hat. Bereits geladene Hooks kann der Skill nicht abschalten.
 - `hinweise` (uncommittete Änderungen, Symlinks, LFS-Pointer, Submodule) kommen unverändert in die `hinweise` des Berichts.
@@ -76,7 +76,7 @@ Je Fläche ein Reviewer mit dem Briefing aus `references/agenten-briefings.md`, 
 
 ### 5. Dedup und Vorsortierung (Hauptsession)
 
-- Befunde außerhalb von `teilpfad` verwirfst du (Kontext außerhalb ist nur zum Lesen da).
+- Befunde außerhalb von `teilpfad` verwirfst du, auch als „verworfen“ (Kontext außerhalb ist nur zum Lesen da); `rendern` lehnt eine `datei` außerhalb des Teilpfads ab.
 - Gleiche Senke = ein Befund. IDs `S-1`, `S-2` … fortlaufend, ohne führende Nullen.
 - Ohne `code_pfad` von mindestens 2 Schritten → Status `verdacht` (nicht an Prüfer).
 - P3 → Status `unbestätigt` mit dem Code-Pfad des Reviewers (nicht an Prüfer).
