@@ -906,12 +906,16 @@ def test_regeln_passen_zu_skill():
     assert f"Write(//tmp/x/ausgabe/**)" in regeln and "Edit(//tmp/x/ausgabe/**)" in regeln
     for name in ("Glob", "Grep", "Agent", "Skill", "TodoWrite", "ToolSearch"):
         assert name in regeln
-    # M-1: Read nur auf Repo, Ausgabeordner und Arbeitskopien (poc.py vorbereiten) im Temp-Ordner; kein freies Read
+    # M-1, Härtung A7: Read nur auf den Skill-Ordner (SKILL.md, references/), den Ausgabeordner und die Arbeitskopien
+    # (poc.py vorbereiten) im Temp-Ordner; weder freies Read noch das ganze Repo
     assert "Read" not in regeln
-    assert "Read(//tmp/x/**)" in regeln and f"Read(//tmp/x/ausgabe/**)" in regeln
-    assert f"Read(//{os.path.realpath(tempfile.gettempdir()).lstrip('/')}/security-audit-*/**)" in regeln
-    regeln2 = run_eval.erlaubte_regeln(skill, aus, home, repo="/r/repo", tmp="/t")
-    assert "Read(//r/repo/**)" in regeln2 and "Read(//t/security-audit-*/**)" in regeln2
+    liest = [r for r in regeln if r.startswith("Read(")]
+    assert sorted(liest) == sorted([
+        "Read(//tmp/x/.claude/skills/security-audit-eval/**)", "Read(//tmp/x/ausgabe/**)",
+        f"Read(//{os.path.realpath(tempfile.gettempdir()).lstrip('/')}/security-audit-*/**)"])
+    assert "Read(//tmp/x/**)" not in regeln
+    regeln2 = run_eval.erlaubte_regeln(skill, aus, home, tmp="/t")
+    assert "Read(//t/security-audit-*/**)" in regeln2 and not any(r.startswith("Read(//r/") for r in regeln2)
     # eng gefasst: kein freies Bash, kein freies Write/Edit, keine Web-Werkzeuge
     assert not {"Bash", "Write", "Edit", "WebFetch", "WebSearch"} & set(regeln)
 
@@ -1102,7 +1106,9 @@ def test_lauf_ok_und_aufruf(ev, capsys, monkeypatch):
     assert os.path.basename(lauf[0]["cwd"]).startswith("eval-security-audit-")
     assert env["PWD"] == lauf[0]["cwd"] and "OLDPWD" not in env and "OLDPWD" not in smoke[0]["env"]     # M-3
     assert smoke[0]["env"]["PWD"] == lauf[0]["cwd"]
-    assert "Read" not in regeln and f"Read(//{lauf[0]['cwd'].lstrip('/')}/**)" in regeln                # M-1
+    skill_kopie = lauf[0]["cwd"] + "/.claude/skills/security-audit-eval"
+    assert "Read" not in regeln and f"Read(//{skill_kopie.lstrip('/')}/**)" in regeln                  # M-1, Härtung A7
+    assert f"Read(//{lauf[0]['cwd'].lstrip('/')}/**)" not in regeln                                    # nicht das ganze Repo
     assert f"Read(//{os.path.realpath(tempfile.gettempdir()).lstrip('/')}/security-audit-*/**)" in regeln
     assert lauf[0]["cwd"].endswith(os.path.basename(lauf[0]["cwd"]) + "/" + os.path.basename(lauf[0]["cwd"]))
 
@@ -1364,3 +1370,76 @@ def test_verbotene_muster_nfkc_haertung_a5d(bericht, muster_text):
 def test_verbotene_muster_nfkc_muster_selbst_haertung_a5d():
     assert auswertung._verbotene("echo fixture.invalid", ["ｆｉｘｔｕｒｅ.invalid"]) == ["ｆｉｘｔｕｒｅ.invalid"]
     assert auswertung._verbotene("echo harmlos", ["ｆｉｘｔｕｒｅ.invalid"]) == []
+
+
+def _lebt(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def test_signal_direkt_nach_dem_start_beendet_kind_trotzdem_haertung_a7(ev, monkeypatch, capsys):
+    """Das Signal kommt, nachdem das Kind existiert, aber bevor `_lauf` sein Popen-Objekt kennt: die Sicherung in `_main`
+    beendet alle direkten Kindprozesse samt Gruppe, bevor Docker aufgeräumt wird."""
+    ev.modus("haengt")
+    echtes, gestartet = run_eval._kind_starten, []
+
+    def bombe(cmd, cwd, env, stdout, stderr):
+        p = echtes(cmd, cwd, env, stdout, stderr)
+        if "json" in cmd:                                  # Smoke-Test normal durchlassen
+            return p
+        gestartet.append(p)
+        for _ in range(100):                               # Enkel soll existieren, bevor das Signal kommt
+            if ev.kind.exists() and ev.kind.read_text():
+                break
+            time.sleep(0.1)
+        raise run_eval.Abbruch(signal.SIGTERM)             # Handler feuert nach Popen, vor der Zuweisung
+
+    monkeypatch.setattr(run_eval, "_kind_starten", bombe)
+    assert run_eval.main(["--fixture", "fixture-web", "--timeout", "120"]) == 143
+    (p,) = gestartet
+    try:
+        p.wait(timeout=15)                                 # Fake-claude beendet, nicht mehr in `time.sleep(600)`
+    except subprocess.TimeoutExpired:
+        p.kill()
+        pytest.fail("Kindprozess nach Signal nicht beendet")
+    assert ev.kind.read_text(), "Enkelprozess wurde nie gestartet (Test sinnlos)"
+    for _ in range(50):
+        if not _lebt(int(ev.kind.read_text())):
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("Enkelprozess der Gruppe lebt noch")
+
+
+def test_kinder_beenden_ohne_kinder_ist_harmlos_haertung_a7():
+    run_eval._kinder_beenden()
+
+
+def test_kinder_beenden_laesst_fremde_prozesse_in_ruhe_haertung_a7():
+    """Nur direkte Kinder dieses Prozesses; ein verwaister Prozess (Eltern ist init) und ein eigenes Kind in der
+    eigenen Gruppe werden unterschieden."""
+    r = subprocess.run(["sh", "-c", "sleep 30 >/dev/null 2>&1 & echo $!"], capture_output=True, text=True)
+    fremd = int(r.stdout.strip())
+    eigen = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+    try:
+        run_eval._kinder_beenden()
+        assert eigen.wait(timeout=10) is not None
+        assert _lebt(fremd)
+    finally:
+        eigen.kill()
+        os.kill(fremd, signal.SIGKILL)
+
+
+def test_start_fehler_im_lauf_bleibt_der_urspruengliche_fehler_haertung_a7(tmp_path, monkeypatch):
+    """Scheitert der Start selbst, kommt der Originalfehler an (kein UnboundLocalError/AttributeError aus dem Aufräumen)."""
+    def kaputt(*a, **kw):
+        raise FileNotFoundError("claude")
+
+    monkeypatch.setattr(run_eval, "_kind_starten", kaputt)
+    with pytest.raises(FileNotFoundError):
+        run_eval._lauf(["claude"], str(tmp_path), {}, str(tmp_path / "s"), str(tmp_path / "e"), 5)
+    ok, grund = run_eval._smoke_test([], str(tmp_path), {})
+    assert ok is False and "nicht startbar" in grund

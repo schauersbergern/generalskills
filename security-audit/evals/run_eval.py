@@ -50,25 +50,23 @@ def _log(text: str) -> None:
 
 # ------------------------------------------------------------------------------------ Rechte, Umgebung, Agent
 
-def erlaubte_regeln(skill_ordner: str, ausgabe: str, home: str, repo: str | None = None,
-                    tmp: str | None = None) -> list[str]:
+def erlaubte_regeln(skill_ordner: str, ausgabe: str, home: str, tmp: str | None = None) -> list[str]:
     """`--allowedTools`-Regeln (jeweils die engste Form, die der Skill-Text vorschreibt):
-    - Read nur auf das Repo (`repo`, Standard: Repo über dem Skill-Ordner), den Ausgabeordner und die Arbeitskopien
-      von `poc.py vorbereiten` (`<tmp>/security-audit-*`, `tmp` = realpath des Temp-Ordners); `Glob`/`Grep` ohne
-      Pfadregel (die CLI hat dafür keine dokumentierte Pfadsyntax; Offener Punkt im Bericht).
+    - Read nur auf den Skill-Ordner (`SKILL.md`, `references/`; `skill_ordner` = realpath der Skill-Kopie), den
+      Ausgabeordner und die Arbeitskopien von `poc.py vorbereiten` (`<tmp>/security-audit-*`, `tmp` = realpath des
+      Temp-Ordners), nicht auf das ganze Temp-Repo; `Glob`/`Grep` ohne Pfadregel (die CLI hat dafür keine
+      dokumentierte Pfadsyntax; Offener Punkt im Bericht).
     - Write/Edit nur im Ausgabeordner (`//` = absoluter Pfad ab Wurzel).
     - Bash: `poc.py` (kopierter Skill), `bericht.py kontext`, `bericht.py rendern <ausgabe>/*`, `agent-stats.py add
       <ausgabe>/*` (mit `~` und mit absolutem `home`) und `ls`. Die `*`-Muster treffen auch `..`-Pfade (Restrisiko)."""
     absolut = lambda pfad: "/" + pfad                    # "//<absoluter Pfad ohne führenden />"
-    if repo is None:
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(skill_ordner.rstrip("/"))))
     if tmp is None:
         tmp = os.path.realpath(tempfile.gettempdir())
     stats = "~/.claude/skills/auto-feature/scripts/agent-stats.py"
     stats_abs = f"{home.rstrip('/')}/.claude/skills/auto-feature/scripts/agent-stats.py"
     bericht = f"python3 -I {skill_ordner}/scripts/bericht.py"
     return [
-        f"Read({absolut(repo.rstrip('/'))}/**)",
+        f"Read({absolut(skill_ordner.rstrip('/'))}/**)",
         f"Read({absolut(ausgabe)}/**)",
         f"Read({absolut(tmp.rstrip('/'))}/{PRAEFIX}*/**)",
         "Glob", "Grep", "Agent", "Skill", "TodoWrite", "ToolSearch",
@@ -332,23 +330,25 @@ def _kind_starten(cmd: list[str], cwd: str, env: dict, stdout, stderr) -> subpro
 def _smoke_test(basis: list[str], cwd: str, env: dict) -> tuple[bool, str]:
     """`claude -p "Antworte nur mit ok." --output-format json` mit den Optionen des Laufs, ohne Werkzeuge."""
     cmd = ["claude", "-p", SMOKE_PROMPT, "--output-format", "json", *basis, "--tools", ""]
+    p = None                                               # Start im try: ein Signal nach dem Start beendet die Gruppe
     try:
         p = _kind_starten(cmd, cwd, env, subprocess.PIPE, subprocess.PIPE)
+        out, err = p.communicate(timeout=SMOKE_TIMEOUT)
     except OSError as e:
         return False, f"claude nicht startbar: {e}"
-    try:
-        out, err = p.communicate(timeout=SMOKE_TIMEOUT)
     except subprocess.TimeoutExpired:
         _gruppe_beenden(p, 5)
         return False, f"Zeitüberschreitung nach {SMOKE_TIMEOUT} s"
     except BaseException:
-        _gruppe_beenden(p, 5)
+        if p is not None:
+            _gruppe_beenden(p, 5)
         raise
     finally:
-        try:
-            os.killpg(p.pid, signal.SIGKILL)               # Reste der Gruppe
-        except (ProcessLookupError, PermissionError):
-            pass
+        if p is not None:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)           # Reste der Gruppe
+            except (ProcessLookupError, PermissionError):
+                pass
     text, fehler = out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
     if p.returncode != 0:
         return False, f"Exit {p.returncode}: {(fehler or text).strip()[-500:]}"
@@ -366,9 +366,10 @@ def _lauf(cmd: list[str], cwd: str, env: dict, stream_pfad: str, stderr_pfad: st
     (Fortschritt auf stderr) und beendet bei Zeitüberschreitung oder Abbruch die ganze Prozessgruppe."""
     start = time.monotonic()
     zeitueberschreitung = False
+    p = None                                               # Start im try: ein Signal nach dem Start beendet die Gruppe
     with open(stream_pfad, "wb") as aus, open(stderr_pfad, "wb") as fehler:
-        p = _kind_starten(cmd, cwd, env, aus, fehler)
         try:
+            p = _kind_starten(cmd, cwd, env, aus, fehler)
             while True:
                 rest = timeout - (time.monotonic() - start)
                 if rest <= 0:
@@ -382,14 +383,42 @@ def _lauf(cmd: list[str], cwd: str, env: dict, stream_pfad: str, stderr_pfad: st
                 except subprocess.TimeoutExpired:
                     _log(f"läuft seit {time.monotonic() - start:.0f} s, Stream {os.path.getsize(stream_pfad)} Bytes")
         except BaseException:
-            _gruppe_beenden(p, 5)
+            if p is not None:
+                _gruppe_beenden(p, 5)
             raise
         finally:
-            try:
-                os.killpg(p.pid, signal.SIGKILL)           # Reste der Gruppe (Kindprozesse des Kindes)
-            except (ProcessLookupError, PermissionError):
-                pass
+            if p is not None:
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)       # Reste der Gruppe (Kindprozesse des Kindes)
+                except (ProcessLookupError, PermissionError):
+                    pass
     return {"rc": p.returncode, "timeout": zeitueberschreitung, "dauer_s": round(time.monotonic() - start, 1)}
+
+
+def _kinder_beenden() -> None:
+    """Letzte Sicherung: beendet alle direkten Kindprozesse dieses Prozesses samt ihrer Prozessgruppe (SIGKILL). Fängt das
+    Kind, dessen Popen-Objekt wegen eines Signals mitten im Start nie zugewiesen wurde. Verwaiste und fremde Prozesse
+    (anderer Elternprozess) bleiben unberührt."""
+    try:
+        r = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,pgid="], capture_output=True, text=True, timeout=DOCKER_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as e:
+        _log(f"Warnung: Kindprozesse nicht ermittelbar ({e}); ein hängendes claude könnte bleiben")
+        return
+    ich, meine_gruppe = os.getpid(), os.getpgrp()
+    for zeile in r.stdout.splitlines():
+        teile = zeile.split()
+        if len(teile) != 3 or not all(t.isdigit() for t in teile):
+            continue
+        pid, ppid, pgid = (int(t) for t in teile)
+        if ppid != ich:
+            continue
+        try:
+            if pgid != meine_gruppe:
+                os.killpg(pgid, signal.SIGKILL)
+            else:
+                os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
 
 
 # ------------------------------------------------------------------------------------ Zustand vorher/nachher
@@ -524,7 +553,7 @@ def _main(argv: list[str]) -> int:
     gemeinsam = ["--permission-mode", "acceptEdits", "--setting-sources", "project,local", "--strict-mcp-config",
                  "--agents", agenten, "--add-dir", ausgabe, "--disallowedTools", "WebFetch,WebSearch"]
     cmd = ["claude", "-p", PROMPTS[a.prompt_art], "--output-format", "stream-json", "--verbose", *gemeinsam,
-           "--tools", TOOLS, "--allowedTools", *erlaubte_regeln(skill, ausgabe, home, repo, os.path.realpath(tempfile.gettempdir()))]
+           "--tools", TOOLS, "--allowedTools", *erlaubte_regeln(skill, ausgabe, home, os.path.realpath(tempfile.gettempdir()))]
 
     reviews_vorher, stats_vorher = _home_zustand()
     lauf: dict = {"rc": None, "timeout": False, "dauer_s": 0.0}
@@ -543,6 +572,7 @@ def _main(argv: list[str]) -> int:
         # 6. Nachher: Docker-Listen erfassen
         listen = docker_listen()
     finally:
+        _kinder_beenden()                                  # vor dem Docker-Aufräumen: nichts erzeugt danach neue Reste
         _log("Docker aufräumen (security-audit-*)")
         if not docker_aufraeumen():
             _log("Warnung: Docker-Reste mit Präfix security-audit- können bleiben")
