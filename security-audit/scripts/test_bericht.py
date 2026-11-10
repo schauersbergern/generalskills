@@ -139,6 +139,33 @@ def test_teilpfad_ungueltig_exit_3(tmp_path, teilpfad):
     assert p.returncode == 3 and "Traceback" not in p.stderr and p.stderr.strip()
 
 
+@pytest.mark.parametrize("teilpfad", ["-x", "--help", "-h", "-", "--", "-x/y"])
+@pytest.mark.parametrize("form", ["getrennt", "gleich"])
+def test_teilpfad_mit_fuehrendem_minus_exit_3_statt_argparse_haertung_a8(tmp_path, teilpfad, form):
+    """`--teilpfad -x` ist ein (nicht vorhandener) Teilpfad: Exit 3 mit Meldung, nie Exit 2 von argparse oder Hilfe."""
+    r = neues_repo(tmp_path / "r")
+    args = ["--teilpfad", teilpfad] if form == "getrennt" else [f"--teilpfad={teilpfad}"]
+    p = lauf("kontext", "--repo", str(r), *args)
+    assert p.returncode == 3 and "Traceback" not in p.stderr and "usage" not in p.stderr, (p.returncode, p.stderr)
+    assert "Teilpfad nicht im Repo" in p.stderr, p.stderr
+
+
+def test_teilpfad_und_repo_mit_fuehrendem_minus_existierend_haertung_a8(tmp_path):
+    r = neues_repo(tmp_path / "-repo", {"-x/a.js": "x", "ok.js": "y"})
+    p = lauf("kontext", "--repo", str(r), "--teilpfad", "-x")
+    assert p.returncode == 0, p.stderr
+    assert json.loads(p.stdout)["teilpfad"] == "-x"
+    p = lauf("kontext", "--repo", "-repo", cwd=tmp_path)
+    assert p.returncode == 0, p.stderr
+    assert json.loads(p.stdout)["repo"] == "repo"            # führender `-` wird aus dem Namen bereinigt
+
+
+def test_fehlender_wert_nach_teilpfad_bleibt_aufruffehler_haertung_a8(tmp_path):
+    r = neues_repo(tmp_path / "r")
+    p = lauf("kontext", "--repo", str(r), "--teilpfad")
+    assert p.returncode == 2 and "Traceback" not in p.stderr
+
+
 def test_kontext_pfad_mit_leerzeichen(tmp_path):
     r = neues_repo(tmp_path / "mein repo mit leerzeichen", {"a b/c d.js": "x"})
     p = lauf("kontext", "--repo", str(r), "--teilpfad", "a b")

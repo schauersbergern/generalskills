@@ -1,7 +1,8 @@
 """Kontext und Bericht des Skills security-audit.
 
   bericht.py kontext [--teilpfad P] [--repo R]   JSON mit Repo-Kontext auf stdout (Exit 3: kein Repo/HEAD,
-                                                  ungültiger Teilpfad)
+                                                  ungültiger Teilpfad; das Argument nach `--teilpfad` ist immer der
+                                                  Wert, auch `-x`, oder `--teilpfad=-x`)
   bericht.py rendern <json>                       Schema prüfen, <basisname>.md neben das JSON schreiben
                                                   (Exit 2 mit Fehlerliste auf stderr)
 
@@ -388,6 +389,24 @@ def _rendern(pfad: str) -> int:
     return 0
 
 
+_WERT_OPTIONEN = ("--teilpfad", "--repo")
+
+
+def _argv_mit_werten(argv: list[str]) -> list[str]:
+    """`--teilpfad -x` wird zu `--teilpfad=-x`: das Argument nach `--teilpfad`/`--repo` ist immer der Wert, auch wenn es mit
+    `-` beginnt (argparse hielte es für eine Option und endete mit Exit 2; ein nicht vorhandener Teilpfad ist Exit 3)."""
+    aus: list[str] = []
+    i = 0
+    while i < len(argv):
+        if argv[i] in _WERT_OPTIONEN and i + 1 < len(argv):
+            aus.append(f"{argv[i]}={argv[i + 1]}")
+            i += 2
+        else:
+            aus.append(argv[i])
+            i += 1
+    return aus
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="bericht.py")
     sub = ap.add_subparsers(dest="befehl", required=True)
@@ -396,7 +415,7 @@ def main(argv: list[str]) -> int:
     k.add_argument("--repo", default=".")
     r = sub.add_parser("rendern")
     r.add_argument("json")
-    args = ap.parse_args(argv)
+    args = ap.parse_args(_argv_mit_werten(argv))
     if args.befehl == "rendern":
         return _rendern(args.json)
     try:
