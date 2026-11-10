@@ -130,7 +130,9 @@ def kontext(repo: str, teilpfad: str | None, jetzt: datetime | None = None) -> d
         # schreiben sonst beide `<basisname>.json` und überschreiben sich.
         if not any(os.path.lexists(os.path.join(ordner, basisname + ext)) for ext in (".md", ".json")):
             try:
-                os.close(os.open(os.path.join(ordner, basisname + ".reserviert"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
+                fd = os.open(os.path.join(ordner, basisname + ".reserviert"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:        # was `kontext` ermittelt hat; `rendern` gleicht ab
+                    json.dump({"sha": sha, "repo": name, "teilpfad": echt}, fh)
                 break
             except FileExistsError:
                 pass
@@ -391,6 +393,23 @@ def markdown(daten: dict) -> str:
 
 # ------------------------------------------------------------------------------------ CLI
 
+def _reservierung_abweichungen(marker: str, daten: dict) -> list[str]:
+    """`sha`, `repo`, `teilpfad` des JSON gegen die Reservierung von `kontext` (gleicher Basisname). Ohne Reservierung (JSON
+    von Hand oder älterer Lauf): keine Prüfung. Unlesbare Reservierung: Warnung auf stderr, keine Prüfung."""
+    try:
+        with open(marker, encoding="utf-8") as f:
+            erwartet = json.load(f)
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError):
+        erwartet = None
+    if not isinstance(erwartet, dict):
+        print("Hinweis: Reservierung ohne lesbare Daten, sha/repo/teilpfad nicht geprüft", file=sys.stderr)
+        return []
+    return [f"{feld} ist {_t(daten.get(feld))!r}, `kontext` ermittelte {_t(erwartet.get(feld))!r}"
+            for feld in ("sha", "repo", "teilpfad") if daten.get(feld) != erwartet.get(feld)]
+
+
 def _rendern(pfad: str) -> int:
     try:
         if os.path.getsize(pfad) > MAX_JSON_BYTES:
@@ -408,6 +427,12 @@ def _rendern(pfad: str) -> int:
     ziel = os.path.splitext(pfad)[0] + ".md"
     if os.path.abspath(ziel) == os.path.abspath(pfad):
         print("Ziel wäre die Eingabedatei selbst", file=sys.stderr)
+        return 2
+    abweichungen = _reservierung_abweichungen(os.path.splitext(pfad)[0] + ".reserviert", daten)
+    if abweichungen:
+        print("Abweichung von der Reservierung durch `bericht.py kontext` (der Bericht nennt nicht, was ermittelt wurde):",
+              file=sys.stderr)
+        print("\n".join(f"- {x}" for x in abweichungen), file=sys.stderr)
         return 2
     tmp = None
     try:

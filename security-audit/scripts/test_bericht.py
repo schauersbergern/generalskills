@@ -852,6 +852,7 @@ def test_rendern_gibt_die_reservierung_frei_haertung_b6(tmp_path):
     r = neues_repo(tmp_path / "kunde-portal", origin="https://github.com/a/kunde-portal.git")
     k = bericht.kontext(str(r), None, JETZT)
     d = beispiel()
+    d.update(sha=k["sha"], repo=k["repo"])
     pfad = os.path.join(k["ausgabe_ordner"], k["basisname"] + ".json")
     with open(pfad, "w", encoding="utf-8") as f:
         json.dump(d, f)
@@ -938,3 +939,34 @@ def test_schema_teilpfad_mit_nfd_und_schraegstrich_am_ende_haertung_b7():
     d["teilpfad"] = unicodedata.normalize("NFD", "src/Äpfel") + "/"
     assert unicodedata.normalize("NFD", d["teilpfad"]) != "src/Äpfel/"
     assert bericht.pruefe_schema(d) == []
+
+
+def _json_zu_kontext(k, **ueberschreibe):
+    d = beispiel()
+    d.update(sha=k["sha"], repo=k["repo"], teilpfad=k["teilpfad"], befunde=[])
+    d.update(ueberschreibe)
+    pfad = os.path.join(k["ausgabe_ordner"], k["basisname"] + ".json")
+    with open(pfad, "w", encoding="utf-8") as f:
+        json.dump(d, f)
+    return pfad
+
+
+def test_rendern_prueft_sha_repo_und_teilpfad_gegen_die_reservierung_haertung_b4(tmp_path):
+    """Die Zusage „geprüft auf <sha>“ ist an das gebunden, was `kontext` ermittelt hat: ein anderer SHA im JSON scheitert."""
+    r = neues_repo(tmp_path / "kunde-portal", {"src/a.js": "x"}, origin="https://github.com/a/kunde-portal.git")
+    k = bericht.kontext(str(r), "src", JETZT)
+    for feld, falsch in (("sha", "b" * 40), ("repo", "anderes-repo"), ("teilpfad", None), ("teilpfad", "lib")):
+        p = lauf("rendern", _json_zu_kontext(k, **{feld: falsch}))
+        assert p.returncode == 2 and "Reservierung" in p.stderr and feld in p.stderr, (feld, p.stderr)
+        assert not os.path.exists(os.path.join(k["ausgabe_ordner"], k["basisname"] + ".md"))
+    p = lauf("rendern", _json_zu_kontext(k))
+    assert p.returncode == 0, p.stderr
+
+
+def test_rendern_mit_unlesbarer_reservierung_warnt_statt_zu_pruefen_haertung_b4(tmp_path):
+    r = neues_repo(tmp_path / "kunde-portal", origin="https://github.com/a/kunde-portal.git")
+    k = bericht.kontext(str(r), None, JETZT)
+    with open(os.path.join(k["ausgabe_ordner"], k["basisname"] + ".reserviert"), "w") as f:
+        f.write("kein json")
+    p = lauf("rendern", _json_zu_kontext(k, sha="c" * 40))
+    assert p.returncode == 0 and "Reservierung" in p.stderr and "nicht geprüft" in p.stderr

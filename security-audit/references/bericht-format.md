@@ -1,6 +1,6 @@
 # Berichtsformat (JSON Version 1)
 
-Die Hauptsession schreibt `<ausgabe_ordner>/<basisname>.json` und lässt `bericht.py rendern` das Markdown daneben erzeugen. `bericht.py kontext` reserviert den Namen mit einer leeren Datei `<basisname>.reserviert` (zwei Audits desselben Repos überschreiben sich so nicht); `rendern` entfernt sie. Eine übrig gebliebene `.reserviert` ohne `.json` heißt: dieser Lauf wurde nie gerendert. **Das Markdown entsteht nur so**, nie von Hand: Die Kopfzeile der Befundliste ist ein Vertrag mit `/fix-findings`. Schemafehler meldet `rendern` mit Exit 2 und einer Fehlerliste auf stderr (`- <id>: <feld> …`); korrigiere das JSON und rendere erneut.
+Die Hauptsession schreibt `<ausgabe_ordner>/<basisname>.json` und lässt `bericht.py rendern` das Markdown daneben erzeugen. `bericht.py kontext` reserviert den Namen mit einer leeren Datei `<basisname>.reserviert` (zwei Audits desselben Repos überschreiben sich so nicht); Sie hält `sha`, `repo` und `teilpfad` fest, `rendern` gleicht das JSON damit ab (Abweichung: Exit 2) und entfernt sie danach. Eine übrig gebliebene `.reserviert` ohne `.json` heißt: dieser Lauf wurde nie gerendert. **Das Markdown entsteht nur so**, nie von Hand: Die Kopfzeile der Befundliste ist ein Vertrag mit `/fix-findings`. Schemafehler meldet `rendern` mit Exit 2 und einer Fehlerliste auf stderr (`- <id>: <feld> …`); korrigiere das JSON und rendere erneut.
 
 ```
 python3 -I <SKILL_DIR>/scripts/bericht.py rendern <ausgabe_ordner>/<basisname>.json
