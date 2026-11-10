@@ -478,7 +478,7 @@ def test_vorbereiten_kein_git_repo(umg, tmp_path):
 
 
 def test_vorbereiten_unvollstaendig(temp_ordner, tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(poc.gitkopie, "arbeitskopie", lambda repo, ziel: [
+    monkeypatch.setattr(poc.gitkopie, "arbeitskopie", lambda repo, ziel, rev="HEAD": [
         "Namenskollision: a", "Arbeitskopie unvollständig: git cat-file abgebrochen bei x (boom)"])
     repo = tmp_path / "r"
     repo.mkdir()
@@ -489,7 +489,7 @@ def test_vorbereiten_unvollstaendig(temp_ordner, tmp_path, monkeypatch, capsys):
 
 
 def test_vorbereiten_git_fehler(temp_ordner, tmp_path, monkeypatch, capsys):
-    def kaputt(repo, ziel):
+    def kaputt(repo, ziel, rev="HEAD"):
         raise gitkopie.GitFehler("git ls-tree fehlgeschlagen (Exit 128): kein HEAD")
     monkeypatch.setattr(poc.gitkopie, "arbeitskopie", kaputt)
     repo = tmp_path / "r"
@@ -501,7 +501,7 @@ def test_vorbereiten_git_fehler(temp_ordner, tmp_path, monkeypatch, capsys):
 
 
 def test_vorbereiten_meldungen_nur_auf_stderr(temp_ordner, tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(poc.gitkopie, "arbeitskopie", lambda repo, ziel: ["Symlink übersprungen: x"])
+    monkeypatch.setattr(poc.gitkopie, "arbeitskopie", lambda repo, ziel, rev="HEAD": ["Symlink übersprungen: x"])
     repo = tmp_path / "r"
     repo.mkdir()
     assert poc.main(["vorbereiten", "--lauf", LAUF, "--repo", str(repo)]) == 0
