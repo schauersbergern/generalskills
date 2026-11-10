@@ -25,11 +25,12 @@ FIX_FINDINGS_MD = os.path.join(os.path.dirname(os.path.realpath(SKILL_DIR)), "fi
 
 sys.path.insert(0, HIER)
 import bericht  # noqa: E402
+import lieferkette  # noqa: E402
 import poc  # noqa: E402
 
 PRAEFIX_SKILL = ("python3 -I ${CLAUDE_SKILL_DIR}/scripts/", "python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py")
 PRAEFIX_REFERENZ = ("python3 -I <SKILL_DIR>/scripts/",)
-SKRIPTE = ("poc", "bericht")
+SKRIPTE = ("poc", "bericht", "lieferkette")
 
 
 def _lies(pfad: str) -> str:
@@ -104,11 +105,11 @@ def _unterbefehle(skript: str) -> set[str]:
 
 def _aufrufe(text: str) -> list[tuple[str, str, str]]:
     """(skript, unterbefehl, ganze Zeile) für jede Aufrufzeile (`python3 …` in Blöcken) und jeden Inline-Span, in dem
-    `poc.py <wort>` oder `bericht.py <wort>` steht. Fließtext in Codeblöcken (Briefing-Vorlagen) zählt nicht."""
+    `poc.py <wort>`, `bericht.py <wort>` oder `lieferkette.py <wort>` steht. Fließtext in Codeblöcken (Briefing-Vorlagen) zählt nicht."""
     zeilen = [z for z in _code_zeilen(text) if z.startswith("python3")] + _code_zeilen(text, bloecke=False)
     gefunden = []
     for zeile in zeilen:
-        for m in re.finditer(r"\b(poc|bericht)\.py\s+([A-Za-zÄÖÜäöüß][\w-]*)", zeile):
+        for m in re.finditer(r"\b(poc|bericht|lieferkette)\.py\s+([A-Za-zÄÖÜäöüß][\w-]*)", zeile):
             gefunden.append((m.group(1), m.group(2), zeile))
     return gefunden
 
@@ -193,7 +194,7 @@ def test_optionen_existieren(pfad):
 
 
 def test_skill_md_nennt_jeden_poc_unterbefehl():
-    """Der Ablauf braucht alle Unterbefehle von poc.py und bericht.py."""
+    """Der Ablauf braucht alle Unterbefehle von poc.py, bericht.py und lieferkette.py."""
     gesehen = {(s, u) for s, u, _z in _aufrufe(_lies(SKILL_MD))}
     fehlt = [(s, u) for s in SKRIPTE for u in sorted(_unterbefehle(s)) if (s, u) not in gesehen]
     assert not fehlt, fehlt
@@ -212,32 +213,45 @@ def test_briefings_abschnitte():
 BASH_TIMEOUT = "timeout: 600000"
 # laufen länger als der Bash-Standard (120 s); jeder hat ein eigenes Zeitbudget (Härtung B1, I3)
 LANGE_UNTERBEFEHLE = ("vorbereiten", "bauen", "starten", "neustart", "ausfuehren", "aufraeumen")
+LANGE_LIEFERKETTE = ("secrets", "abhaengigkeiten")      # `lieferkette.py lieferkette` (60 s, statisch) braucht keinen langen Timeout
 NICHT_GEPRUEFT = "nicht geprüft (Budget)"
 
 
 def test_timeout_liste_nennt_alle_langen_unterbefehle_haertung_a6():
-    """Jede Zeile mit dem 600000-ms-Timeout nennt alle langen poc.py-Unterbefehle (keine Teilliste in SKILL.md)."""
+    """Jede Zeile mit dem 600000-ms-Timeout, die `poc.py` oder `bericht.py` nennt, nennt alle langen poc.py-Unterbefehle,
+    `bericht.py kontext` und die langen `lieferkette.py`-Unterbefehle (keine Teilliste in SKILL.md). Eine Zeile nur zu
+    `lieferkette.py` (Schritt 1b) nennt beide langen lieferkette-Unterbefehle; mindestens eine Zeile ist die vollständige."""
     zeilen = [z for z in _lies(SKILL_MD).splitlines() if BASH_TIMEOUT in z]
     assert zeilen, "kein Hinweis auf Bash-timeout 600000 in SKILL.md"
+    vollstaendig = 0
     for zeile in zeilen:
-        assert all(f"poc.py {u}" in zeile for u in LANGE_UNTERBEFEHLE), zeile
-        assert "bericht.py kontext" in zeile, zeile
+        if "poc.py" in zeile or "bericht.py" in zeile:
+            assert all(f"poc.py {u}" in zeile for u in LANGE_UNTERBEFEHLE), zeile
+            assert "bericht.py kontext" in zeile, zeile
+            assert all(f"lieferkette.py {u}" in zeile for u in LANGE_LIEFERKETTE), zeile
+            vollstaendig += 1
+        else:
+            assert all(f"lieferkette.py {u}" in zeile for u in LANGE_LIEFERKETTE), zeile
+    assert vollstaendig == 1, "genau eine vollständige Timeout-Liste (Grundregel 8)"
     briefing = [z for z in _lies(BRIEFINGS).splitlines() if "timeout 600000" in z]
     assert briefing and all(u in briefing[0] for u in ("neustart", "ausfuehren"))
 
 
 def test_zeitbudgets_in_skill_md_entsprechen_den_skripten_haertung_i3():
     """Die Zeitbudget-Zusage in SKILL.md nennt je Befehl den Wert, den das Skript wirklich verwendet, und die Umgebungsvariable."""
-    zeile = next(z for z in _lies(SKILL_MD).splitlines() if BASH_TIMEOUT in z)
+    zeile = next(z for z in _lies(SKILL_MD).splitlines() if BASH_TIMEOUT in z and "poc.py" in z)
     erwartet = {"bericht.py kontext": bericht.KONTEXT_BUDGET, "poc.py vorbereiten": poc.VORBEREITEN_BUDGET,
                 "poc.py starten": poc.START_BUDGET, "poc.py neustart": poc.START_BUDGET,
                 "poc.py aufraeumen": poc.AUFRAEUMEN_BUDGET, "poc.py bauen": poc.BAU_TIMEOUT,
-                "poc.py ausfuehren": poc.EXEC_TIMEOUT}
+                "poc.py ausfuehren": poc.EXEC_TIMEOUT,
+                "lieferkette.py secrets": lieferkette.SECRETS_BUDGET, "lieferkette.py abhaengigkeiten": lieferkette.ABH_BUDGET,
+                "lieferkette.py lieferkette": lieferkette.LK_BUDGET}
     zusage = zeile[zeile.index("Jeder dieser Aufrufe"):]
     for befehl, sekunden in erwartet.items():
         assert re.search(rf"`{re.escape(befehl)}`[^`]*?{sekunden} s", zusage), (befehl, sekunden)
     assert "SECURITY_AUDIT_KONTEXT_TIMEOUT" in zusage and "SECURITY_AUDIT_KONTEXT_TIMEOUT" in _lies(os.path.join(HIER, "bericht.py"))
-    assert "nur für `kontext` und `vorbereiten` zugesichert" in zusage          # keine pauschale Zusage unter 600 s
+    assert lieferkette.SECRETS_DIR_BUDGET == 120 and "höchstens 120 s" in zusage      # `gitleaks dir` samt Schwärzung zuerst
+    assert "nur für `kontext`, `vorbereiten`, `secrets` und `abhaengigkeiten` zugesichert" in zusage   # keine pauschale Zusage unter 600 s
     assert "unter 600 s" not in zusage
 
 
@@ -379,6 +393,187 @@ def test_fix_findings_description_ist_gueltiges_plain_scalar():
     beschreibung = _frontmatter_roh(_lies(FIX_FINDINGS_MD))["description"]
     assert ": " not in beschreibung and " #" not in beschreibung and beschreibung[:1] not in set("[{\"'*&!|>%@`")
     assert "security-audit" in beschreibung
+
+
+# ------------------------------------------------------------------------------------ TF2: Werkzeuge (Schritt 1b, A03, Werkzeugbefunde)
+
+PRUEFPUNKTE = os.path.join(REFERENCES, "pruefpunkte-web.md")
+ABBRUCH_MELDUNG = "Arbeitskopie nicht geschwärzt — Karte und Reviewer erst nach Prüfung durch dich"
+# W6: Namen der Test-App `fixture-deps` dürfen in Skill-Text und references nicht vorkommen (generische Namen wie `example-lib` sind erlaubt)
+VERBOTENE_NAMEN_TF2 = ("config/keys.js", "src/routes/vorlage.js", "_.template", "variable:", "lodash", "minimist")
+
+
+def _abschnitt(text: str, ueberschrift: str) -> str:
+    """Text von `##`/`###` `<ueberschrift>…` bis zur nächsten Überschrift gleicher oder höherer Ebene (Unterabschnitte gehören dazu)."""
+    zeilen = text.split("\n")
+    start = next((i for i, z in enumerate(zeilen) if re.match(r"#{2,3} " + re.escape(ueberschrift), z)), None)
+    assert start is not None, f"Abschnitt {ueberschrift!r} fehlt"
+    ebene = len(zeilen[start]) - len(zeilen[start].lstrip("#"))
+    ende = next((i for i in range(start + 1, len(zeilen)) if re.match(r"#{1,%d} " % ebene, zeilen[i])), len(zeilen))
+    return "\n".join(zeilen[start:ende])
+
+
+def test_skill_schritt_1b_ruft_alle_drei_unterbefehle_auf():
+    """Schritt 1b steht nach `poc.py vorbereiten` und vor der Karte, mit den drei Aufrufen in der Form von Grundregel 8."""
+    text = _lies(SKILL_MD)
+    i_vorbereiten, i_1b, i_karte = (text.index(m) for m in ("poc.py vorbereiten --lauf", "### 1b.", "### 2. Karte"))
+    assert i_vorbereiten < i_1b < i_karte
+    zeilen = [z for z in _aufrufzeilen(_abschnitt(text, "1b.")) if "lieferkette.py" in z]
+    assert [z.split("lieferkette.py ")[1].split()[0] for z in zeilen] == ["secrets", "abhaengigkeiten", "lieferkette"]
+    secrets, abh, lk = zeilen
+    assert secrets == "python3 -I ${CLAUDE_SKILL_DIR}/scripts/lieferkette.py secrets --lauf <id> --repo <wurzel> --quelle <arbeitskopie> --sha <sha>"
+    assert abh == "python3 -I ${CLAUDE_SKILL_DIR}/scripts/lieferkette.py abhaengigkeiten --lauf <id> --quelle <arbeitskopie>"
+    assert lk == "python3 -I ${CLAUDE_SKILL_DIR}/scripts/lieferkette.py lieferkette --lauf <id> --quelle <arbeitskopie>"
+    assert all(not re.search(r"&&|\||;|2>&1|\$\(", z) for z in zeilen)       # einzelne einfache Befehle
+    assert "--sha" in _hilfe("lieferkette", "secrets") and "--repo" in _hilfe("lieferkette", "secrets")
+
+
+def test_skill_secrets_fehlt_laeuft_weiter():
+    """R2-B1: Weiter bei Exit 0 mit Marker oder mit `fehlt`; alles andere ist Abbruch vor der Karte, mit wörtlicher Meldung."""
+    text = _abschnitt(_lies(SKILL_MD), "1b.")
+    weiter = ("`secrets` mit Exit 0 und gesetztem Marker oder Exit 0 mit `{\"werkzeug\":\"gitleaks\",\"fehlt\":true}` heißt weiter; "
+              "bei `fehlt` den Hinweis übernehmen, es gibt dann keine Secret-Befunde.")
+    abbruch = ("Alles andere heißt Abbruch vor der Karte, mit wörtlicher Meldung. Das sind Exit ≠ 0, insbesondere Exit 4 mit "
+               "`kategorie: schwaerzung-fehlgeschlagen`, sowie Exit 0 ohne Marker und ohne `fehlt`.")
+    assert weiter in text
+    assert abbruch in text
+    assert ABBRUCH_MELDUNG in text
+    quelle = _lies(os.path.join(HIER, "lieferkette.py"))                # Vertrag mit dem Skript: Kategorie, Meldung, Fehlt-Ausgabe
+    assert "kategorie: schwaerzung-fehlgeschlagen" in quelle
+    assert "Arbeitskopie nicht geschwärzt" in quelle and "Karte und Reviewer erst nach Prüfung durch dich" in quelle
+    assert '"werkzeug": "gitleaks", "fehlt": True' in quelle
+
+
+def test_skill_secrets_nach_jedem_erneuten_vorbereiten_k3():
+    text = _abschnitt(_lies(SKILL_MD), "1b.")
+    zeile = next(z for z in text.splitlines() if "erneuten `poc.py vorbereiten`" in z)
+    assert "`secrets` erneut ausführen" in zeile and "`poc.py bauen`" in zeile
+
+
+def test_skill_hinweise_uebernehmen():
+    """W-c: `hinweis`/`hinweise` aller drei Unterbefehle unverändert in `bericht.hinweise`; die Texte erzeugen die Skripte."""
+    text = _abschnitt(_lies(SKILL_MD), "1b.")
+    zeile = next(z for z in text.splitlines() if z.startswith("- **Hinweise unverändert:**"))
+    assert "`hinweis`/`hinweise` aller drei Unterbefehle gehen unverändert in `bericht.hinweise`" in zeile
+    assert "nie vom Modell" in zeile
+    assert "„gitleaks fehlt …“" in zeile and "„osv-scanner fehlt …“" in zeile
+    assert "„gitleaks-Standardausnahmen nicht geprüft: …“" in zeile and "ausdrücklich" in zeile
+    quelle = _lies(os.path.join(HIER, "lieferkette.py"))
+    for satz in ("gitleaks fehlt, Secret-Prüfung nicht durchgeführt", "osv-scanner fehlt, Abhängigkeitsprüfung nicht durchgeführt",
+                 "gitleaks-Standardausnahmen nicht geprüft: "):
+        assert satz in quelle, satz
+    assert "gitleaks fehlt" in _lies(BERICHT_FORMAT) and "osv-scanner fehlt" in _lies(BERICHT_FORMAT)
+
+
+def test_skill_nicht_geschwaerzt_in_schritt_3():
+    """`poc.py bauen` Exit 4 `nicht-geschwaerzt` steht in der Fehlerliste von Schritt 3, mit der Handlung."""
+    assert 'schwaerz_marker' in _lies(os.path.join(HIER, "poc.py")) and '"nicht-geschwaerzt"' in _lies(os.path.join(HIER, "poc.py"))
+    schritt3 = _abschnitt(_lies(SKILL_MD), "3. Docker-Vorbereitung")
+    assert re.search(r"kategorie: [^`]*\bnicht-geschwaerzt\b", schritt3)
+    zeile = next(z for z in schritt3.splitlines() if z.startswith("- `nicht-geschwaerzt`"))
+    assert "`lieferkette.py secrets` erneut ausführen" in zeile and "erst danach `bauen`" in zeile
+
+
+def test_skill_werkzeugbefunde_regeln():
+    """Befunde aus den Werkzeugen: Stufen, vorsichtiges `erwartet`, Secrets (K8, volle SHAs), Lieferkette, Teilpfad."""
+    text = _lies(SKILL_MD)
+    b = _abschnitt(text, "5b.")
+    assert "Werkzeugbefund, kein Request-Beleg möglich" in b and "Nie an die Prüfer" in b
+    # Abhängigkeitslücken
+    assert "`kategorie` `A03`, `werkzeug` `osv-scanner`" in b and '`pakete: [{"name","version","advisories":[ids]}]`' in b
+    assert "[`<lockfile>:<zeile>`, Import `datei:zeile`, Aufruf `datei:zeile`]" in b
+    stufe = next(z for z in b.splitlines() if "**Stufe:**" in z)
+    assert "P1, wenn der Aufruf belegt ist oder `kev: true` gilt" in stufe and "nicht bei `dev`" in stufe and "P3 bei `dev`" in stufe
+    erwartet = next(z for z in b.splitlines() if "**`erwartet`:**" in z)
+    assert "auf ≥ <behoben_in> aktualisieren" in erwartet and "behebt nur Advisories mit Fix-Version" in erwartet
+    assert "keine Fix-Version bekannt: Paket ersetzen oder Nutzung entfernen" in erwartet
+    # Secrets
+    secrets = next(z for z in b.splitlines() if z.startswith("- **Secrets"))
+    assert "**P1**" in secrets and "`A07`" in secrets and "`gitleaks`" in secrets and "**vollen SHAs**" in secrets
+    assert ("„Secret beim Anbieter rotieren (nicht im Code behebbar); Historie erst nach Rotation manuell bereinigen“") in secrets
+    assert "„Datei existiert in HEAD nicht mehr“" in secrets and "in_head: false" in secrets
+    assert "Nie einen Secret-Wert lesen oder ausgeben" in secrets
+    # Lieferkette
+    lk = next(z for z in b.splitlines() if z.startswith("- **Lieferkette"))
+    assert "Entwürfe" in lk and "vergibst nur die IDs" in lk
+    # Teilpfad und Code-Pfad-Regel (Schritt 5)
+    s5 = _abschnitt(text, "5. Dedup")
+    assert "„außerhalb des Teilpfads: <titel> (<datei>)“" in s5
+    zeile = next(z for z in s5.splitlines() if z.startswith("- Ohne `code_pfad`"))
+    assert "gekoppelte Werkzeugbefunde" in zeile and "nur bei erfüllter Kopplung" in zeile
+    assert "nur zwischen Code-Befunden" in next(z for z in s5.splitlines() if z.startswith("- Gleiche Senke"))
+    assert "ohne Werkzeugbefunde" in _abschnitt(text, "6. Prüfer")
+    # Netzregel: Ausnahme für lieferkette.py
+    regel3 = next(z for z in text.splitlines() if z.startswith("3. **Kein Netzverkehr"))
+    assert "`lieferkette.py`" in regel3 and "OSV-API" in regel3 and "CISA-KEV" in regel3 and "keinen eigenen Netzverkehr" in regel3
+
+
+def test_skill_und_references_nennen_enablescripts_nie_als_schutz():
+    """Plan-Nachtrag nach Task-3-Review: yarn berry `enableScripts: false` ist keine Schutzmaßnahme."""
+    for pfad in [SKILL_MD] + _referenzen():
+        for zeile in (z for z in _lies(pfad).splitlines() if "enableScripts" in z):
+            assert "kein Schutz" in zeile, (pfad, zeile)
+
+
+@pytest.mark.parametrize("pfad", [SKILL_MD] + (_referenzen() if os.path.isdir(REFERENCES) else []), ids=os.path.basename)
+def test_keine_namen_der_deps_fixture_w6(pfad):
+    """W6: weder Pfade noch Paketnamen noch Optionen der Test-App `fixture-deps` (Wortanfang, damit `umgebungsvariable:` nicht
+    als `variable:` zählt)."""
+    text = _lies(pfad)
+    treffer = [n for n in VERBOTENE_NAMEN_TF2 if re.search(r"(?<![A-Za-z0-9_])" + re.escape(n), text)]
+    assert not treffer, treffer
+
+
+def test_pruefpunkte_a03():
+    text = _lies(PRUEFPUNKTE)
+    assert re.search(r"(?m)^## A03 ", text)
+    a03 = _abschnitt(text, "A03")
+    for stichwort in ("Abhängigkeiten mit Erreichbarkeit", "Lieferketten-Klassen", "Bekannte Erkennungsgrenzen",
+                      "lockfile-fehlt", "installation-ohne-lockfile-treue", "install-skripte-offen", "kev: true",
+                      "gitleaks-Standardausnahmen", "Archive", "corepack pnpm install", "su-exec"):
+        assert stichwort in a03, stichwort
+    assert "Werkzeug" in a03 and "nicht an die Prüfer" in a03
+    assert "gehört zu TF2" not in text                                      # der Platzhalter von TF1 ist ersetzt
+
+
+def test_briefings_erreichbarkeit_und_werkzeug_ausnahme():
+    text = _lies(BRIEFINGS)
+    reviewer = _abschnitt(text, "Reviewer")
+    assert "Erreichbarkeit einer Abhängigkeitslücke" in reviewer and "`details`" in reviewer
+    assert "Werkzeug-Ausnahme beim Code-Pfad" in reviewer and "mindestens 2 Einträgen" in reviewer
+    assert "Secret-Werte liest und nennst du nie" in reviewer               # Reviewer lesen nie Secret-Werte
+    assert "<PAKETE>" in reviewer and "erreichbarkeit" in reviewer
+    assert "gehen nie an die Prüfer" in _abschnitt(text, "Prüfer")
+
+
+def test_bericht_format_nennt_werkzeugfelder():
+    text = _lies(BERICHT_FORMAT)
+    abschnitt = _abschnitt(text, "Werkzeugbefunde")
+    for stichwort in ("`werkzeug`", "`commits`", "`pakete`", "`klasse`", "`osv-scanner`", "`gitleaks`", "`lieferkette`",
+                      "`Commits:", "`Pakete:", "`bestätigt` ist mit `werkzeug` verboten", "Werkzeugbefund, kein Request-Beleg möglich"):
+        assert stichwort in abschnitt, stichwort
+    assert "außerhalb des Teilpfads: <titel> (<datei>)" in text
+
+
+def test_beispiel_json_enthaelt_werkzeugbefunde_und_besteht_das_schema():
+    """Das Beispiel zeigt jeden `werkzeug`-Wert, besteht `pruefe_schema`, und die Kopplung ist im Beispiel wirksam."""
+    daten = _beispiel_json()
+    assert bericht.pruefe_schema(daten) == []
+    werkzeugbefunde = [b for b in daten["befunde"] if "werkzeug" in b]
+    assert {b["werkzeug"] for b in werkzeugbefunde} == set(bericht.WERKZEUGE)
+    assert all(b["status"] == "unbestätigt" and len(b["code_pfad"]) >= 1 for b in werkzeugbefunde)
+    assert all("Werkzeugbefund, kein Request-Beleg möglich" in b["beschreibung"] for b in werkzeugbefunde)
+    osv = next(b for b in werkzeugbefunde if b["werkzeug"] == "osv-scanner")
+    assert len(osv["code_pfad"]) >= 1 and osv["pakete"] and osv["kategorie"] == "A03"
+    gl = next(b for b in werkzeugbefunde if b["werkzeug"] == "gitleaks")
+    assert gl["kategorie"] == "A07" and all(re.fullmatch(r"[0-9a-f]{40}", c) for c in gl["commits"])
+    for werkzeug, feld in (("osv-scanner", "pakete"), ("gitleaks", "commits")):    # ohne Kopplungsfeld ist das Beispiel ungültig
+        kaputt = json.loads(json.dumps(daten))
+        befund = next(b for b in kaputt["befunde"] if b.get("werkzeug") == werkzeug)
+        del befund[feld]
+        assert bericht.pruefe_schema(kaputt), werkzeug
+    md = bericht.markdown(daten)
+    assert "Commits: 89abcde, fedcba9" in md and "Pakete: example-lib@2.3.1 (GHSA-aaaa-bbbb-cccc)" in md
 
 
 # ------------------------------------------------------------------------------------ Test-App nicht verraten

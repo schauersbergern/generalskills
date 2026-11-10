@@ -28,6 +28,8 @@ TESTDATEN = os.path.join(HIER, "testdaten")
 SKILL = os.path.dirname(HIER)
 POC = "python3 /skill/scripts/poc.py"
 MUSTER = ["fixture.invalid"]
+# W6: Namen der Test-App `fixture-deps` dürfen im Skill-Text, in den references und im kopierten Skill nicht stehen
+VERBOTENE_NAMEN_TF2 = ("config/keys.js", "src/routes/vorlage.js", "_.template", "variable:", "lodash", "minimist")
 
 
 def _json(pfad):
@@ -876,7 +878,7 @@ def test_regeln_passen_zu_skill():
     regeln = run_eval.erlaubte_regeln(skill, aus, home)
     bash = [r for r in regeln if r.startswith("Bash(")]
     zeilen = _aufrufzeilen()
-    gesehen = {"poc": 0, "kontext": 0, "repo": 0, "rendern": 0, "add": 0}
+    gesehen = {"poc": 0, "kontext": 0, "repo": 0, "rendern": 0, "add": 0, "lieferkette": 0}
     assert len(zeilen) >= 5
     for z in zeilen:
         z = z.replace("${CLAUDE_SKILL_DIR}", skill).replace("<SKILL_DIR>", skill)
@@ -885,10 +887,11 @@ def test_regeln_passen_zu_skill():
             continue
         assert any(_regel_passt(r, z) for r in bash), f"keine Regel für: {z}"
         for schluessel, marke in (("poc", "/poc.py "), ("kontext", "bericht.py kontext"), ("repo", "bericht.py repo"), ("rendern", "bericht.py rendern "),
-                                  ("add", "agent-stats.py add ")):
+                                  ("add", "agent-stats.py add "), ("lieferkette", "/lieferkette.py ")):
             gesehen[schluessel] += marke in z
     assert all(gesehen.values()), gesehen                                # jede Form kommt im Skill-Text vor
     assert f"Bash(python3 -I {skill}/scripts/poc.py *)" in regeln
+    assert f"Bash(python3 -I {skill}/scripts/lieferkette.py *)" in regeln
     assert f"Bash(python3 -I {skill}/scripts/bericht.py kontext)" in regeln
     assert f"Bash(python3 -I {skill}/scripts/bericht.py kontext *)" in regeln
     assert f"Bash(python3 -I {skill}/scripts/bericht.py repo)" in regeln
@@ -920,6 +923,30 @@ def test_regeln_passen_zu_skill():
     assert "Read(//t/security-audit-*/**)" in regeln2 and not any(r.startswith("Read(//r/") for r in regeln2)
     # eng gefasst: kein freies Bash, kein freies Write/Edit, keine Web-Werkzeuge
     assert not {"Bash", "Write", "Edit", "WebFetch", "WebSearch"} & set(regeln)
+
+
+def test_regeln_lieferkette_tf2():
+    """TF2: `lieferkette.py` mit allen drei Unterbefehlen ist erlaubt (kopierter Skill, `-I`), jede Form aus SKILL.md und
+    jede andere Skript-Datei nicht."""
+    skill, home, aus = "/tmp/x/.claude/skills/security-audit-eval", "/Users/test", "/tmp/x/ausgabe"
+    regeln = run_eval.erlaubte_regeln(skill, aus, home)
+    bash = [r for r in regeln if r.startswith("Bash(")]
+    assert regeln.count(f"Bash(python3 -I {skill}/scripts/lieferkette.py *)") == 1
+    aufrufe = [z.replace("${CLAUDE_SKILL_DIR}", skill) for z in _aufrufzeilen() if "lieferkette.py" in z and "<skript>" not in z]
+    unter = sorted({z.split("lieferkette.py ")[1].split()[0] for z in aufrufe})
+    assert unter == ["abhaengigkeiten", "lieferkette", "secrets"], unter
+    for z in aufrufe:
+        assert any(_regel_passt(r, z) for r in bash), z
+    for ok in (f"python3 -I {skill}/scripts/lieferkette.py secrets --lauf ab12cd34 --repo /tmp/r --quelle /tmp/security-audit-ab12cd34/quelle --sha {'a' * 40}",
+               f"python3 -I {skill}/scripts/lieferkette.py abhaengigkeiten --lauf ab12cd34 --quelle /tmp/security-audit-ab12cd34/quelle",
+               f"python3 -I {skill}/scripts/lieferkette.py lieferkette --lauf ab12cd34 --quelle /tmp/security-audit-ab12cd34/quelle"):
+        assert any(_regel_passt(r, ok) for r in bash), ok
+    for schlecht in (f"python3 {skill}/scripts/lieferkette.py secrets",                    # ohne -I
+                     f"python3 -I /etc/scripts/lieferkette.py secrets",                    # fremder Skill-Ordner
+                     f"python3 -I {skill}/scripts/gitkopie.py spiegel",                    # anderes Skript
+                     f"python3 -I {skill}/scripts/lieferkette.pyx secrets",
+                     f"python3 -I {skill}scripts/lieferkette.py secrets"):
+        assert not any(_regel_passt(r, schlecht) for r in bash), schlecht
 
 
 def test_eigene_filtert_praefix():
@@ -1036,6 +1063,9 @@ def test_temp_repo(tmp_path, monkeypatch):
                 text = f.read()
             for v in verboten:
                 assert v not in text, f"{v} in {p}"
+            # W6: auch die Namen der Test-App `fixture-deps` (Wortanfang: `umgebungsvariable:` in poc.py ist kein `variable:`)
+            for v in VERBOTENE_NAMEN_TF2:
+                assert not re.search(r"(?<![A-Za-z0-9_])" + re.escape(v), text), f"{v} in {p}"
     finally:
         shutil.rmtree(wurzel, ignore_errors=True)
     wurzel2, repo2 = run_eval.temp_repo_anlegen("fixture-web", SKILL, True)

@@ -45,7 +45,7 @@ Zusätzlich je Status:
 | Status | Pflicht | Hinweis |
 |---|---|---|
 | `bestätigt` | `poc` | Text: Request(s) und beobachtete Antwort. Nur die Hosts `app`, `db`, `localhost`, `127.0.0.1`, `::1`, `0.0.0.0`; ein fremder Host (auch URL-kodiert) lässt `rendern` scheitern. |
-| `unbestätigt` | `code_pfad` | Liste von mindestens 2 Einträgen `datei:zeile` von der Eingabe bis zur Senke |
+| `unbestätigt` | `code_pfad` | Liste von mindestens 2 Einträgen `datei:zeile` von der Eingabe bis zur Senke; bei einem gekoppelten Werkzeugbefund (siehe „Werkzeugbefunde“) genügt 1 Eintrag |
 | `verworfen` | `grund` | eine Zeile mit Beleg (`datei:zeile`) |
 | `verdacht` | – | nicht in der Befundliste |
 
@@ -57,10 +57,27 @@ Weitere Regeln:
 - `code_pfad` kommt vom Prüfer (eigene Herleitung), bei P3 vom Reviewer.
 - Unbekannte Felder sind erlaubt und werden ignoriert; nutze sie nicht.
 
+## Werkzeugbefunde (optionale Felder `werkzeug`, `commits`, `pakete`)
+
+Befunde aus `lieferkette.py` (Schritt 5b in `SKILL.md`) tragen `werkzeug`. Sie haben keinen Request-Beleg, deshalb gilt: `bestätigt` ist mit `werkzeug` verboten, und bei erfüllter Kopplung genügt ein `code_pfad` mit **einem** Eintrag. Ohne `werkzeug` gelten weiter mindestens 2 Einträge.
+
+| `werkzeug` | Kopplung (alles Pflicht) | Zusatzfelder |
+|---|---|---|
+| `osv-scanner` | `kategorie` `A03`, `pakete` mit mindestens 1 Eintrag | `pakete`: Liste von `{ "name": Text, "version": Text, "advisories": [Text] }`, optional je Paket `behoben_in` (Text) und `kev` (true/false/null) |
+| `gitleaks` | `kategorie` `A07`, `commits` mit mindestens 1 Eintrag | `commits`: Liste von Hex-Hashes (7 bis 64 Zeichen, klein, höchstens 20); die `secrets`-Ausgabe liefert volle SHAs, nimm sie unverändert |
+| `lieferkette` | `kategorie` `A03`, `klasse` ist `lockfile-fehlt`, `installation-ohne-lockfile-treue` oder `install-skripte-offen` | keine |
+
+- `werkzeug` hat nur diese drei Werte. `commits` ist nur mit `gitleaks`, `pakete` nur mit `osv-scanner` erlaubt.
+- Bei `lieferkette` ist `klasse` die Klasse des Skripts, nicht eine freie Eigenschaft; die Entwürfe aus `lieferkette.py lieferkette` bringen sie mit.
+- `beschreibung` nennt den Grund ohne Prüfer: „Werkzeugbefund, kein Request-Beleg möglich“. Secret-Werte stehen nirgends im JSON, nur Regel, `datei`, `zeile` und `commits`.
+- Das Markdown zeigt im Detailabschnitt eines Befunds zusätzlich `Commits: <sha7>, …` (höchstens 5, dann „+n“) und `Pakete: name@version (IDs)`. In der Befundliste (Codeblock) bleibt das Format unverändert.
+
 ## Hinweise
 
 Je Eintrag eine Zeile. Immer enthalten:
 - Hinweise aus `bericht.py kontext` (unverändert) und die Meldungen von `poc.py vorbereiten` (Symlinks, Kollisionen, LFS, Submodule, `.env*`).
+- `hinweise` der drei Unterbefehle von `lieferkette.py` (Schritt 1b), wortgleich und nicht doppelt, auch „gitleaks fehlt …“, „osv-scanner fehlt …“ und „gitleaks-Standardausnahmen nicht geprüft: …“. Ein fehlendes Werkzeug heißt: keine Befunde dieser Art, alle anderen Befunde bleiben gültig.
+- Werkzeugbefunde außerhalb des Teilpfads als „außerhalb des Teilpfads: <titel> (<datei>)“.
 - Docker-Kategorien und Hinweise aus `bauen`/`starten` (`docker-fehlt`, `lockfile-fehlt`, `lockfile-fremde-quelle`, `nicht-npm`, `native-module`, `prisma-engines`, `lockfile-ohne-paketliste`, `node-range-zu-lang`, `node-engines-ignoriert`, `build-fehler`, `build-timeout`, `start-fehler`) mit der Folge („keine PoCs, P1/P2 nur unbestätigt“).
 - „BuildKit-Cache kann Code-Layer des geprüften Repos enthalten (`docker builder prune`).“
 - **Grenzen:** „Grenzen: Die Netzregel erkennt Verstöße im Nachhinein, sie ist keine Sandbox; die echte Sperre ist die Rechtekonfiguration der Session. Ob `disallowed-tools` auf Subagenten durchschlägt, ist offen.“
@@ -84,7 +101,8 @@ Neutrale Pfade, keine echte Anwendung.
   ],
   "hinweise": [
     "BuildKit-Cache kann Code-Layer des geprüften Repos enthalten (`docker builder prune`).",
-    "Grenzen: Die Netzregel erkennt Verstöße im Nachhinein, sie ist keine Sandbox; die echte Sperre ist die Rechtekonfiguration der Session."
+    "Grenzen: Die Netzregel erkennt Verstöße im Nachhinein, sie ist keine Sandbox; die echte Sperre ist die Rechtekonfiguration der Session.",
+    "2 Secret-Fundstellen in der Arbeitskopie geschwärzt"
   ],
   "befunde": [
     {
@@ -129,6 +147,44 @@ Neutrale Pfade, keine echte Anwendung.
       "erwartet": "Feste Origin-Liste",
       "klasse": "CORS mit Credentials",
       "ohne_anmeldung": false, "mandantenuebergreifend": false
+    },
+    {
+      "id": "S-5", "stufe": "P1", "status": "unbestätigt",
+      "datei": "src/lib/render.ts", "zeile": 27, "kategorie": "A03",
+      "titel": "example-lib 2.3.1 mit bekannter Lücke, verwundbare Funktion wird aufgerufen",
+      "beschreibung": "Werkzeugbefund, kein Request-Beleg möglich. Das Paket example-lib 2.3.1 hat das Advisory GHSA-aaaa-bbbb-cccc; src/lib/render.ts importiert es in Zeile 3 und ruft die genannte Funktion in Zeile 27 auf.",
+      "szenario": "Ein Angreifer liefert Eingaben, die die Lücke in example-lib auslösen, sobald render() sie verarbeitet",
+      "erwartet": "auf ≥ 2.3.4 aktualisieren (behebt nur Advisories mit Fix-Version; für Advisories ohne Fix-Version Nutzung prüfen oder Paket ersetzen)",
+      "klasse": "Abhängigkeit mit bekannter Lücke und belegtem Aufruf",
+      "ohne_anmeldung": false, "mandantenuebergreifend": false,
+      "werkzeug": "osv-scanner",
+      "pakete": [{ "name": "example-lib", "version": "2.3.1", "advisories": ["GHSA-aaaa-bbbb-cccc"] }],
+      "code_pfad": ["package-lock.json:210", "src/lib/render.ts:3", "src/lib/render.ts:27"]
+    },
+    {
+      "id": "S-6", "stufe": "P1", "status": "unbestätigt",
+      "datei": "config/secrets.ts", "zeile": 4, "kategorie": "A07",
+      "titel": "Secret in der Git-Historie: generic-api-key in config/secrets.ts",
+      "beschreibung": "Werkzeugbefund, kein Request-Beleg möglich. gitleaks fand in der Historie ein Secret (Regel generic-api-key); die Datei existiert in HEAD nicht mehr. Der Wert steht nirgends im Bericht.",
+      "szenario": "Wer Zugriff auf das Repo oder einen Klon hat, liest das Secret aus der Historie und nutzt es gegen den Dienst",
+      "erwartet": "Secret beim Anbieter rotieren (nicht im Code behebbar); Historie erst nach Rotation manuell bereinigen; Datei existiert in HEAD nicht mehr",
+      "klasse": "Secret in der Git-Historie",
+      "ohne_anmeldung": false, "mandantenuebergreifend": false,
+      "werkzeug": "gitleaks",
+      "commits": ["89abcdef0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210fedcba98"],
+      "code_pfad": ["config/secrets.ts:4"]
+    },
+    {
+      "id": "S-7", "stufe": "P2", "status": "unbestätigt",
+      "datei": "Dockerfile", "zeile": 6, "kategorie": "A03",
+      "titel": "Installation ohne Lockfile-Treue in Dockerfile",
+      "beschreibung": "Werkzeugbefund, kein Request-Beleg möglich. In Dockerfile:6 installiert npm install die Abhängigkeiten, ohne an das Lockfile gebunden zu sein.",
+      "szenario": "Builds ziehen beim Installieren neue, ungeprüfte Versionen; ein manipuliertes Paket gelangt unbemerkt in den Build",
+      "erwartet": "`npm ci` statt `npm install` verwenden (installiert exakt die Versionen aus dem Lockfile)",
+      "klasse": "installation-ohne-lockfile-treue",
+      "ohne_anmeldung": false, "mandantenuebergreifend": false,
+      "werkzeug": "lieferkette",
+      "code_pfad": ["Dockerfile:6"]
     }
   ]
 }
