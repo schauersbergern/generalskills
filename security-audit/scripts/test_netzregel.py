@@ -164,3 +164,95 @@ def test_bash_file_url_ohne_host_ist_lokal():
 def test_bash_meldung_enthaelt_keine_rohen_steuerzeichen():
     meldungen = netzregel.verstoesse_bash("curl 'http://evil.test\x1b[31m/x'", [])
     assert meldungen and all("\x1b" not in m and "\n" not in m for m in meldungen)
+
+
+# ------------------------------------------------------------------------------ Fix-Runde 1
+
+SONDERZEICHEN = ["&", ";", "'", "(", ")", "|", '"', "<", ">", "`", ",", "%"]
+
+
+@pytest.mark.parametrize("zeichen", SONDERZEICHEN)
+def test_userinfo_mit_sonderzeichen_umgeht_regel_nicht_t2_i1(zeichen):
+    url = f"http://app{zeichen}@evil.test/"
+    assert "evil.test" in netzregel.verstoesse_poc(f"GET {url}")
+    assert "evil.test" in netzregel.verstoesse_poc(f"GET '{url}'")
+    assert len(netzregel.verstoesse_bash(f"{POC} anfrage --pfad {shlex_quote(url)}", [])) >= 1
+    assert len(netzregel.verstoesse_bash(f'{POC} anfrage --pfad "{url}"', [])) >= 1
+
+
+def shlex_quote(text):
+    import shlex
+    return shlex.quote(text)
+
+
+def test_nachlaufzeichen_machen_erlaubte_hosts_nicht_zu_verstoessen_t2_i1():
+    for text in ("(curl http://app:3000)", "x 'http://db'", 'x "http://localhost:3000"', "http://app, http://db;",
+                 "[http://[::1]:3000/]"):
+        assert netzregel.verstoesse_poc(text) == [], text
+
+
+@pytest.mark.parametrize("befehl", [
+    "curl ';' python3 -I /x/scripts/poc.py http://localhost:3000/",
+    "curl -d '&&' python3 /x/scripts/poc.py http://localhost:3000/",
+    "echo ';' python3 /x/scripts/poc.py http://localhost:3000/",
+    'echo "|" python3 /x/scripts/poc.py http://localhost:3000/',
+    r"echo \; python3 /x/scripts/poc.py http://localhost:3000/",
+    "echo '\n' python3 /x/scripts/poc.py http://localhost:3000/",
+])
+def test_gequotete_operatoren_trennen_nicht_t2_i2(befehl):
+    assert len(netzregel.verstoesse_bash(befehl, [])) >= 1
+
+
+def test_gequotete_operatoren_bleiben_im_segment_t2_i2():
+    assert len(netzregel.segmente("echo ';' '&&' \"|\" a")) == 1
+    assert len(netzregel.segmente(r"echo a\;b")) == 1
+    assert len(netzregel.segmente("echo a;b")) == 2
+    assert len(netzregel.segmente("echo '\n' x")) == 1
+    assert len(netzregel.segmente("echo a\nb")) == 2
+
+
+def test_ungequotete_operatoren_trennen_weiterhin_t2_i2():
+    assert len(netzregel.verstoesse_bash(f"{POC} pruefen ; curl http://localhost:3000/", [])) == 1
+    assert netzregel.verstoesse_bash(f"{POC} pruefen && {POC} pruefen --x http://app:1/", []) == []
+
+
+@pytest.mark.parametrize("befehl", ["curl $(echo http)://evil.test", "curl ${H}://evil.test", "curl `echo h`://evil.test",
+                                    "curl h${x}://localhost:3000/"])
+def test_nicht_poc_jedes_schema_trenner_zaehlt_t2_m3(befehl):
+    assert len(netzregel.verstoesse_bash(befehl, [])) >= 1
+
+
+def test_poc_host_ohne_klares_schema_t2_m3():
+    assert "evil.test" in netzregel.verstoesse_poc("GET ${H}://evil.test/")
+
+
+def test_tief_verschachtelte_substitution_ist_verstoss_ohne_absturz_t2_m4():
+    befehl = "echo " + "$(" * 1500 + "echo x" + ")" * 1500
+    assert len(netzregel.verstoesse_bash(befehl, [])) == 1
+    mit_backticks = "echo " + "$(" * 1500 + "curl http://evil.test" + ")" * 1500
+    assert len(netzregel.verstoesse_bash(mit_backticks, [])) >= 1
+    with pytest.raises(RecursionError):
+        netzregel.segmente(befehl)
+    assert netzregel.verstoesse_bash("echo $(echo $(echo $(echo x)))", []) == []
+
+
+def test_poc_aufruf_nur_mit_python3_und_poc_py_t2_i4():
+    assert len(netzregel.verstoesse_bash("curl /x/scripts/poc.py http://localhost/", [])) == 1
+    assert len(netzregel.verstoesse_bash("python3 /x/notpoc.py http://localhost/", [])) == 1
+    assert len(netzregel.verstoesse_bash("python3 poc.py http://localhost/", [])) == 1
+    assert len(netzregel.verstoesse_bash("python /x/scripts/poc.py http://localhost/", [])) == 1
+
+
+def test_backslash_userinfo_meldet_den_fremden_host_t2_i4():
+    assert "evil.test" in netzregel.hosts_extrahieren("http://evil.test\\@app/")
+    assert "evil.test" in netzregel.verstoesse_poc("http://evil.test\\@app/")
+
+
+def test_mehrfach_at_host_ist_der_teil_nach_dem_letzten_at_t2_i4():
+    assert netzregel.hosts_extrahieren("http://x@app@evil.test") == ["evil.test"]
+    assert netzregel.hosts_extrahieren("http://evil.test@app@app") == ["app"]
+
+
+def test_url_kodierter_host_header_t2_i4():
+    assert netzregel.hosts_extrahieren("Host%3A%20evil.test") == ["evil.test"]
+    assert netzregel.verstoesse_poc("-H 'Host%3A%20evil.test'") == ["evil.test"]

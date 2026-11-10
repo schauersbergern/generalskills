@@ -16,11 +16,14 @@ from urllib.parse import unquote
 
 ERLAUBTE_HOSTS = frozenset({"app", "db", "localhost", "127.0.0.1", "::1", "0.0.0.0"})
 
-_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://([^\s/?#'\"<>()`|;&]*)")
+# Authority nach "://" (unabhängig vom Text davor: `${H}://evil.test`), in zwei Lesarten: eng (bis zum ersten
+# Shell-Sonderzeichen) und erweitert (bis `/ ? #` oder Whitespace, damit `http://app&@evil.test/` nicht als `app` gilt).
+_URL = re.compile(r"://([^\s/?#]*)")
+_URL_ENG = re.compile(r"[^'\"<>()`|;&]*")
+_NACHLAUF = "'\"),;"
 _HOST_HEADER = re.compile(r"(?i)(?<![A-Za-z0-9.])(?:[A-Za-z0-9]+-)*host[ \t]*:[ \t]*([^\s'\"]+)")
 _PROXY_OPTIONEN = frozenset({"-x", "--proxy", "--preproxy", "--proxy1.0", "--socks4", "--socks4a",
                              "--socks5", "--socks5-hostname"})
-_TRENNER_ZEICHEN = ";&|\n()<>"
 _UMLEITUNG = re.compile(r"^&?[<>]+&?$")
 
 
@@ -36,6 +39,7 @@ def _host_aus_authority(auth: str) -> str | None:
     auth = auth.strip()
     if "@" in auth:
         auth = auth.rsplit("@", 1)[1]
+    auth = auth.rstrip(_NACHLAUF)
     if auth.startswith("["):
         ende = auth.find("]")
         host = auth[1:ende] if ende != -1 else auth[1:]
@@ -67,18 +71,20 @@ def _teile(wert: str, maxsplit: int = -1) -> list[str]:
 
 
 def _urls(text: str) -> list[tuple[str, list[str]]]:
-    """Alle URLs mit Schema (Rohtext und einmal dekodiert) mit ihren Hosts; Backslash in der Authority wird
-    in beiden Lesarten ausgewertet (`http://app\\@evil.test`)."""
+    """Alle `://`-Stellen (Rohtext und einmal dekodiert) mit ihren Hosts. Die Authority wird eng und erweitert
+    gelesen, Backslash zusätzlich als Trenner (`http://app\\@evil.test`); jede Lesart zählt. Mehrfach-`@`:
+    Host ist der Teil nach dem letzten `@` (wie curl, WHATWG und urllib)."""
     treffer: list[tuple[str, list[str]]] = []
     gesehen: set[str] = set()
     for variante in (text, unquote(text)):
         for m in _URL.finditer(variante):
-            url = m.group(0)
+            auth = m.group(1)
+            url = "://" + auth
             if url in gesehen:
                 continue
             gesehen.add(url)
-            auth = m.group(1)
-            kandidaten = [auth] + ([auth.split("\\", 1)[0]] if "\\" in auth else [])
+            kandidaten = [auth, _URL_ENG.match(auth).group(0)]
+            kandidaten += [k.split("\\", 1)[0] for k in kandidaten if "\\" in k]
             hosts = [h for h in (_host_aus_authority(k) for k in kandidaten) if h]
             treffer.append((url, list(dict.fromkeys(hosts))))
     return treffer
@@ -171,14 +177,22 @@ def _auslagern(text: str) -> tuple[str, list[str]]:
             while j < n and tiefe:
                 tiefe += (text[j] == "(") - (text[j] == ")")
                 j += 1
-            innen.append(text[i + 2:j - 1 if tiefe == 0 else j])
-            aussen.append("$()")
-            i = j
+            if tiefe:                                  # nie geschlossen: Text unverändert lassen (konservativ)
+                aussen.append(c)
+                i += 1
+            else:
+                innen.append(text[i + 2:j - 1])
+                aussen.append("$()")
+                i = j
         elif c == "`":
             ende = text.find("`", i + 1)
-            innen.append(text[i + 1:] if ende == -1 else text[i + 1:ende])
-            aussen.append("``")
-            i = n if ende == -1 else ende + 1
+            if ende == -1:                             # nie geschlossen: Text unverändert lassen (konservativ)
+                aussen.append(c)
+                i += 1
+            else:
+                innen.append(text[i + 1:ende])
+                aussen.append("``")
+                i = ende + 1
         else:
             aussen.append(c)
             i += 1
@@ -186,34 +200,104 @@ def _auslagern(text: str) -> tuple[str, list[str]]:
 
 
 def _ist_trenner(tok: str) -> bool:
-    return bool(tok) and set(tok) <= set(_TRENNER_ZEICHEN) and not _UMLEITUNG.match(tok)
+    return bool(tok) and not _UMLEITUNG.match(tok)
+
+
+def _zerlegen(text: str) -> list[list[str]]:
+    """Ein Befehlstext (ohne Substitutionen) in Segmente aus Wörtern zerlegen. Operatoren (`; & | ( )`,
+    Zeilenumbruch) trennen nur, wenn sie im Rohtext ungequotet stehen; Anführungszeichen und Backslash wie in
+    POSIX-Shells. Wirft ValueError bei offenen Anführungszeichen."""
+    segmente: list[list[str]] = []
+    wort: list[str] = []
+    aktuell: list[str] = []
+    im_wort = False
+    i, n = 0, len(text)
+
+    def wort_ende() -> None:
+        nonlocal wort, im_wort
+        if im_wort:
+            aktuell.append("".join(wort))
+        wort, im_wort = [], False
+
+    def segment_ende() -> None:
+        nonlocal aktuell
+        wort_ende()
+        if aktuell:
+            segmente.append(aktuell)
+        aktuell = []
+
+    while i < n:
+        c = text[i]
+        if c in " \t\r":
+            wort_ende()
+            i += 1
+        elif c == "\n":
+            segment_ende()
+            i += 1
+        elif c in ";&|()<>":
+            wort_ende()
+            j = i
+            while j < n and text[j] in ";&|()<>":
+                j += 1
+            if _ist_trenner(text[i:j]):
+                segment_ende()
+            i = j
+        elif c == "\\":
+            if i + 1 < n and text[i + 1] != "\n":
+                wort.append(text[i + 1])
+                im_wort = True
+            i += 2
+        elif c == "'":
+            ende = text.find("'", i + 1)
+            if ende == -1:
+                raise ValueError("offenes Anführungszeichen")
+            wort.append(text[i + 1:ende])
+            im_wort = True
+            i = ende + 1
+        elif c == '"':
+            i += 1
+            while True:
+                if i >= n:
+                    raise ValueError("offenes Anführungszeichen")
+                if text[i] == '"':
+                    i += 1
+                    break
+                if text[i] == "\\" and i + 1 < n and text[i + 1] in '"\\$`\n':
+                    if text[i + 1] != "\n":
+                        wort.append(text[i + 1])
+                    i += 2
+                else:
+                    wort.append(text[i])
+                    i += 1
+            im_wort = True
+        else:
+            wort.append(c)
+            im_wort = True
+            i += 1
+    segment_ende()
+    return segmente
+
+
+MAX_TIEFE = 30
 
 
 def segmente(befehl: str) -> list[str]:
-    """Befehl in Segmente zerlegen: Trennung an Operator-Token (`&&`, `||`, `;`, `|`, `&`, Zeilenumbruch,
-    Klammern), `$(…)` und Backticks (auch in doppelten Anführungszeichen) als eigene Segmente. Parse-Fehler
-    (z. B. offene Anführungszeichen): naive Trennung, also im Zweifel mehr Segmente."""
-    aussen, innen = _auslagern(befehl)
+    """Befehl in Segmente zerlegen: Trennung an ungequoteten Operatoren (`&&`, `||`, `;`, `|`, `&`,
+    Zeilenumbruch, Klammern), `$(…)` und Backticks (auch in doppelten Anführungszeichen) als eigene Segmente.
+    Parse-Fehler (z. B. offene Anführungszeichen): naive Trennung, also im Zweifel mehr Segmente.
+    Wirft RecursionError bei mehr als MAX_TIEFE verschachtelten Substitutionen."""
     ergebnis: list[str] = []
-    try:
-        lex = shlex.shlex(aussen, posix=True, punctuation_chars=_TRENNER_ZEICHEN)
-        lex.whitespace = " \t\r"
-        lex.commenters = ""
-        lex.whitespace_split = True
-        aktuell: list[str] = []
-        for tok in lex:
-            if _ist_trenner(tok):
-                if aktuell:
-                    ergebnis.append(" ".join(shlex.quote(t) for t in aktuell))
-                aktuell = []
-            else:
-                aktuell.append(tok)
-        if aktuell:
-            ergebnis.append(" ".join(shlex.quote(t) for t in aktuell))
-    except ValueError:
-        ergebnis = [s.strip() for s in re.split(r"&&|\|\||[;|&\n()`]|\$\(", aussen) if s.strip()]
-    for teil in innen:
-        ergebnis.extend(segmente(teil))
+    arbeit = [(befehl, 0)]
+    while arbeit:
+        text, tiefe = arbeit.pop(0)
+        if tiefe > MAX_TIEFE:
+            raise RecursionError("Substitutionen zu tief verschachtelt")
+        aussen, innen = _auslagern(text)
+        try:
+            ergebnis.extend(" ".join(shlex.quote(t) for t in seg) for seg in _zerlegen(aussen))
+        except ValueError:
+            ergebnis.extend(s.strip() for s in re.split(r"&&|\|\||[;|&\n()`]|\$\(", aussen) if s.strip())
+        arbeit.extend((teil, tiefe + 1) for teil in innen)
     return ergebnis
 
 
@@ -234,7 +318,11 @@ def _kurz(text: str) -> str:
 def verstoesse_bash(befehl: str, verbotene_muster: list[str]) -> list[str]:
     """Verstöße eines Bash-Befehls gegen die Netzregel (leere Liste = in Ordnung)."""
     verstoesse: list[str] = []
-    for seg in segmente(befehl):
+    try:
+        teile = segmente(befehl)
+    except RecursionError:
+        return ["Befehl zu tief verschachtelt (nicht prüfbar, als Verstoß gewertet)"]
+    for seg in teile:
         if _ruft_poc(seg):
             verstoesse.extend(f"poc.py-Aufruf mit nicht erlaubtem Host: {_kurz(h)}" for h in verstoesse_poc(seg))
         else:
