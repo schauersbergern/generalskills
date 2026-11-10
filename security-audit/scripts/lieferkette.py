@@ -3,6 +3,7 @@
 
 Aufruf (immer als einzelner einfacher Befehl, siehe Netzregel):
   python3 -I lieferkette.py secrets --lauf <id> --repo <wurzel> --quelle <arbeitskopie> --sha <commit>
+  python3 -I lieferkette.py abhaengigkeiten --lauf <id> --quelle <arbeitskopie>
 
 `secrets` (Budget 300 s, davon `gitleaks dir` samt Schwärzung zuerst höchstens 120 s) schwärzt zuerst jede Secret-Fundstelle der
 Arbeitskopie (gleiche Länge, Zeichen `*`, `\\n` und `\\r` bleiben), setzt dann den Marker `<zustand>/lieferkette/geschwaerzt` und
@@ -12,6 +13,17 @@ gitleaks-Felder `Secret`, `Match`, `Author`, `Email`, `Message` und `Fingerprint
 verlässt den Prozess. Grenze: gitleaks überspringt mit `useDefault = true` bestimmte Pfade (`STANDARD_AUSNAHMEN`, z. B.
 `node_modules/`, Lockfiles, `*.svg`); Textdateien dieser Klassen in der Arbeitskopie werden weder geprüft noch geschwärzt und
 stehen deshalb im Hinweis „gitleaks-Standardausnahmen nicht geprüft: …“.
+
+`abhaengigkeiten` (Budget 300 s) kopiert jedes Lockfile (npm `package-lock.json`/`npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`;
+ohne `node_modules/`) mit seinem Dateinamen in einen eigenen leeren Ordner unter `<zustand>/lieferkette/abh/` und ruft darauf
+`osv-scanner scan source --lockfile <kopie> --format json --no-resolve` auf (cwd leer, Umgebung aus `werkzeug_umgebung()`, nie im
+Kundenrepo, keine `osv-scanner.toml` des Repos). Ausgabe (JSON auf stdout): `pakete` je Paket (nicht je Advisory) mit `paket`,
+`version`, `lockfile`, `zeile`, `advisories` (`id`, `aliase`, `zusammenfassung` ≤ 200, `details` ≤ 500 Zeichen, einzeilig),
+`behoben_in` (je Advisory die kleinste Fix-Version oberhalb der installierten im passenden Versionsbereich, davon das Maximum),
+`dev` (true nur bei `dev: true` im npm-Lockfile, sonst false; yarn und pnpm tragen keine Dev-Angabe) und `kev` (true/false, null
+wenn der Katalog nicht geladen werden konnte), dazu `hinweise`. Der KEV-Katalog der CISA wird höchstens einmal je Lauf geladen
+(Cache `<zustand>/lieferkette/kev.json`); `SECURITY_AUDIT_KEV_DATEI` ersetzt den Download durch eine lokale Datei. Aus Kundendateien
+erscheinen nur Paketnamen, Versionen und Pfade.
 
 Exit-Codes: 0 ok (auch wenn gitleaks fehlt: `{"werkzeug": "gitleaks", "fehlt": true, ...}`, dann ohne Marker), 2 ungültige
 Argumente (auch `--quelle` ≠ Arbeitskopie des Laufs), 4 Schwärzung gescheitert (`kategorie: schwaerzung-fehlgeschlagen`, kein
@@ -25,12 +37,14 @@ Prozessgruppe (`start_new_session=True`), die bei Zeitüberschreitung als einzig
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import re
 import stat
 import sys
 import time
+import urllib.request
 from datetime import datetime, timezone
 from typing import NamedTuple
 
@@ -52,9 +66,25 @@ MAX_COMMITS = 20
 MAX_NENNUNGEN = 10             # Dateien je Hinweis zur Repo-Konfiguration
 GITLEAKS_TOML = "[extend]\nuseDefault = true\n"
 KONFIG_NAMEN = (".gitleaks.toml", ".gitleaksignore", "osv-scanner.toml")
-ARBEIT = ("leer", "leer-ignore", "gitleaks.toml", "gl-dir.json", "gl-git.json", "spiegel.git")   # unter <zustand>/lieferkette/
+ARBEIT = ("leer", "leer-ignore", "gitleaks.toml", "gl-dir.json", "gl-git.json", "spiegel.git", "abh")   # unter <zustand>/lieferkette/
 VOLLER_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 ALLOW_MARKE = b"gitleaks:allow"
+
+ABH_BUDGET = 300               # Sekunden für `abhaengigkeiten` insgesamt (osv-scanner je Lockfile, danach KEV); Skill-Limit 600 s
+KEV_TIMEOUT = 30               # Sekunden für den KEV-Download
+KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+KEV_USER_AGENT = "security-audit/1 (+https://github.com/schauersbergern/generalskills)"
+KEV_MAX = 32 * 1024 * 1024     # Bytes, die vom KEV-Katalog gelesen werden (echte Größe etwa 1,5 MB)
+LOCKFILE_NAMEN = ("package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml")
+NPM_LOCKFILES = ("package-lock.json", "npm-shrinkwrap.json")
+LOCKFILE_MAX = 64 * 1024 * 1024
+MAX_LOCKFILES = 50
+MAX_PAKETE = 300               # Pakete in der Ausgabe
+MAX_ADVISORIES = 20            # Advisories je Paket in der Ausgabe (`behoben_in` zählt alle)
+MAX_ALIASE = 10
+ZUSAMMENFASSUNG_MAX = 200
+DETAILS_MAX = 500
+OSV_BEREICHE = ("SEMVER", "ECOSYSTEM")
 
 
 class Ausnahme(NamedTuple):
@@ -554,17 +584,24 @@ def _schwaerzung_gescheitert(grund: str) -> int:
     return 4
 
 
-def cmd_secrets(a: argparse.Namespace) -> int:
-    zustand = poc._ordner(a.lauf)
-    repo = os.path.realpath(a.repo)
-    if not os.path.isdir(repo):
-        raise PocFehler(f"--repo ist kein Ordner: {a.repo}")
-    quelle = os.path.realpath(a.quelle)
+def _arbeitskopie(lauf: str, quelle_arg: str) -> tuple[str, str]:
+    """(Zustandsordner, realpath der Arbeitskopie); PocFehler (Exit 2), wenn `--quelle` nicht die Arbeitskopie dieses Laufs ist
+    oder der Fertig-Marker fehlt."""
+    zustand = poc._ordner(lauf)
+    quelle = os.path.realpath(quelle_arg)
     if not os.path.isdir(zustand) or quelle != os.path.realpath(os.path.join(zustand, "quelle")) or not os.path.isdir(quelle):
         raise PocFehler("--quelle muss die Arbeitskopie dieses Laufs sein (`poc.py vorbereiten`): "
                         f"erwartet {os.path.join(zustand, 'quelle')}")
     if not os.path.isfile(os.path.join(zustand, "quelle.fertig")):
         raise PocFehler("Arbeitskopie unvollständig (kein Fertig-Marker): erneut `poc.py vorbereiten --lauf … --repo …`")
+    return zustand, quelle
+
+
+def cmd_secrets(a: argparse.Namespace) -> int:
+    repo = os.path.realpath(a.repo)
+    if not os.path.isdir(repo):
+        raise PocFehler(f"--repo ist kein Ordner: {a.repo}")
+    zustand, quelle = _arbeitskopie(a.lauf, a.quelle)
     if fehlt("gitleaks"):
         hinweis = "gitleaks fehlt, Secret-Prüfung nicht durchgeführt"
         _ausgabe({"werkzeug": "gitleaks", "fehlt": True, "hinweis": hinweis, "befunde_roh": [], "hinweise": [hinweis],
@@ -618,6 +655,444 @@ def _secrets(a: argparse.Namespace, repo: str, quelle: str, lk: str, marker: str
     return 0
 
 
+# ------------------------------------------------------------------------------------ abhaengigkeiten: Versionen
+
+_SEMVER = re.compile(r"v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?")
+
+
+def _zerlegt(version: str) -> tuple[tuple[int, int, int], list[str] | None] | None:
+    m = _SEMVER.fullmatch(version.strip())
+    if not m:
+        return None
+    kern = (int(m.group(1)), int(m.group(2) or 0), int(m.group(3) or 0))
+    return kern, (m.group(4).split(".") if m.group(4) else None)
+
+
+def _natuerlich(version: str) -> list[tuple[int, int | str]]:
+    """Notbehelf für Versionen ohne Semver-Form: Zahlen- und Buchstabenblöcke, Zahlen vor Text."""
+    return [(0, int(t)) if t.isdigit() else (1, t.casefold()) for t in re.findall(r"\d+|[A-Za-z]+", version)]
+
+
+def semver_vergleich(a: str, b: str) -> int:
+    """-1, 0 oder 1, je nachdem ob Version `a` kleiner, gleich oder größer als `b` ist (Semver 2.0: Vorabversionen vor der
+    Release, Build-Metadaten zählen nicht; `v`-Präfix und fehlende Teile (`1.2`) werden toleriert). Versionen ohne Semver-Form
+    werden nach Zahlen- und Buchstabenblöcken verglichen; die Funktion wirft nie."""
+    za, zb = _zerlegt(a), _zerlegt(b)
+    if za is None or zb is None:
+        na, nb = _natuerlich(a), _natuerlich(b)
+        return (na > nb) - (na < nb)
+    (ka, pa), (kb, pb) = za, zb
+    if ka != kb:
+        return -1 if ka < kb else 1
+    if pa is None or pb is None:
+        return 0 if pa is None and pb is None else (1 if pa is None else -1)
+    for x, y in zip(pa, pb):
+        if x == y:
+            continue
+        if x.isdigit() and y.isdigit():
+            return -1 if int(x) < int(y) else 1
+        if x.isdigit() != y.isdigit():
+            return -1 if x.isdigit() else 1          # Zahlen vor Text
+        return -1 if x < y else 1
+    return (len(pa) > len(pb)) - (len(pa) < len(pb))
+
+
+_version_key = functools.cmp_to_key(semver_vergleich)
+
+
+def _bereiche(ereignisse: object) -> list[tuple[str, str | None, str | None]]:
+    """OSV-Ereignisse eines Bereichs (`introduced`, `fixed`, `last_affected`) als Intervalle (von, fixed, last_affected)."""
+    if not isinstance(ereignisse, list):
+        return []
+    einzeln = [(k, v) for e in ereignisse if isinstance(e, dict) for k, v in e.items()
+               if k in ("introduced", "fixed", "last_affected") and isinstance(v, str)]
+    einzeln.sort(key=lambda kv: _version_key(kv[1]))
+    ergebnis: list[tuple[str, str | None, str | None]] = []
+    offen: str | None = None
+    for art, wert in einzeln:
+        if art == "introduced":
+            offen = wert if offen is None else offen
+        elif offen is not None:
+            ergebnis.append((offen, wert if art == "fixed" else None, wert if art == "last_affected" else None))
+            offen = None
+    if offen is not None:
+        ergebnis.append((offen, None, None))
+    return ergebnis
+
+
+def _fix_je_advisory(vuln: dict, paket: str, version: str) -> str | None:
+    """Kleinste Fix-Version oberhalb der installierten Version im Bereich, der die installierte Version enthält; passt kein
+    Bereich, die kleinste Fix-Version oberhalb der installierten über alle Bereiche. Nur `affected`-Einträge mit genau diesem
+    Paketnamen im Ökosystem npm."""
+    treffer: list[str] = []
+    alle: list[str] = []
+    affected = vuln.get("affected")
+    for eintrag in affected if isinstance(affected, list) else []:
+        pkg = eintrag.get("package") if isinstance(eintrag, dict) else None
+        if not isinstance(pkg, dict) or pkg.get("name") != paket or str(pkg.get("ecosystem", "")).casefold() != "npm":
+            continue
+        bereiche = eintrag.get("ranges")
+        for bereich in bereiche if isinstance(bereiche, list) else []:
+            if not isinstance(bereich, dict) or bereich.get("type") not in OSV_BEREICHE:
+                continue
+            for von, fix, bis in _bereiche(bereich.get("events")):
+                if fix is not None and semver_vergleich(fix, version) > 0:
+                    alle.append(fix)
+                drin = semver_vergleich(version, von) >= 0 and (
+                    fix is not None and semver_vergleich(version, fix) < 0
+                    or bis is not None and semver_vergleich(version, bis) <= 0
+                    or fix is None and bis is None)
+                if drin and fix is not None:
+                    treffer.append(fix)
+    kandidaten = treffer or alle
+    return min(kandidaten, key=_version_key) if kandidaten else None
+
+
+def behoben_in(advisories: list[dict], paket: str, version: str) -> str | None:
+    """Kleinste Version, die alle Advisories des Pakets behebt: je Advisory die kleinste Fix-Version oberhalb der installierten
+    im passenden Versionsbereich (Versionslinien!), davon das Maximum. None, wenn kein Advisory eine Fix-Version nennt.
+    `advisories` sind die OSV-Einträge (`vulnerabilities`) aus der Ausgabe von osv-scanner."""
+    fixes = [f for f in (_fix_je_advisory(v, paket, version) for v in advisories if isinstance(v, dict)) if f is not None]
+    return max(fixes, key=_version_key) if fixes else None
+
+
+# ------------------------------------------------------------------------------------ abhaengigkeiten: Lockfiles
+
+def _einzeilig(text: object, grenze: int) -> str:
+    """Fremden Text (OSV-Datenbank) für den LLM-Kontext: Whitespace (auch Zeilentrenner) zu einem Leerzeichen, unsichtbare
+    Zeichen als Escape, höchstens `grenze` Zeichen (das Kürzungszeichen eingeschlossen)."""
+    if not isinstance(text, str):
+        return ""
+    return _t(" ".join(text.split()), grenze - 1)
+
+
+def _lockfiles_finden(quelle: str, hinweise: list[str]) -> list[str]:
+    """Relative Pfade (`/`) aller Lockfiles in der Arbeitskopie, sortiert; `node_modules` und `.git` werden nicht betreten,
+    Symlinks nicht angenommen (Hinweis)."""
+    gefunden: list[str] = []
+    for ordner, unter, dateien in os.walk(quelle):
+        unter[:] = sorted(u for u in unter if u not in ("node_modules", ".git"))
+        for name in dateien:
+            if name not in LOCKFILE_NAMEN:
+                continue
+            pfad = os.path.join(ordner, name)
+            rel = os.path.relpath(pfad, quelle).replace(os.sep, "/")
+            try:
+                st = os.lstat(pfad)
+            except OSError:
+                continue
+            if stat.S_ISLNK(st.st_mode):
+                hinweise.append(f"Lockfile ist ein Symlink, übersprungen: {_t(rel)}")
+            elif not stat.S_ISREG(st.st_mode):
+                continue
+            elif st.st_size > LOCKFILE_MAX:
+                hinweise.append(f"Lockfile zu groß (> {LOCKFILE_MAX // (1024 * 1024)} MiB), übersprungen: {_t(rel)}")
+            else:
+                gefunden.append(rel)
+    gefunden.sort()
+    if len(gefunden) > MAX_LOCKFILES:
+        hinweise.append(f"{len(gefunden)} Lockfiles gefunden, nur die ersten {MAX_LOCKFILES} geprüft")
+        gefunden = gefunden[:MAX_LOCKFILES]
+    return gefunden
+
+
+def _lese_datei(pfad: str) -> bytes:
+    fd = os.open(pfad, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+    with os.fdopen(fd, "rb") as f:
+        return f.read(LOCKFILE_MAX + 1)
+
+
+class _NpmIndex(NamedTuple):
+    dev: dict          # (name, version) -> True, wenn jedes Vorkommen `dev: true` trägt
+    schluessel: dict   # (name, version) -> Schlüssel `node_modules/…` (Lockfile ab Version 2)
+
+
+def _npm_index(text: str) -> _NpmIndex:
+    """Dev-Angabe und Schlüssel je (Name, Version) aus einem npm-Lockfile; unlesbar oder fremdes Format ergibt leere Indizes."""
+    dev: dict[tuple[str, str], bool] = {}
+    schluessel: dict[tuple[str, str], str] = {}
+
+    def vermerken(name: object, version: object, eintrag: dict) -> None:
+        if isinstance(name, str) and isinstance(version, str):
+            dev[(name, version)] = dev.get((name, version), True) and eintrag.get("dev") is True
+
+    def altformat(deps: object) -> None:                 # lockfileVersion 1: verschachtelt unter `dependencies`
+        for name, eintrag in deps.items() if isinstance(deps, dict) else []:
+            if isinstance(eintrag, dict):
+                vermerken(name, eintrag.get("version"), eintrag)
+                altformat(eintrag.get("dependencies"))
+
+    try:
+        daten = json.loads(text)
+    except ValueError:
+        return _NpmIndex({}, {})
+    if not isinstance(daten, dict):
+        return _NpmIndex({}, {})
+    pakete = daten.get("packages")
+    for schl, eintrag in pakete.items() if isinstance(pakete, dict) else []:
+        if not isinstance(eintrag, dict) or "node_modules/" not in schl:
+            continue
+        name = schl.rsplit("node_modules/", 1)[-1]
+        vermerken(name, eintrag.get("version"), eintrag)
+        if isinstance(eintrag.get("name"), str) and eintrag["name"] != name:      # Alias: auch unter dem echten Namen
+            vermerken(eintrag["name"], eintrag.get("version"), eintrag)
+        if isinstance(eintrag.get("version"), str):
+            schluessel.setdefault((name, eintrag["version"]), schl)
+    altformat(daten.get("dependencies"))
+    return _NpmIndex(dev, schluessel)
+
+
+def _zeile(zeilen: list[str], name: str, version: str, index: _NpmIndex) -> int:
+    """Zeile des Pakets im Lockfile: npm Zeile des Schlüssels `"node_modules/<name>"` der installierten Version, sonst die erste
+    Zeile mit dem Paketnamen, Fallback 1."""
+    schl = index.schluessel.get((name, version))
+    if schl is not None:
+        ziel = json.dumps(schl) + ":"
+        for i, z in enumerate(zeilen, 1):
+            if z.lstrip().startswith(ziel):
+                return i
+    muster = re.compile(r"(?<![\w@./-])" + re.escape(name) + r"(?![\w-])")
+    for i, z in enumerate(zeilen, 1):
+        if muster.search(z):
+            return i
+    return 1
+
+
+# ------------------------------------------------------------------------------------ abhaengigkeiten: KEV
+
+class KevFehler(Exception):
+    """Der KEV-Katalog konnte nicht geladen oder gelesen werden."""
+
+
+def _kev_ids(roh: bytes) -> frozenset[str]:
+    try:
+        daten = json.loads(roh)
+    except ValueError as e:
+        raise KevFehler("kein gültiges JSON") from e
+    eintraege = daten.get("vulnerabilities") if isinstance(daten, dict) else None
+    if not isinstance(eintraege, list):
+        raise KevFehler("unerwartetes Format")
+    return frozenset(e["cveID"].strip().upper() for e in eintraege if isinstance(e, dict) and isinstance(e.get("cveID"), str))
+
+
+def _kev_herunterladen(timeout: float) -> bytes:
+    """Katalog laden (https, `timeout` Sekunden insgesamt, höchstens KEV_MAX Bytes)."""
+    ende = time.monotonic() + timeout
+    anfrage = urllib.request.Request(KEV_URL, headers={"User-Agent": KEV_USER_AGENT})
+    try:
+        with urllib.request.urlopen(anfrage, timeout=timeout) as antwort:
+            if not str(antwort.geturl()).lower().startswith("https://"):
+                raise KevFehler("Weiterleitung auf eine Adresse ohne https")
+            teile: list[bytes] = []
+            gelesen = 0
+            while True:
+                if time.monotonic() > ende:
+                    raise KevFehler("Zeitüberschreitung")
+                stueck = antwort.read(1 << 20)
+                if not stueck:
+                    return b"".join(teile)
+                gelesen += len(stueck)
+                if gelesen > KEV_MAX:
+                    raise KevFehler("Antwort zu groß")
+                teile.append(stueck)
+    except KevFehler:
+        raise
+    except Exception as e:                       # Netz, TLS, HTTP-Status, Zeitüberschreitung: nur Hinweis
+        raise KevFehler(f"Download fehlgeschlagen: {type(e).__name__}") from e
+
+
+def _lese_begrenzt(pfad: str, grenze: int) -> bytes:
+    with open(pfad, "rb") as f:
+        roh = f.read(grenze + 1)
+    if len(roh) > grenze:
+        raise KevFehler("Datei zu groß")
+    return roh
+
+
+def _kev_cache_schreiben(cache: str, roh: bytes) -> None:
+    """Cache atomar anlegen; ein Fehler dabei ist unkritisch (dann wird beim nächsten Aufruf neu geladen)."""
+    temp = f"{cache}.{os.getpid()}.neu"
+    try:
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0), 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(roh)
+        os.replace(temp, cache)
+    except OSError:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+
+
+def _kev_laden(lk: str, ende: float, hinweise: list[str]) -> frozenset[str] | None:
+    """Menge der CVE-IDs im KEV-Katalog oder None (mit Hinweis). `SECURITY_AUDIT_KEV_DATEI` ersetzt den Download durch eine
+    lokale Datei; sonst einmal je Lauf laden und in `<zustand>/lieferkette/kev.json` zwischenspeichern."""
+    lokal = os.environ.get("SECURITY_AUDIT_KEV_DATEI")
+    cache = os.path.join(lk, "kev.json")
+    try:
+        if lokal:
+            try:
+                return _kev_ids(_lese_begrenzt(lokal, KEV_MAX))
+            except OSError as e:
+                raise KevFehler(f"lokale Datei nicht lesbar ({e.strerror})") from e
+        try:
+            if stat.S_ISREG(os.lstat(cache).st_mode):
+                return _kev_ids(_lese_begrenzt(cache, KEV_MAX))
+        except (OSError, KevFehler):
+            pass                                  # kein oder defekter Cache: neu laden
+        rest = ende - time.monotonic()
+        if rest <= 0:
+            raise KevFehler("Zeitbudget erschöpft")
+        roh = _kev_herunterladen(min(KEV_TIMEOUT, rest))
+        ids = _kev_ids(roh)
+        _kev_cache_schreiben(cache, roh)
+        return ids
+    except KevFehler as e:
+        hinweise.append(f"KEV-Katalog nicht geladen ({_t(e, 120)}): kev bleibt unbestimmt")
+        return None
+
+
+# ------------------------------------------------------------------------------------ abhaengigkeiten
+
+def _osv_pakete(daten: object) -> list[tuple[str, str, list[dict]]]:
+    """(Name, Version, Advisories) je Paket aus der JSON-Ausgabe von osv-scanner; gleiche (Name, Version) zusammengeführt."""
+    je_paket: dict[tuple[str, str], list[dict]] = {}
+    ergebnisse = daten.get("results") if isinstance(daten, dict) else None
+    for ergebnis in ergebnisse if isinstance(ergebnisse, list) else []:
+        pakete = ergebnis.get("packages") if isinstance(ergebnis, dict) else None
+        for eintrag in pakete if isinstance(pakete, list) else []:
+            pkg = eintrag.get("package") if isinstance(eintrag, dict) else None
+            vulns = eintrag.get("vulnerabilities") if isinstance(eintrag, dict) else None
+            if not (isinstance(pkg, dict) and isinstance(pkg.get("name"), str) and isinstance(pkg.get("version"), str)
+                    and isinstance(vulns, list)):
+                continue
+            ziel = je_paket.setdefault((pkg["name"], pkg["version"]), [])
+            for v in vulns:
+                if isinstance(v, dict) and isinstance(v.get("id"), str) and all(v["id"] != x["id"] for x in ziel):
+                    ziel.append(v)
+    return [(n, v, vs) for (n, v), vs in je_paket.items() if vs]
+
+
+def _advisory(v: dict) -> dict:
+    aliase = v.get("aliases")
+    return {"id": _t(v["id"], 100),
+            "aliase": [_einzeilig(x, 100) for x in (aliase if isinstance(aliase, list) else [])[:MAX_ALIASE]
+                       if isinstance(x, str) and x != v["id"]],
+            "zusammenfassung": _einzeilig(v.get("summary"), ZUSAMMENFASSUNG_MAX),
+            "details": _einzeilig(v.get("details"), DETAILS_MAX)}
+
+
+def _kev_treffer(vulns: list[dict], kev: frozenset[str]) -> bool:
+    for v in vulns:
+        aliase = v.get("aliases")
+        namen = [v["id"]] + [x for x in (aliase if isinstance(aliase, list) else []) if isinstance(x, str)]
+        if any(n.strip().upper() in kev for n in namen):
+            return True
+    return False
+
+
+def _scan(rel: str, kopie: str, leer: str, rest: float) -> tuple[str, object]:
+    """osv-scanner auf einer Lockfile-Kopie. Rückgabe: ("ok", Daten), ("zeit", None), ("start", Meldung) oder
+    ("hinweis", Text) für Exit 127/128/andere und unlesbare Ausgabe."""
+    try:
+        r = gitkopie.werkzeug_ausfuehren(["osv-scanner", "scan", "source", "--lockfile", kopie, "--format", "json", "--no-resolve"],
+                                         rest, leer)
+    except GitFehler as e:
+        return "start", f"osv-scanner nicht startbar ({_t(e, 200)}), Abhängigkeitsprüfung nicht durchgeführt"
+    if r.rc is None:
+        return "zeit", None
+    if r.rc == 0:
+        return "ok", {}
+    if r.rc == 128:
+        return "hinweis", f"osv-scanner fand keine Pakete (Exit 128): {_t(rel)}"
+    if r.rc != 1:
+        return "hinweis", f"osv-scanner Exit {r.rc}, Lockfile nicht geprüft: {_t(rel)}"
+    try:
+        return "ok", json.loads(r.out)
+    except ValueError:
+        return "hinweis", f"osv-scanner-Ausgabe unlesbar, Lockfile nicht geprüft: {_t(rel)}"
+
+
+def _abhaengigkeiten(quelle: str, lk: str, abh: str, ende: float) -> dict:
+    hinweise: list[str] = []
+    eintraege: list[dict] = []                    # Pakete mit den rohen Advisories (für KEV und die Ausgabe)
+    lockfiles = _lockfiles_finden(quelle, hinweise)
+    if not lockfiles:
+        hinweise.append("Keine Lockfiles (npm, yarn, pnpm) in der Arbeitskopie gefunden: Abhängigkeitsprüfung ohne Ergebnis")
+    leer = os.path.join(abh, "leer")
+    for nr, rel in enumerate(lockfiles, 1):
+        rest = ende - time.monotonic()
+        offen = f"{len(lockfiles) - nr + 1} von {len(lockfiles)} Lockfiles nicht geprüft"
+        if rest <= 0:
+            hinweise.append(f"Abhängigkeitsprüfung abgebrochen (Zeitbudget): {offen}")
+            break
+        name = rel.rsplit("/", 1)[-1]
+        ordner = os.path.join(abh, f"lockfile-{nr}")
+        os.mkdir(ordner, 0o700)
+        kopie = os.path.join(ordner, name)
+        try:
+            text = _lese_datei(os.path.join(quelle, rel))
+            with open(kopie, "xb") as f:
+                f.write(text)
+        except OSError as e:
+            hinweise.append(f"Lockfile nicht lesbar, übersprungen: {_t(rel)} ({e.strerror})")
+            continue
+        art, wert = _scan(rel, kopie, leer, rest)
+        if art == "zeit":
+            hinweise.append(f"Abhängigkeitsprüfung abgebrochen (Zeitbudget): {offen} (zuerst: {_t(rel)})")
+            break
+        if art == "start":
+            hinweise.append(str(wert))
+            break
+        if art == "hinweis":
+            hinweise.append(str(wert))
+            continue
+        pakete = _osv_pakete(wert)
+        if not pakete:
+            continue
+        inhalt = text.decode("utf-8", "replace")
+        zeilen = inhalt.splitlines()
+        index = _npm_index(inhalt) if name in NPM_LOCKFILES else _NpmIndex({}, {})
+        for pname, version, vulns in sorted(pakete, key=lambda p: (p[0], _version_key(p[1]))):
+            eintraege.append({"paket": _t(pname, 214), "version": _t(version, 100), "lockfile": _t(rel, 500),
+                              "zeile": _zeile(zeilen, pname, version, index),
+                              "vulns": vulns, "behoben_in": behoben_in(vulns, pname, version),
+                              "dev": index.dev.get((pname, version), False)})
+    kev = _kev_laden(lk, ende, hinweise) if eintraege else None
+    pakete_aus = []
+    for e in eintraege[:MAX_PAKETE]:
+        vulns = sorted(e["vulns"], key=lambda v: v["id"])
+        if len(vulns) > MAX_ADVISORIES:
+            hinweise.append(f"{e['paket']} {e['version']}: {len(vulns)} Advisories, {MAX_ADVISORIES} ausgegeben "
+                            f"(behoben_in berücksichtigt alle)")
+        e["advisories"] = [_advisory(v) for v in vulns[:MAX_ADVISORIES]]
+        e["kev"] = None if kev is None else _kev_treffer(vulns, kev)
+        pakete_aus.append({k: e[k] for k in ("paket", "version", "lockfile", "zeile", "advisories", "behoben_in", "dev", "kev")})
+    if len(eintraege) > MAX_PAKETE:
+        hinweise.append(f"{len(eintraege)} Pakete mit Advisories, nur {MAX_PAKETE} ausgegeben")
+    return {"pakete": pakete_aus, "hinweise": hinweise}
+
+
+def cmd_abhaengigkeiten(a: argparse.Namespace) -> int:
+    zustand, quelle = _arbeitskopie(a.lauf, a.quelle)
+    if fehlt("osv-scanner"):
+        hinweis = "osv-scanner fehlt, Abhängigkeitsprüfung nicht durchgeführt"
+        _ausgabe({"werkzeug": "osv-scanner", "fehlt": True, "hinweis": hinweis, "pakete": [], "hinweise": [hinweis]})
+        return 0
+    lk = _lieferkette_ordner(zustand)
+    abh = os.path.join(lk, "abh")
+    ende = time.monotonic() + _sekunden("SECURITY_AUDIT_ABH_BUDGET", ABH_BUDGET)
+    try:
+        poc._entferne(abh, lk)                    # Reste eines früheren Aufrufs
+        os.mkdir(abh, 0o700)
+        os.mkdir(os.path.join(abh, "leer"), 0o700)
+        ergebnis = _abhaengigkeiten(quelle, lk, abh, ende)
+    finally:
+        poc._entferne(abh, lk)                    # auch bei Fehler und Budgetablauf; scheitert das, endet der Befehl mit Exit 1
+    _ausgabe(ergebnis)
+    return 0
+
+
 # ------------------------------------------------------------------------------------ Argumente
 
 def _parser() -> argparse.ArgumentParser:
@@ -629,6 +1104,10 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--repo", required=True, help="Repo-Wurzel (für den Spiegelklon)")
     s.add_argument("--quelle", required=True, help="Arbeitskopie des Laufs (`<zustand>/quelle`)")
     s.add_argument("--sha", required=True, type=poc._typ_sha, help="geprüfter Commit (voller Hash)")
+    s = sub.add_parser("abhaengigkeiten", allow_abbrev=False, help="Lockfiles mit osv-scanner prüfen (Advisories, KEV)")
+    s.set_defaults(fn=cmd_abhaengigkeiten)
+    s.add_argument("--lauf", required=True, type=poc._typ_lauf)
+    s.add_argument("--quelle", required=True, help="Arbeitskopie des Laufs (`<zustand>/quelle`)")
     return p
 
 
