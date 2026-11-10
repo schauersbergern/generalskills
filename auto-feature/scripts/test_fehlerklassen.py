@@ -128,6 +128,68 @@ class Neu(Basis):
         self.assertNotEqual(r.returncode, 0)
 
 
+class Struktur(Basis):
+    """Eingaben, die die Dateistruktur verändern, werden abgelehnt (Review R1-1)."""
+
+    def abgelehnt(self, eingabe, vorher=None):
+        vorher = self.text() if vorher is None else vorher
+        r = lauf("neu", self.datei, eingabe=eingabe)
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.text(), vorher)
+
+    def test_zaunzeile_im_block(self):
+        self.abgelehnt(GUT.replace("- Status: offen", "```bash\n- Status: offen"))
+
+    def test_vorlage_samt_zaun_aus_retro_md(self):
+        self.abgelehnt("```\n" + GUT + "```\n")
+
+    def test_text_vor_dem_ersten_kopf(self):
+        self.abgelehnt("Hallo\n" + GUT)
+
+    def test_zeile_ohne_feld(self):
+        self.abgelehnt(GUT + "irgendwas\n")
+
+    def test_fortsetzungszeile_mit_einrueckung_ist_erlaubt(self):
+        r = lauf("neu", self.datei, eingabe=GUT.replace("- Status: offen", "  weiter im Text\n- Status: offen"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_feld_doppelt(self):
+        self.abgelehnt(GUT + "- Durchgerutscht: zweites\n")
+
+    def test_feld_ohne_wert(self):
+        for z in ("- Durchgerutscht:", "- Deterministisch: "):
+            self.abgelehnt(GUT.replace(next(l for l in GUT.splitlines() if l.startswith(z.split(":")[0])), z))
+
+    def test_zweiter_block_mit_fremdem_kopf(self):
+        self.abgelehnt(GUT + "## Kandidaten · X\n- Status: offen\n")
+
+    def test_block_mit_vorhandener_id_dupliziert_nichts(self):
+        lauf("neu", self.datei, eingabe=GUT)
+        self.abgelehnt(GUT.replace("K-?", "K-1"))
+
+    def test_kopf_ohne_klasse_trennzeichen(self):
+        self.abgelehnt(GUT.replace("K-? · ", "K-? - "))
+
+    def test_vermerk_mit_zeilenumbruch_schleust_keinen_kopf_ein(self):
+        lauf("neu", self.datei, eingabe=GUT)
+        vorher = self.text()
+        for vermerk in ("grund\n## K-1 · Fake", "grund\r## K-1 · Fake", "grund\u2028## K-1 · Fake"):
+            r = lauf("status", self.datei, "K-1", "verworfen", vermerk)
+            self.assertNotEqual(r.returncode, 0, repr(vermerk))
+        self.assertEqual(self.text(), vorher)
+
+    def test_handgeaenderter_kopf_wird_gemeldet_statt_zugeschlagen(self):
+        lauf("neu", self.datei, eingabe=GUT)
+        with open(self.datei, "a", encoding="utf-8") as f:
+            f.write("\n## K-2 - Klasse\n- Status: offen\n")
+        vorher = self.text()
+        for args in (("liste", self.datei), ("beleg", self.datei, "K-1"), ("status", self.datei, "K-1", "offen")):
+            r = lauf(*args, eingabe="- Beleg: PR #2 R1-1 [P2], `a.ts:3`, 2026-11-10 — x\n")
+            self.assertNotEqual(r.returncode, 0, args)
+            self.assertIn("## K-2 - Klasse", r.stderr)
+        self.abgelehnt(GUT, vorher)
+
+
 class Liste(Basis):
     def test_eine_zeile_je_kandidat_mit_belegzahl(self):
         lauf("neu", self.datei, eingabe=GUT)

@@ -20,6 +20,8 @@ KOPF_RE = re.compile(r"^## (K-(\d+|\?)) · (.+)$")
 FELDER = ("Beleg", "Durchgerutscht", "Prüfpunkt", "Deterministisch", "Status")
 BELEG_RE = re.compile(r"^- Beleg: .*`[^`]+(?::\d+(?:[-–]\d+)?| §[^`]+)`.*\b\d{4}-\d{2}-\d{2}\b")
 PRUEF_RE = re.compile(r"^- Prüfpunkt \(.+?\): .*„.+“")
+ZEILE_RE = re.compile(r"^- (?:(Beleg|Durchgerutscht|Deterministisch|Status): |(Prüfpunkt) \(.+\): )\S")
+FORTSETZUNG_RE = re.compile(r"^  \S")
 STATUS = ("offen", "übernommen", "verworfen")
 
 
@@ -65,6 +67,8 @@ def kandidaten(zeilen):
             im_code = not im_code
         elif not im_code and (m := KOPF_RE.match(z)):
             koepfe.append((i, m))
+        elif not im_code and z.startswith("## K-"):
+            fehler(f"Zeile {i + 1} sieht nach einem Kandidatenkopf aus, passt aber nicht zu „## K-<n> · <Klasse>“: {z}")
     out = []
     for n, (i, m) in enumerate(koepfe):
         ende = koepfe[n + 1][0] if n + 1 < len(koepfe) else len(zeilen)
@@ -91,16 +95,29 @@ def pruefe_block(block):
     kopf = KOPF_RE.match(block[0])
     if not kopf or kopf.group(2) != "?":
         fehler(f"Block muss mit „## K-? · <Klasse>“ beginnen: {block[0]}")
-    for feld in FELDER:
-        if not any(z.startswith(f"- {feld}") for z in block[1:]):
-            fehler(f"{kopf.group(3)}: Feld „{feld}“ fehlt")
+    gesehen = {}
     for z in block[1:]:
-        if z.startswith("- Beleg"):
+        if z.lstrip().startswith("```"):
+            fehler(f"{kopf.group(3)}: Zaunzeile (```) im Block, die Vorlage ohne Zaun einfügen: {z}")
+        m = ZEILE_RE.match(z)
+        if not m:
+            if FORTSETZUNG_RE.match(z):
+                continue
+            fehler(f"{kopf.group(3)}: Zeile ist weder „- <Feld>: <Wert>“ mit nicht leerem Wert noch eine "
+                   f"eingerückte Fortsetzung: {z}")
+        feld = m.group(1) or m.group(2)
+        gesehen[feld] = gesehen.get(feld, 0) + 1
+        if feld == "Beleg":
             pruefe_beleg(z)
-        if z.startswith("- Prüfpunkt") and not PRUEF_RE.match(z):
+        if feld == "Prüfpunkt" and not PRUEF_RE.match(z):
             fehler(f"Prüfpunkt braucht Ort und Wortlaut: „- Prüfpunkt (<Ort>): „<Wortlaut>““: {z}")
-        if z.startswith("- Status") and z.strip() != "- Status: offen":
+        if feld == "Status" and z.strip() != "- Status: offen":
             fehler("Neue Kandidaten haben „- Status: offen“")
+    for feld in FELDER:
+        if feld not in gesehen:
+            fehler(f"{kopf.group(3)}: Feld „{feld}“ fehlt")
+        if feld != "Beleg" and gesehen[feld] > 1:
+            fehler(f"{kopf.group(3)}: Feld „{feld}“ steht mehrfach")
 
 
 def bloecke(text):
@@ -108,6 +125,9 @@ def bloecke(text):
     start = [i for i, z in enumerate(zeilen) if z.startswith("## ")]
     if not start:
         fehler("Keine Kandidaten in der Eingabe (Kopf „## K-? · <Klasse>“)")
+    davor = [z for z in zeilen[:start[0]] if z.strip()]
+    if davor:
+        fehler(f"Text vor dem ersten Kopf „## K-? · <Klasse>“ (Zaun der Vorlage mitkopiert?): {davor[0]}")
     out = []
     for n, i in enumerate(start):
         ende = start[n + 1] if n + 1 < len(start) else len(zeilen)
@@ -154,6 +174,8 @@ def cmd_status(a):
         fehler(f"Status muss einer von {', '.join(STATUS)} sein")
     if a.status != "offen" and not a.vermerk:
         fehler(f"„{a.status}“ braucht einen Vermerk (PR bzw. Grund)")
+    if a.vermerk is not None and a.vermerk.splitlines() != [a.vermerk]:
+        fehler("Der Vermerk muss eine einzelne Zeile sein, ohne Zeilenumbruch")
     lies(a.datei)
     with Sperre(a.datei):
         zeilen = lies(a.datei)
