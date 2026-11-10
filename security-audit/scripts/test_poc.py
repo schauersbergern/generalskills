@@ -38,6 +38,14 @@ try:
 except OSError:
     cfg = {{}}
 antwort = cfg.get(" ".join(args[:2])) or cfg.get(args[0] if args else "") or {{}}
+if antwort.get("folge"):
+    zaehler = os.environ["FAKE_DOCKER_CONFIG"] + ".n." + "".join(c for c in "_".join(args[:2]) if c.isalnum())
+    try:
+        n = int(open(zaehler).read())
+    except OSError:
+        n = 0
+    open(zaehler, "w").write(str(n + 1))
+    antwort = antwort["folge"][min(n, len(antwort["folge"]) - 1)]
 if antwort.get("sleep"):
     time.sleep(antwort["sleep"])
 for _ in range(antwort.get("flood", 0)):
@@ -262,7 +270,9 @@ def node_in(tmp_path, engines=None, nvmrc=None):
     (">20", "24"), ("<=22", "22"), ("20 || >=24", "24"), ("^0.8", "22"), (">=26", "22"), ("???", "22"),
     # T3-M2: Bereiche, die nur einzelne Minor-Versionen eines Majors treffen
     ("~20.11", "20"), ("=20.11.0", "20"), ("<=20.11.0", "20"), (">=20.11.0 <20.12.0", "20"), ("18 - 20", "20"),
-    ("20.11.x", "20"), ("~22.3 || ~20.11", "22"), ("18 - 22", "22"), ("16 - 18", "22"), ("20.11.0 - 20.11.9", "20"),
+    ("20.11.x", "20"), (">=20.11.1 <=20.11.5", "20"), ("=20.11.5", "20"), (">=20.11.1 <20.12.0", "20"),
+    (">20.11.98 <20.12.0", "20"), ("=20.11.99", "20"), ("20.11.1 - 20.11.5", "20"), ("<20.11.5 >=20.11.4", "20"),
+    (">=20.11.6 <=20.11.5", "22"), ("~22.3 || ~20.11", "22"), ("18 - 22", "22"), ("16 - 18", "22"), ("20.11.0 - 20.11.9", "20"),
 ])
 def test_node_version_engines(tmp_path, engines, erwartet):
     assert poc.node_version(node_in(tmp_path, engines=engines), None) == erwartet
@@ -280,9 +290,39 @@ def test_node_version_riesige_zahlen(tmp_path):
     """T3-M3: Zahlen über dem int-Stringlimit lösen kein ValueError aus, es gilt der Fallback."""
     gross = "9" * 5000
     assert poc.node_version(node_in(tmp_path, engines=f"^{gross}"), None) == "22"
-    assert poc.node_version(node_in(tmp_path / "a", engines=f">={gross}.1.2 || ^20"), None) == "20"
+    assert poc.node_version(node_in(tmp_path / "a", engines=f">={gross}.1.2 || ^20"), None) == "22"  # zu lang
+    assert poc._vergleich_lesen(f"^{gross}") is None and poc._vergleich_lesen(f"=20.{gross}") is None
     assert poc.node_version(node_in(tmp_path / "b", nvmrc=gross), None) == "22"
-    assert poc.node_version(node_in(tmp_path / "c", engines=f"~20.{gross}", nvmrc="v24"), None) == "24"
+
+
+def test_node_version_dos_grenzen(tmp_path):
+    """T3-R2: lange Ranges und große package.json kosten keine Rechenzeit."""
+    lang = ">=20.11.1 <=20.11.5 || " * 6200  # ~140 KB
+    assert len(lang) > 140_000
+    q = node_in(tmp_path, engines=lang, nvmrc="v20")
+    t0 = time.monotonic()
+    assert poc.node_version(q, None) == "20"  # nur wegen .nvmrc; die Range gilt als unlesbar
+    assert time.monotonic() - t0 < 1
+    q = node_in(tmp_path / "v", engines=">=22", nvmrc="v20")
+    assert poc.node_version(q, None) == "24"
+    gross = projekt(tmp_path / "g", {"package.json": json.dumps({"engines": {"node": ">=22"}, "x": "y" * (2 * 1024 * 1024)}),
+                                     ".nvmrc": "v20"})
+    t0 = time.monotonic()
+    assert poc.node_version(gross, None) == "20"  # package.json über 1 MiB wird nicht gelesen
+    assert time.monotonic() - t0 < 1
+    # Viele Vergleiche in 1024 Zeichen: begrenzt und schnell.
+    viele = projekt(tmp_path / "m", {"package.json": json.dumps({"engines": {"node": " || ".join(f"=20.{i}.{i}" for i in range(80))}})})
+    t0 = time.monotonic()
+    poc.node_version(viele, None)
+    assert time.monotonic() - t0 < 1
+
+
+def test_node_hinweis_range_zu_lang(tmp_path):
+    q = node_in(tmp_path, engines=">=20 " * 300)
+    assert poc.node_hinweise(q, None) == ["node-range-zu-lang"]
+    assert poc.node_hinweise(q, "22") == []
+    assert poc.node_hinweise(node_in(tmp_path / "k", engines=">=22"), None) == []
+    assert poc.node_hinweise(str(tmp_path / "gibt-es-nicht"), None) == []
 
 
 def test_node_version_standard_und_vorgabe(tmp_path):
@@ -1016,11 +1056,11 @@ def test_ausgabe_wird_gekappt(umg, tmp_path):
     assert r.returncode == 0
     assert len(r.stdout) <= 70 * 1024
     assert "gekürzt" in r.stderr
-    umg.konfig({"build": {"rc": 1, "flood": 20, "stderr": "ENDE-FEHLER\n"}})
+    umg.konfig({"build": {"rc": 1, "flood": 20, "stdout": "ENDE-BUILD\n"}})
     r = umg.poc("bauen", "--lauf", LAUF)
     assert r.returncode == 4
     zeilen = r.stdout.splitlines()
-    assert zeilen[0] == "kategorie: build-fehler" and zeilen[-1] == "ENDE-FEHLER" and len(zeilen) <= 41
+    assert zeilen[0] == "kategorie: build-fehler" and zeilen[-1] == "ENDE-BUILD" and len(zeilen) <= 41
     assert "gekürzt" in r.stderr
 
 
@@ -1028,12 +1068,12 @@ def test_lesen_nach_kill_haengt_nicht(umg, tmp_path):
     """T3-M5: Ein Enkelprozess, der die Pipe offen hält, blockiert nach dem Timeout nicht."""
     fake = umg.bin / "docker"
     fake.write_text(fake.read_text().replace("antwort = cfg.get", "if args[0] == 'exec':\n    import subprocess\n"
-                    "    subprocess.Popen(['sleep', '20'])\n    time.sleep(30)\nantwort = cfg.get", 1))
+                    "    subprocess.Popen(['sleep', '60'])\n    time.sleep(30)\nantwort = cfg.get", 1))
     inicio = time.monotonic()
     r = umg.poc("ausfuehren", "--lauf", LAUF, "--rolle", "p1", "--", "x",
                 env=umg.env(SECURITY_AUDIT_DOCKER_TIMEOUT="1"), timeout=40)
     assert r.returncode == 1
-    assert time.monotonic() - inicio < 25
+    assert time.monotonic() - inicio < 15
 
 
 def test_pull_never(umg, tmp_path):
@@ -1118,3 +1158,69 @@ def test_timeouts_werden_uebergeben(temp_ordner, monkeypatch):
     assert poc.main(["ausfuehren", "--lauf", LAUF, "--rolle", "p1", "--", "true"]) == 0
     assert ("run", poc.ANFRAGE_TIMEOUT) in aufrufe and ("exec", poc.EXEC_TIMEOUT) in aufrufe
     assert poc.ANFRAGE_TIMEOUT == 45 and poc.EXEC_TIMEOUT == 120
+
+
+# ------------------------------------------------------------------------------------ Fix-Runde 2 (Review T3-R2)
+
+def test_bauen_node_range_hinweis(umg, tmp_path):
+    vorbereitet(umg, tmp_path, dict(MINI, **{"package.json": json.dumps(
+        {"name": "x", "version": "1.0.0", "engines": {"node": ">=20 " * 300}})}))
+    r = umg.poc("bauen", "--lauf", LAUF)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "hinweis: node-range-zu-lang" in r.stdout.splitlines()
+    assert "NODE=22" in build_aufruf(umg)
+
+
+def test_bauen_fehler_mit_daemon_stoerung_ohne_marker(umg, tmp_path):
+    """T3-R2-Minor-1: Build scheitert ohne Daemon-Text, aber `docker version` fällt jetzt aus: Exit 3."""
+    vorbereitet(umg, tmp_path)
+    umg.konfig({"build": {"rc": 1, "stderr": "failed to solve: rpc error: code = Unavailable\n"},
+                "version": {"folge": [{"rc": 0}, {"rc": 1, "stderr": "Cannot connect to the Docker daemon"}]}})
+    r = umg.poc("bauen", "--lauf", LAUF)
+    assert r.returncode == 3
+    assert r.stdout.splitlines()[0] == "kategorie: docker-fehlt"
+
+
+def test_bauen_fehler_bei_laufendem_daemon_bleibt_build_fehler(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    umg.konfig({"build": {"rc": 1, "stderr": "boom\n"}})
+    r = umg.poc("bauen", "--lauf", LAUF)
+    assert r.returncode == 4 and r.stdout.splitlines()[0] == "kategorie: build-fehler"
+    assert [a["args"][0] for a in umg.aufrufe()].count("version") == 2  # davor und danach
+
+
+def test_starten_fehler_mit_daemon_stoerung(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    umg.konfig({"run": {"rc": 125, "stderr": "docker: Error response from daemon: x\n"},
+                "version": {"folge": [{"rc": 0}, {"rc": 1, "stderr": "Cannot connect to the Docker daemon"}]}})
+    r = umg.poc("starten", "--lauf", LAUF, "--rolle", "p1", "--start-befehl", "x", "--port", "1")
+    assert r.returncode == 3
+    assert r.stdout.splitlines()[0] == "kategorie: docker-fehlt"
+
+
+@pytest.mark.parametrize("zeichen", [
+    "\ufe00", "\ufe0f", "\U000e0100", "\U000e01ef",      # Variation Selectors
+    "\u034f", "\u180b", "\u180d", "\u17b4", "\u17b5",   # Combining Grapheme Joiner, Mongolisch, Khmer
+    "\u3164", "\uffa0", "\u1160", "\u2800",              # Hangul-/Braille-Füller
+    "\u2028", "\u2029",                                    # Zeilen-/Absatztrenner
+    "\u0378", "\U0010ffff",                                # nicht zugewiesen (Cn)
+])
+def test_entschaerfen_weitere_unsichtbare_zeichen(zeichen):
+    aus = poc._entschaerfen(f"a{zeichen}b")
+    assert zeichen not in aus and aus.startswith("a\\") and aus.endswith("b"), ascii(aus)
+
+
+def test_entschaerfen_laesst_normalen_text(tmp_path):
+    assert poc._entschaerfen("Grüße, 世界 é\u0301 😀 a\tb\nc") == "Grüße, 世界 é\u0301 😀 a\tb\nc"
+
+
+def test_ausgabegrenze_gilt_nach_dem_escaping(umg, tmp_path):
+    """T3-R2-Minor-4: 65536 Steuerzeichen werden zu 4 Zeichen je Stück; ausgegeben werden höchstens 64 KiB."""
+    vorbereitet(umg, tmp_path)
+    gestartet(umg)
+    umg.konfig({"exec": {"stdout": "\x01" * 65536, "stderr": "\x02" * 65536}})
+    r = umg.poc("ausfuehren", "--lauf", LAUF, "--rolle", "p1", "--", "x")
+    assert len(r.stdout) <= 64 * 1024
+    assert "gekürzt" in r.stderr
+    assert r.stderr.count("\\x02") * 4 <= 64 * 1024 + 4
+    assert len(r.stderr) <= 64 * 1024 + 200  # Escapes + Hinweis

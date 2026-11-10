@@ -53,6 +53,9 @@ DB_WARTEN = 60
 TAIL_ZEILEN = 40
 ZEILE_MAX = 300
 DATEN_MAX = 1024 * 1024
+MAX_ENGINES = 1024               # längere engines.node-Ranges gelten als unlesbar
+MAX_VERGLEICHE = 64
+PACKAGE_JSON_MAX = 1024 * 1024
 LESE_MAX = 4 * 1024 * 1024      # je Strom beim Lesen von docker
 AUSGABE_MAX = 64 * 1024         # was anfrage/ausfuehren höchstens auf stdout ausgeben
 APP_PORT_DB = 5432
@@ -235,8 +238,8 @@ class _Puffer:
                 if len(teil) > frei:
                     self.gekuerzt = True
 
-    def ergebnis(self) -> tuple[bytes, bool]:
-        self.thread.join(timeout=5)  # ein Enkelprozess mit offener Pipe darf nicht blockieren
+    def ergebnis(self, frist: float) -> tuple[bytes, bool]:
+        self.thread.join(timeout=max(0.0, frist - time.monotonic()))  # Enkelprozess mit offener Pipe blockiert nicht
         daten, gekuerzt = bytes(self.daten), self.gekuerzt
         if self._ende and len(daten) > self._grenze:
             daten, gekuerzt = daten[-self._grenze:], True
@@ -288,7 +291,8 @@ def _docker(args: list[str], timeout: int, eingabe: bytes | None = None, env: di
     except subprocess.TimeoutExpired:
         _beenden(p)
         rc = None
-    (o, ko), (e, ke) = out.ergebnis(), err.ergebnis()
+    frist = time.monotonic() + 5
+    (o, ko), (e, ke) = out.ergebnis(frist), err.ergebnis(frist)
     r = Ergebnis(rc, o, e, ko or ke)
     if r.gekuerzt:
         print(f"docker {args[0]}: Ausgabe auf {LESE_MAX // 1024 // 1024} MiB gekürzt", file=sys.stderr)
@@ -308,6 +312,16 @@ def _daemon_pruefen() -> str:
     return r.out.decode("utf-8", "replace").strip()
 
 
+_UNSICHTBAR_BEREICHE = ((0xFE00, 0xFE0F), (0xE0100, 0xE01EF), (0x034F, 0x034F), (0x180B, 0x180D), (0x17B4, 0x17B5),
+                        (0x3164, 0x3164), (0xFFA0, 0xFFA0), (0x1160, 0x1160), (0x2800, 0x2800))
+
+
+def _unsichtbar(ch: str) -> bool:
+    o = ord(ch)
+    return (unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp")
+            or any(von <= o <= bis for von, bis in _UNSICHTBAR_BEREICHE))
+
+
 def _entschaerfen(text: str) -> str:
     """Kundenstämmigen Text für die Ausgabe entschärfen (fließt in den LLM-Kontext): Steuer- und Formatzeichen
     (ESC, ANSI, NUL, CR, Bidi, Zero-Width, Zeilentrenner) als Escape-Sequenz; `\\n` und `\\t` bleiben."""
@@ -317,7 +331,7 @@ def _entschaerfen(text: str) -> str:
             aus.append(ch)
         elif ch == "\r":
             aus.append("\\r")
-        elif unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Zl", "Zp"):
+        elif _unsichtbar(ch):
             o = ord(ch)
             aus.append(f"\\x{o:02x}" if o < 0x100 else f"\\u{o:04x}" if o < 0x10000 else f"\\U{o:08x}")
         else:
@@ -331,11 +345,13 @@ def _tail(text: str, n: int = TAIL_ZEILEN) -> str:
 
 
 def _gib_aus(r: Ergebnis) -> None:
-    """stdout/stderr eines Kunden-Containers entschärft und auf AUSGABE_MAX Bytes begrenzt ausgeben."""
+    """stdout/stderr eines Kunden-Containers entschärft ausgeben; AUSGABE_MAX Zeichen je Strom gelten nach dem
+    Escaping als harte Grenze."""
     for strom, ziel in ((r.out, sys.stdout), (r.err, sys.stderr)):
-        text = strom[:AUSGABE_MAX].decode("utf-8", "replace")
-        ziel.write(_entschaerfen(text))
-        if len(strom) > AUSGABE_MAX:
+        text = _entschaerfen(strom[:AUSGABE_MAX].decode("utf-8", "replace"))
+        gekuerzt = len(strom) > AUSGABE_MAX or len(text) > AUSGABE_MAX
+        ziel.write(text[:AUSGABE_MAX])
+        if gekuerzt:
             print(f"\n[Ausgabe auf {AUSGABE_MAX // 1024} KiB gekürzt]", file=sys.stderr)
 
 
@@ -432,26 +448,52 @@ def lockfile_hinweise(quelle: str) -> list[str]:
 
 
 _VERGLEICH = re.compile(r"(\^|~|>=|<=|>|<|=)?v?([0-9]+|[xX*])(?:\.([0-9]+|[xX*]))?(?:\.([0-9]+|[xX*]))?(?:[-+][0-9A-Za-z.+-]*)?")
+Vergleich = tuple  # (op, major|None, minor|None, patch|None); None = Platzhalter
 
 
 def _teil(s: str | None) -> int | None:
-    return None if s is None or s in ("x", "X", "*") else int(s)  # ValueError bei über 4300 Ziffern: s. _vergleich_passt
+    return None if s is None or s in ("x", "X", "*") else int(s)  # ValueError bei über 4300 Ziffern: s. _vergleich_lesen
 
 
-def _vergleich_passt(v: tuple[int, int, int], token: str) -> bool | None:
-    """Passt v zum Vergleich `token`? None, wenn der Token nicht lesbar ist."""
+def _vergleich_lesen(token: str) -> Vergleich | None:
+    """Ein Vergleich wie `^20.11`, `>=18`, `x`; None, wenn der Token nicht lesbar ist."""
     m = _VERGLEICH.fullmatch(token)
     if not m:
         return None
-    op = m.group(1) or "^"
     try:
         a, b, c = (_teil(m.group(i)) for i in (2, 3, 4))
     except ValueError:
         return None
     if a is None:
+        return (m.group(1) or "^", None, None, None)
+    return (m.group(1) or "^", a, b, None if b is None else c)
+
+
+def _bereich_lesen(bereich: str) -> list[list[Vergleich]] | None:
+    """Range einmal in Alternativen mit Vergleichen zerlegen (unlesbare Alternativen entfallen). None, wenn die
+    Range zu lang ist (MAX_ENGINES Zeichen, MAX_VERGLEICHE Vergleiche)."""
+    if len(bereich) > MAX_ENGINES:
+        return None
+    alternativen: list[list[Vergleich]] = []
+    anzahl = 0
+    for alternative in bereich.split("||"):
+        bis = re.fullmatch(r"\s*(\S+)\s+-\s+(\S+)\s*", alternative)  # Bindestrich-Bereich `a - b`
+        if bis:
+            alternative = f">={bis.group(1)} <={bis.group(2)}"
+        tokens = re.sub(r"(\^|~|>=|<=|>|<|=)\s+", r"\1", alternative.strip()).split()
+        anzahl += len(tokens)
+        if anzahl > MAX_VERGLEICHE:
+            return None
+        vergleiche = [_vergleich_lesen(tok) for tok in tokens]
+        if None not in vergleiche:  # leere Alternative = alles
+            alternativen.append(vergleiche)  # type: ignore[arg-type]
+    return alternativen
+
+
+def _vergleich_passt(v: tuple[int, int, int], vergleich: Vergleich) -> bool:
+    op, a, b, c = vergleich
+    if a is None:
         return True
-    if b is None:
-        c = None
     unten = (a, b or 0, c or 0)
     if op == "=":
         return v[0] == a and (b is None or v[1] == b) and (c is None or v[2] == c)
@@ -476,42 +518,66 @@ def _vergleich_passt(v: tuple[int, int, int], token: str) -> bool | None:
     return v <= (a, b, c) if c is not None else v < ((a, b + 1, 0) if b is not None else (a + 1, 0, 0))  # <=
 
 
-def _range_erfuellt(v: tuple[int, int, int], bereich: str) -> bool:
+def _range_erfuellt(v: tuple[int, int, int], alternativen: list[list[Vergleich]]) -> bool:
     """Minimale semver-Auswertung: `||`, Leerzeichen = UND, ^ ~ >= > <= < = x * und nackte Version (= ^)."""
-    for alternative in bereich.split("||"):
-        bis = re.fullmatch(r"\s*(\S+)\s+-\s+(\S+)\s*", alternative)  # Bindestrich-Bereich `a - b`
-        if bis:
-            alternative = f">={bis.group(1)} <={bis.group(2)}"
-        text = re.sub(r"(\^|~|>=|<=|>|<|=)\s+", r"\1", alternative.strip())
-        tokens = text.split()
-        ergebnisse = [_vergleich_passt(v, t) for t in tokens]
-        if None in ergebnisse:
-            continue
-        if all(ergebnisse):  # leere Alternative = alles
-            return True
-    return False
+    return any(all(_vergleich_passt(v, x) for x in alt) for alt in alternativen)
+
+
+def _proben(major: int, alternativen: list[list[Vergleich]]) -> set[tuple[int, int, int]]:
+    """Versionen eines Majors, an denen sich die Erfüllung einer Range ändern kann: Grenzen 0/99 und jeder in
+    der Range genannte Minor/Patch mit seinen Nachbarn (höchstens ~9 je Vergleich)."""
+    proben = {(major, m, p) for m in (0, 99) for p in (0, 99)}
+    for alt in alternativen:
+        for _op, a, b, c in alt:
+            if a != major or b is None:
+                continue
+            for m in (b - 1, b, b + 1):
+                if m < 0:
+                    continue
+                for p in ((0, 99) if c is None else (c - 1, c, c + 1)):
+                    if p >= 0:
+                        proben.add((major, m, p))
+    return proben
+
+
+def _engines(quelle: str) -> str | None:
+    """`engines.node` aus package.json; None bei fehlend, unlesbar oder größer als PACKAGE_JSON_MAX."""
+    try:
+        with open(os.path.join(quelle, "package.json"), "rb") as f:
+            if os.fstat(f.fileno()).st_size > PACKAGE_JSON_MAX:
+                return None
+            paket = json.loads(f.read())
+        engines = paket["engines"]["node"]
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
+        return None
+    return engines if isinstance(engines, str) and engines.strip() else None
+
+
+def node_hinweise(quelle: str, vorgabe: str | None) -> list[str]:
+    """Hinweis-Kategorien zur Node-Auswahl: node-range-zu-lang (engines.node wird ignoriert)."""
+    engines = None if vorgabe else _engines(quelle)
+    if engines is not None and _bereich_lesen(engines) is None:
+        return ["node-range-zu-lang"]
+    return []
 
 
 def node_version(quelle: str, vorgabe: str | None) -> str:
     """Node-Major: Vorgabe, sonst höchster Kandidat (24/22/20) zu `engines.node`, sonst `.nvmrc`, sonst 22."""
     if vorgabe:
         return str(vorgabe)
-    try:
-        paket = _json_datei(os.path.join(quelle, "package.json"))
-        engines = paket["engines"]["node"] if isinstance(paket, dict) else None
-    except (OSError, ValueError, KeyError, TypeError, RecursionError):
-        engines = None
-    if isinstance(engines, str) and engines.strip():
+    engines = _engines(quelle)
+    alternativen = _bereich_lesen(engines) if engines else None
+    if alternativen is not None:
         for major in KANDIDATEN:
-            if _range_erfuellt((major, 99, 99), engines):
+            if _range_erfuellt((major, 99, 99), alternativen):
                 return str(major)
-        # Bereiche, die nur einzelne Minor-/Patch-Versionen treffen (~20.11, =20.11.0, <=20.11.0).
+        # Bereiche, die nur einzelne Minor-/Patch-Versionen treffen (~20.11, =20.11.5, <=20.11.0).
         for major in KANDIDATEN:
-            if any(_range_erfuellt((major, m, pa), engines) for m in range(100) for pa in (0, 99)):
+            if any(_range_erfuellt(v, alternativen) for v in sorted(_proben(major, alternativen))):
                 return str(major)
     try:
         with open(os.path.join(quelle, ".nvmrc"), encoding="utf-8", errors="replace") as f:
-            nvmrc = f.readline().strip()
+            nvmrc = f.readline(100).strip()
     except OSError:
         nvmrc = ""
     m = re.fullmatch(r"v?(\d+)(?:\.\d+){0,2}", nvmrc)
@@ -568,7 +634,7 @@ def cmd_bauen(a: argparse.Namespace) -> int:
     kategorie = lockfile_pruefen(quelle)
     if kategorie:
         return _fehler_ende(kategorie)
-    hinweise = lockfile_hinweise(quelle)
+    hinweise = lockfile_hinweise(quelle) + node_hinweise(quelle, a.node)
     version = node_version(quelle, a.node)
     befehl = ["build", "--progress=plain", "--build-arg", f"NODE={version}"]
     if a.build_befehl:
@@ -582,6 +648,7 @@ def cmd_bauen(a: argparse.Namespace) -> int:
     if r.rc is None:
         return _fehler_ende("build-timeout", r.text, hinweise)
     if r.rc != 0:
+        _daemon_pruefen()  # Daemon-Störung ohne Marker im Text: docker-fehlt statt build-fehler
         return _fehler_ende("build-fehler", r.text, hinweise)
     for h in hinweise:
         print(f"hinweis: {h}")
@@ -607,6 +674,7 @@ def _anfrage_container(lauf: str, rolle: str, argumente: list[str], daten: bytes
 
 
 def _start_fehler(lauf: str, rolle: str, text: str) -> int:
+    _daemon_pruefen()  # Daemon-Störung ohne Marker im Text: docker-fehlt statt start-fehler
     logs = _docker(["logs", "--tail", str(TAIL_ZEILEN), f"{_netz(lauf, rolle)}-app"], KURZ_TIMEOUT)
     _rolle_entfernen(lauf, rolle)
     return _fehler_ende("start-fehler", "\n".join(t for t in (_tail(text), _tail(logs.text) if logs.ok else "") if t))
