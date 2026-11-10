@@ -99,9 +99,19 @@ class _Batch:
             return None
         if len(teile) != 3 or teile[1] != b"blob":
             raise GitFehler(f"git cat-file --batch: unerwartete Antwort {kopf!r}")
+        if not teile[2].isdigit() or len(teile[2]) > 15:  # `-1` läse bis EOF (Hänger), `xyz` und Zifferngebirge wären ValueError
+            raise GitFehler(f"git cat-file --batch: unerwartete Antwort {kopf!r}")
         groesse = int(teile[2])
-        inhalt = self.proc.stdout.read(groesse)
-        ende = self.proc.stdout.read(1)
+        stuecke: list[bytes] = []
+        rest = groesse
+        while rest > 0:                                   # in Stücken: eine absurde Größe belegt keinen Speicher vorab
+            stueck = self.proc.stdout.read(min(rest, 1 << 20))
+            if not stueck:
+                break
+            stuecke.append(stueck)
+            rest -= len(stueck)
+        inhalt = b"".join(stuecke)
+        ende = self.proc.stdout.read(1) if rest == 0 else b""
         if len(inhalt) != groesse or ende != b"\n":
             raise GitFehler("git cat-file --batch: Antwort abgeschnitten (Timeout oder Abbruch)")
         return inhalt

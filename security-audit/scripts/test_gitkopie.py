@@ -574,6 +574,29 @@ def test_batch_muellantwort_und_abgeschnitten_sind_meldungen(tmp_path, monkeypat
         assert alle_dateien(tmp_path / f"ziel-{name}") == []   # nichts aus einem unzuverlässigen Strom geschrieben
 
 
+@pytest.mark.parametrize("groesse", ["xyz", "-1", "1e3", "", "0x10"])
+def test_batch_ungueltige_groesse_ist_giterror_haertung_a3(tmp_path, monkeypatch, groesse):
+    """Antwort `<sha> blob <nicht-Zahl>`: GitFehler statt ValueError (die Aufrufer fangen nur GitFehler)."""
+    repo = repo_mit(tmp_path, {"a.txt": b"a\n", "l": (SYMLINK, b"a.txt")})
+    shim_git(tmp_path, monkeypatch, vorab='case " $* " in *" cat-file "*) read x; '
+             f'echo "$x blob {groesse}"; cat >/dev/null; exit 0;; esac')
+    with gitkopie._Batch(str(repo)) as batch, pytest.raises(gitkopie.GitFehler, match="unerwartete Antwort"):
+        batch.lies("0" * 40)
+    meldungen = gitkopie.arbeitskopie(str(repo), str(tmp_path / "ziel"))
+    assert any("Arbeitskopie unvollständig" in m for m in meldungen), meldungen
+    hinweise = gitkopie.repo_hinweise(str(repo))
+    assert any("Symlinks und LFS-Pointern nicht möglich" in h for h in hinweise), hinweise
+
+
+@pytest.mark.parametrize("groesse", ["1000000000000000", "99999999999999999999999", "9" * 5000])
+def test_batch_absurde_groesse_ist_giterror_ohne_speicherfehler_haertung_a3(tmp_path, monkeypatch, groesse):
+    repo = repo_mit(tmp_path, {"a.txt": b"a\n"})
+    shim_git(tmp_path, monkeypatch, vorab='case " $* " in *" cat-file "*) read x; '
+             f'echo "$x blob {groesse}"; printf abc; exit 0;; esac')
+    with gitkopie._Batch(str(repo)) as batch, pytest.raises(gitkopie.GitFehler, match="abgeschnitten|unerwartete Antwort"):
+        batch.lies("0" * 40)
+
+
 def test_fehlendes_objekt_wird_gemeldet(tmp_path):
     repo = repo_mit(tmp_path, {"src/a.js": b"einmalig-a\n", "ln": (SYMLINK, b"src/a.js"), "ok.txt": b"ok\n"})
     sha = roh(repo, "rev-parse", "HEAD:src/a.js").decode().strip()
