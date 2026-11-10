@@ -639,13 +639,14 @@ def test_skill_exit_ungleich_null_bei_abhaengigkeiten_und_lieferkette_ist_kein_a
     zeile = next((z for z in text.splitlines() if z.startswith("- **Exit ≠ 0 bei `abhaengigkeiten` oder `lieferkette`")), "")
     assert zeile, "Regel für Exit ≠ 0 bei abhaengigkeiten/lieferkette fehlt"
     assert "Nur `secrets` ist ein Tor" in zeile
-    assert "ohne Befunde dieses Unterbefehls" in zeile
+    assert "Der Lauf geht weiter, ohne Befunde dieses Unterbefehls" in zeile
     assert "„<unterbefehl> fehlgeschlagen (Exit <n>)“" in zeile and "`bericht.hinweise`" in zeile
     assert "stderr kommt nicht wörtlich in den Bericht" in zeile
     assert "keine Kategorie" in zeile
     # Vertrag mit dem Skript: bei Exit 1/2 steht nur eine stderr-Meldung, keine Kategorie auf stdout (die gibt es nur bei Schwärzung, Exit 4)
     quelle = _lies(os.path.join(HIER, "lieferkette.py"))
-    assert quelle.count("kategorie: ") == quelle.count("kategorie: schwaerzung-fehlgeschlagen") + 1  # +1: Docstring-Zeile zu den Entwürfen
+    ausgaben = re.findall(r"""print\(\s*f?["']kategorie: ([^"']*)""", quelle)
+    assert ausgaben == ["schwaerzung-fehlgeschlagen"]
     assert 'print(f"lieferkette.py: {e}", file=sys.stderr)' in quelle
 
 
@@ -665,7 +666,7 @@ def test_skill_fehlt_ist_nicht_geschwaerzt_und_laeuft_weiter_m3():
     regel6 = next(z for z in reviewer.splitlines() if z.startswith("6. Secret-Werte"))
     assert "<SCHWAERZUNG>" in regel6 and "Die Arbeitskopie ist geschwärzt" not in regel6
     platzhalter = next(z for z in reviewer.splitlines() if z.startswith("Ein Reviewer je Fläche"))
-    assert "`<SCHWAERZUNG>`" in platzhalter and "`fehlt`" in platzhalter and "Die Arbeitskopie ist geschwärzt (Zeichen *)." in platzhalter
+    assert "`<SCHWAERZUNG>`" in platzhalter and "`fehlt`" in platzhalter and "Die Arbeitskopie ist geschwärzt (Zeichen *), außer in Pfaden, die gitleaks standardmäßig überspringt." in platzhalter
     assert "nicht geschwärzt" in platzhalter
 
 
@@ -722,13 +723,15 @@ def test_skill_typische_fehler_netzregel_stimmt_fachlich_m6():
     """M-6: `lieferkette.py` als Einzelbefehl ist Pflicht wegen Grundregel 8 und Eval-Rechten; die Netzregel erkennt nur `poc.py`-Ketten."""
     zeile = next(z for z in _abschnitt(_lies(SKILL_MD), "Typische Fehler").splitlines() if "`&&`-Kette" in z)
     assert "Grundregel 8" in zeile and "Eval-Rechte" in zeile and "nicht wegen der Netzregel" in zeile
-    assert "Die Netzregel wertet nur `poc.py`-Befehle" in zeile
+    assert "Die Netzregel meldet `poc.py`-Befehle in Ketten oder mit `2>&1` erst dann als Verstoß, wenn eine URL im Befehl steht" in zeile
     assert "wertet den Befehl als Verstoß" not in zeile or "nur `poc.py`" in zeile
     import netzregel
     lk = ("python3 -I /pfad/skill/scripts/lieferkette.py secrets --lauf 0a1b2c3d --repo /home/u/my.app.com "
           "--quelle /tmp/z/quelle --sha 0123456789abcdef0123456789abcdef01234567")
     assert netzregel.verstoesse_bash(lk, []) == [] and not netzregel.ist_poc_aufruf(lk)     # kein Fehlalarm, kein poc-Aufruf
     assert netzregel.ist_poc_aufruf("python3 -I /pfad/skill/scripts/poc.py pruefen")
+    assert netzregel.verstoesse_bash("python3 -I /pfad/skill/scripts/poc.py pruefen && echo ok", []) == []   # Kette ohne URL
+    assert netzregel.verstoesse_bash("python3 -I /pfad/skill/scripts/poc.py anfrage --rolle p1 --url http://app:3000/x 2>&1", [])
     assert not netzregel.ist_poc_aufruf("python3 -I /pfad/skill/scripts/poc.py pruefen && ls")
 
 
@@ -827,3 +830,25 @@ def test_keine_pfade_der_test_app(pfad):
     treffer = [t for t in _verbotene_texte() if t in text]
     assert not treffer, treffer
     assert "fixture.invalid" not in text
+
+
+def test_skill_werkzeugbefunde_nicht_an_pruefer_1b():
+    """Re-Review Task 5, Minor 2: der 1b-Satz selbst ist gepinnt (nicht nur Schritt 6)."""
+    text = _abschnitt(_lies(SKILL_MD), "1b.")
+    assert "- **Werkzeugbefunde gehen nicht an die Prüfer** (kein Request-PoC möglich)" in text
+
+
+def test_pruefer_briefing_secret_regel_und_schwaerzung():
+    """Re-Review Task 5, Minor 3: auch der Prüfer liest/nennt keine Secret-Werte; `<SCHWAERZUNG>` wird in Schritt 6 gefüllt."""
+    briefing = _lies(os.path.join(SKILL_DIR, "references", "agenten-briefings.md"))
+    pruefer = briefing.split("Du bist Prüfer", 1)[1]
+    assert "6. Secret-Werte liest und nennst du nie, auch nicht im poc-Text. <SCHWAERZUNG>" in pruefer
+    assert "`<SCHWAERZUNG>` füllst du wie in Schritt 4." in _abschnitt(_lies(SKILL_MD), "6.")
+    assert "außer in Pfaden, die gitleaks standardmäßig überspringt" in briefing
+
+
+def test_skill_erreichbarkeit_fehlendes_objekt_und_gegenlesen():
+    """Re-Review Task 5, Minor 5."""
+    text = _lies(SKILL_MD)
+    assert "Fehlt für ein zugewiesenes Paket das Objekt `erreichbarkeit`" in text
+    assert "Einen behaupteten Aufruf liest du gegen" in text
