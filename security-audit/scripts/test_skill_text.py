@@ -204,6 +204,39 @@ def test_briefings_abschnitte():
     assert "Prüfer" in ueberschriften
 
 
+# ------------------------------------------------------------------------------------ Härtung TF1-A6
+
+BASH_TIMEOUT = "timeout: 600000"
+LANGE_UNTERBEFEHLE = ("bauen", "starten", "neustart", "ausfuehren")   # laufen länger als der Bash-Standard (120 s)
+NICHT_GEPRUEFT = "nicht geprüft (Budget)"
+
+
+def test_timeout_liste_nennt_alle_langen_unterbefehle_haertung_a6():
+    """Jede Zeile mit dem 600000-ms-Timeout nennt alle langen poc.py-Unterbefehle (keine Teilliste in SKILL.md)."""
+    zeilen = [z for z in _lies(SKILL_MD).splitlines() if BASH_TIMEOUT in z]
+    assert zeilen, "kein Hinweis auf Bash-timeout 600000 in SKILL.md"
+    for zeile in zeilen:
+        assert all(f"poc.py {u}" in zeile for u in LANGE_UNTERBEFEHLE), zeile
+    briefing = [z for z in _lies(BRIEFINGS).splitlines() if "timeout 600000" in z]
+    assert briefing and all(u in briefing[0] for u in ("neustart", "ausfuehren"))
+
+
+def test_budget_vermerk_in_skill_und_format_haertung_a6():
+    """Mehr als 12 P1/P2 je Prüfer: der Grund steht in `beschreibung`, mit dem festen Vermerk."""
+    for pfad in (SKILL_MD, BERICHT_FORMAT):
+        assert NICHT_GEPRUEFT in _lies(pfad), pfad
+    zeile = next(z for z in _lies(SKILL_MD).splitlines() if NICHT_GEPRUEFT in z)
+    assert "beschreibung" in zeile and "unbestätigt" in zeile
+
+
+def test_kern_behauptet_keinen_widerlegungsversuch_fuer_jedes_unbestaetigt_haertung_a6():
+    """P3, ungeprüfter Rest und von der Hauptsession übernommene Aufträge sind `unbestätigt` ohne Prüfer-Widerlegung:
+    der Kern-Absatz sagt das (Verweis auf `beschreibung`) und nennt den Widerlegungsversuch nur für geprüfte Befunde."""
+    kern = next(z for z in _lies(SKILL_MD).splitlines() if z.startswith("**Kern:**"))
+    assert "beschreibung" in kern and "geprüft" in kern
+    assert "P3" in kern
+
+
 # ------------------------------------------------------------------------------------ Beispiel-JSON
 
 def test_beispiel_json_ist_gueltig():

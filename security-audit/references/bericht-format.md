@@ -52,7 +52,7 @@ Zusätzlich je Status:
 Weitere Regeln:
 - `titel`, `szenario`, `erwartet`, `klasse`, `grund` sind **einzeilig**: keine Zeilenumbrüche, kein Dreifach-Backtick.
 - Die Befundliste im Markdown enthält nur `bestätigt` und `unbestätigt`, sortiert P1 → P3, dann nach ID. `verdacht` und `verworfen` stehen als eigene Zeilen darunter.
-- `grund` wird nur bei `verworfen` ausgegeben. Den Grund für `unbestätigt` (z. B. „kein PoC: `docker-fehlt`“ oder „Prüfer konnte nicht widerlegen“) schreibst du in `beschreibung`.
+- `grund` wird nur bei `verworfen` ausgegeben. Den Grund für `unbestätigt` (z. B. „kein PoC: `docker-fehlt`“, „Prüfer konnte nicht widerlegen“ oder „nicht geprüft (Budget)“ bei mehr als 12 P1/P2 je Prüfer) schreibst du in `beschreibung`.
 - `code_pfad` kommt vom Prüfer (eigene Herleitung), bei P3 vom Reviewer.
 - Unbekannte Felder sind erlaubt und werden ignoriert; nutze sie nicht.
 

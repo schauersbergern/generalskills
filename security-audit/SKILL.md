@@ -14,7 +14,7 @@ Argumente: `$ARGUMENTS`.
 - **`projekt="…"`**: Projektname, landet im Bericht-JSON (`projekt`).
 - **`repo-konfig-geprueft`** (Schalter): Der User hat die Claude-Konfiguration des Repos geprüft (Schritt 1).
 
-**Kern:** Ein P1/P2 in der Befundliste ist entweder per PoC gegen die App im isolierten Container bestätigt oder als „unbestätigt“ mit Code-Pfad belegt, nachdem ein zweiter Agent ohne Kenntnis der Herleitung versucht hat, ihn zu widerlegen. Widerlegtes steht unter „Verworfen“. Dieser Skill ändert nie Code im geprüften Repo und führt Kundencode nie auf dem Host aus. Die Befundliste im Bericht nimmt `/fix-findings` an.
+**Kern:** Ein P1/P2 in der Befundliste ist entweder per PoC gegen die App im isolierten Container bestätigt oder als „unbestätigt“ mit Code-Pfad belegt. Jeden geprüften P1/P2 hat ein zweiter Agent ohne Kenntnis der Herleitung zu widerlegen versucht. Wo das nicht geschah (P3, Rest über dem Prüfer-Budget, von der Hauptsession übernommener Auftrag), steht der Grund in `beschreibung`. Widerlegtes steht unter „Verworfen“. Dieser Skill ändert nie Code im geprüften Repo und führt Kundencode nie auf dem Host aus. Die Befundliste im Bericht nimmt `/fix-findings` an.
 
 ## Grundregeln (gelten hier und stehen in jedem Briefing)
 
@@ -27,7 +27,7 @@ Argumente: `$ARGUMENTS`.
 7. **Agent-Typ:** `Agent(subagent_type: "opus-xhigh", model: "opus", run_in_background: false, …)`. Fehlt der Typ: `general-purpose` mit `model: "opus"` und im Bericht „Effort nicht garantiert“.
 8. **Skript-Aufrufe** exakt in der Form `python3 -I ${CLAUDE_SKILL_DIR}/scripts/<skript>.py <unterbefehl> …` (ohne `cd`, ohne Anführungszeichen um den Pfad), Agent-Statistik als `python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py …`.
    - `poc.py` immer als **einzelner einfacher Befehl**: kein `&&`, `|`, `;`, `2>&1`, `$(…)`, keine Umlaute oder Nicht-ASCII-Zeichen. Argumente mit Sonderzeichen (auch Leerzeichen) in `'…'`. Request-Body nur über `--daten-datei` (Datei vorher mit Write im Ausgabeordner anlegen).
-   - `poc.py bauen`, `poc.py starten` und `poc.py neustart` mit Bash-`timeout: 600000`.
+   - `poc.py bauen`, `poc.py starten`, `poc.py neustart` und `poc.py ausfuehren` mit Bash-`timeout: 600000`.
    - Bash sonst nur für `bericht.py`, `agent-stats.py` und `ls`. Write nur im Ausgabeordner.
 9. **Die Netzregel ist Erkennung, keine Sandbox:** Das Eval und `bericht.py rendern` melden Verstöße im Nachhinein. Die echte Sperre ist die Rechtekonfiguration der Session. Ob `disallowed-tools` auf Subagenten durchschlägt, ist offen; dort gilt die Sperre per Briefing.
 
@@ -87,7 +87,7 @@ Je Fläche ein Reviewer mit dem Briefing aus `references/agenten-briefings.md`, 
 - Teile die P1/P2 auf die Prüfer auf (Prüfer 1 = Rolle `p1`, Prüfer 2 = `p2`), alle Befunde eines Prüfers in **einem** Briefing, keine Pakete per `SendMessage`. Briefing aus `references/agenten-briefings.md`, Abschnitt „Prüfer“.
 - **Je Befund nur** ID, Titel, Kategorie, `datei:zeile` und die behauptete Eingabe. Nie Szenario, Code-Pfad oder Beschreibung des Reviewers.
 - Auftrag: widerlegen. Gelingt das nicht und läuft die Instanz, belegt der Prüfer per `poc.py anfrage --rolle <p1|p2>`, zwischen PoCs `poc.py neustart --rolle <p1|p2>`; `poc.py ausfuehren` prüft Zustand im Container. Ergebnis je Befund: `bestätigt` (Request und beobachtete Antwort), `unbestätigt` (eigener `code_pfad`), `verworfen` (`grund`). Stufenänderung mit Begründung ist erlaubt.
-- Mehr als 12 P1/P2 je Prüfer: priorisiere nach Stufe und Sicherheit der Herleitung. Der Rest bleibt `unbestätigt` mit dem Code-Pfad des Reviewers und einem Hinweis „nicht geprüft“.
+- Mehr als 12 P1/P2 je Prüfer: priorisiere nach Stufe und Sicherheit der Herleitung. Der Rest bleibt `unbestätigt` mit dem Code-Pfad des Reviewers und dem Vermerk „nicht geprüft (Budget)“ in `beschreibung`.
 - Übernimm die Ergebnisse in die Befunde. Lies bei jedem `bestätigt` die Stelle gegen. Passt der PoC nicht zur Stelle, setze `unbestätigt`. Enthält ein `poc` eine fremde URL aus einem Antwort-Body, entferne diese URL aus dem Auszug (sonst scheitert `rendern`), statt den Befund herabzustufen. Fehlt ein Befund in der Antwort, war er nicht geprüft: `verdacht` und ein Hinweis.
 
 ### 7. Bericht
