@@ -704,6 +704,30 @@ def test_bauen_marker_ist_pro_lauf(umg, tmp_path):
     assert r.returncode == 4 and r.stdout.splitlines()[0] == "kategorie: nicht-geschwaerzt"
 
 
+def test_bauen_ohne_arbeitskopie_meldet_arbeitskopie(umg):
+    """Kein Marker und keine Arbeitskopie: Exit 2 „Arbeitskopie fehlt“, nicht nicht-geschwaerzt."""
+    umg.fake_gitleaks()
+    os.makedirs(umg.zustand())
+    r = umg.poc("bauen", "--lauf", LAUF, env=umg.env(SECURITY_AUDIT_OHNE=""))
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "Arbeitskopie fehlt" in r.stderr and "nicht-geschwaerzt" not in r.stdout
+    assert [a for a in umg.aufrufe() if a["args"][0] == "build"] == []
+
+
+def test_bauen_marker_symlink_zaehlt_nicht(umg, tmp_path):
+    """Ein Symlink (auch auf eine existierende Datei) ist kein Marker: nur eine reguläre Datei zählt."""
+    vorbereitet(umg, tmp_path)
+    umg.fake_gitleaks()
+    ziel = tmp_path / "irgendeine-datei"
+    ziel.write_text("x")
+    pfad = umg.marker()
+    os.makedirs(os.path.dirname(pfad), exist_ok=True)
+    os.symlink(ziel, pfad)
+    r = umg.poc("bauen", "--lauf", LAUF, env=umg.env(SECURITY_AUDIT_OHNE=""))
+    assert r.returncode == 4 and r.stdout.splitlines()[0] == "kategorie: nicht-geschwaerzt"
+    assert [a for a in umg.aufrufe() if a["args"][0] == "build"] == []
+
+
 def test_bauen_ohne_quelle(umg):
     r = umg.poc("bauen", "--lauf", LAUF)
     assert r.returncode == 2

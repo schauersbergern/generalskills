@@ -1,0 +1,1004 @@
+"""Tests für `lieferkette.py secrets` und `gitkopie.spiegel` / `gitkopie.werkzeug_ausfuehren` (TF2, Task 1).
+
+Aufruf: python3 -m pytest security-audit/scripts/test_lieferkette_secrets.py -q
+
+Fake-`gitleaks` im Shim-PATH protokolliert jeden Aufruf (Argumente, cwd, Umgebung, Marker-Zustand) und liefert Berichte aus einer
+Konfigurationsdatei. Echte gitleaks-Tests (`test_schwaerzung_echt_*`, `test_repo_konfig_wirkt_nicht_*`, `test_spiegel_*_echt`)
+laufen nur, wenn das Binary installiert ist. Alle Repos, Zustandsordner und Testwerte liegen in tmp_path; Testwerte werden zur
+Laufzeit erzeugt (keine echt aussehenden Secrets im öffentlichen Repo). Signale gehen nur an Prozessgruppen, die der getestete
+Code selbst gestartet hat.
+"""
+import base64
+import json
+import os
+import random
+import shutil
+import stat
+import string
+import subprocess
+import sys
+import time
+from typing import NamedTuple
+
+import pytest
+
+HIER = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HIER)
+import gitkopie  # noqa: E402
+import lieferkette  # noqa: E402
+
+LIEFERKETTE = os.path.join(HIER, "lieferkette.py")
+POC = os.path.join(HIER, "poc.py")
+LAUF = "0a1b2c3d"
+GITLEAKS = shutil.which("gitleaks")
+echt = pytest.mark.skipif(GITLEAKS is None, reason="gitleaks nicht installiert")
+SENTINELS = ("SENTINEL-SECRET", "SENTINEL-AUTHOR", "sentinel@example.invalid", "SENTINEL-MESSAGE", "SENTINEL-FINGERPRINT")
+
+FAKE_GITLEAKS = '''#!{python}
+import json, os, sys, time
+args = sys.argv[1:]
+modus = args[0] if args else ""
+ziel = args[1] if len(args) > 1 else ""
+cfg = json.load(open(os.environ["FAKE_GL_CONFIG"]))
+verhalten = cfg.get(modus, {{}})
+
+
+def opt(name):
+    return args[args.index(name) + 1] if name in args else None
+
+
+config = opt("--config")
+ignore = opt("--gitleaks-ignore-path")
+eintrag = {{
+    "modus": modus, "args": args, "cwd": os.getcwd(), "cwd_leer": not os.listdir(os.getcwd()),
+    "env": {{k: v for k, v in os.environ.items() if k.startswith(("GITLEAKS_", "GIT_", "OSV_"))}},
+    "marker": os.path.exists(cfg["marker"]) if cfg.get("marker") else None,
+    "config_text": open(config).read() if config and os.path.isfile(config) else None,
+    "ignore_leer": bool(ignore and os.path.isdir(ignore) and not os.listdir(ignore)),
+    "ignore_in_quelle": os.path.exists(os.path.join(ziel, ".gitleaksignore")) if modus == "dir" else None,
+    "ziel_vorhanden": os.path.isdir(ziel),
+    "report_pfad": opt("--report-path"),
+}}
+with open(os.environ["FAKE_GL_LOG"], "a") as f:
+    f.write(json.dumps(eintrag) + "\\n")
+if verhalten.get("sleep"):
+    time.sleep(verhalten["sleep"])
+pfad = opt("--report-path")
+if "roh" in verhalten:
+    open(pfad, "w").write(verhalten["roh"])
+elif not verhalten.get("kein_report"):
+    text = json.dumps(verhalten.get("report", [])).replace("{{ziel}}", ziel.replace("\\\\", "\\\\\\\\"))
+    open(pfad, "w").write(text)
+sys.stderr.write(verhalten.get("stderr", ""))
+sys.exit(verhalten.get("rc", 0))
+'''
+
+SPIEGEL_SLEEP_GIT = '''#!/bin/sh
+case "$*" in
+  *clone*) sleep 30 ;;
+esac
+exec "{git}" "$@"
+'''
+
+
+def geheimnis(seed, laenge=32):
+    """Zur Laufzeit erzeugter, zufällig aussehender Testwert (alphanumerisch, hohe Entropie)."""
+    return "".join(random.Random(seed).choices(string.ascii_letters + string.digits, k=laenge))
+
+
+WERT = geheimnis(20261110)
+JS_ZEILE = f'const apiKey = "{WERT}";\n'
+
+
+class Umgebung:
+    def __init__(self, tmp_path):
+        self.tmp_path = tmp_path
+        self.bin = tmp_path / "bin"
+        self.bin.mkdir()
+        self.tmp = tmp_path / "tmp"
+        self.tmp.mkdir()
+        self.home = tmp_path / "home"
+        self.home.mkdir()
+        self.log_datei = tmp_path / "gitleaks.log"
+        self.config_datei = tmp_path / "gitleaks.json"
+        self.config_datei.write_text("{}")
+
+    def env(self, **extra):
+        env = {"PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}", "HOME": str(self.home), "TMPDIR": str(self.tmp),
+               "FAKE_GL_LOG": str(self.log_datei), "FAKE_GL_CONFIG": str(self.config_datei),
+               "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}
+        env.update(extra)
+        return env
+
+    def zustand(self, lauf=LAUF):
+        return os.path.join(os.path.realpath(self.tmp), f"security-audit-{lauf}")
+
+    def lieferkette_ordner(self, lauf=LAUF):
+        return os.path.join(self.zustand(lauf), "lieferkette")
+
+    def marker(self, lauf=LAUF):
+        return os.path.join(self.lieferkette_ordner(lauf), "geschwaerzt")
+
+    def fake_gitleaks(self, **verhalten):
+        """Fake-`gitleaks` im Shim-PATH; `verhalten` je Modus: {"dir": {...}, "git": {...}}."""
+        fake = self.bin / "gitleaks"
+        fake.write_text(FAKE_GITLEAKS.format(python=sys.executable))
+        fake.chmod(0o755)
+        self.konfig(**verhalten)
+
+    def konfig(self, **verhalten):
+        cfg = dict(verhalten)
+        cfg["marker"] = self.marker()
+        self.config_datei.write_text(json.dumps(cfg))
+
+    def aufrufe(self):
+        if not self.log_datei.exists():
+            return []
+        return [json.loads(z) for z in self.log_datei.read_text().splitlines() if z]
+
+    def lk(self, *args, env=None, timeout=120):
+        return subprocess.run([sys.executable, "-I", LIEFERKETTE, *args], env=env or self.env(),
+                              capture_output=True, text=True, timeout=timeout)
+
+    def poc(self, *args, env=None):
+        return subprocess.run([sys.executable, "-I", POC, *args], env=env or self.env(), capture_output=True, text=True,
+                              timeout=120)
+
+    def git(self, repo, *args):
+        r = subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
+                            *args], env=self.env(), capture_output=True, timeout=60)
+        assert r.returncode == 0, r.stderr.decode(errors="replace")
+        return r.stdout.decode().strip()
+
+
+class Vorbereitet(NamedTuple):
+    repo: str
+    quelle: str
+    shas: list
+    sha: str
+
+
+@pytest.fixture
+def umg(tmp_path):
+    return Umgebung(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def sauberes_home(tmp_path, monkeypatch):
+    """In-Process-Aufrufe (gitkopie, lieferkette) laufen hermetisch: eigenes HOME, keine geerbten GIT_*/SECURITY_AUDIT_*-Variablen."""
+    home = tmp_path / "home-inproc"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for name in list(os.environ):
+        if (name.startswith("GIT_") and name not in ("GIT_CONFIG_NOSYSTEM", "GIT_EXEC_PATH")) or name.startswith(
+                ("GITLEAKS_", "OSV_", "SECURITY_AUDIT_")):
+            monkeypatch.delenv(name)
+    gitkopie.frist_setzen(None)
+    yield
+    gitkopie.frist_setzen(None)
+
+
+def schreibe(wurzel, pfad, inhalt):
+    ziel = os.path.join(wurzel, pfad)
+    os.makedirs(os.path.dirname(ziel), exist_ok=True)
+    with open(ziel, "wb") as f:
+        f.write(inhalt if isinstance(inhalt, bytes) else inhalt.encode())
+
+
+def repo_bauen(umg, commits, name="kunde"):
+    """commits: Liste von Dicts Pfad -> Bytes/str (Inhalt) oder None (löschen); eine Funktion `f(bisherige_shas) -> dict` ist
+    ebenfalls erlaubt. Rückgabe: (Pfad, SHAs alt → neu)."""
+    repo = umg.tmp_path / name
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, env=umg.env())
+    shas = []
+    for i, aenderung in enumerate(commits):
+        aenderung = aenderung(list(shas)) if callable(aenderung) else aenderung
+        for pfad, inhalt in aenderung.items():
+            if inhalt is None:
+                umg.git(repo, "rm", "-q", "--", pfad)
+            else:
+                schreibe(str(repo), pfad, inhalt)
+        umg.git(repo, "add", "-A", "-f")
+        umg.git(repo, "commit", "-q", "--allow-empty", "-m", f"c{i}")
+        shas.append(umg.git(repo, "rev-parse", "HEAD"))
+    return str(repo), shas
+
+
+def vorbereiten(umg, commits, sha=None, name="kunde"):
+    repo, shas = repo_bauen(umg, commits, name)
+    args = ["vorbereiten", "--lauf", LAUF, "--repo", repo]
+    if sha:
+        args += ["--sha", sha]
+    r = umg.poc(*args)
+    assert r.returncode == 0, r.stderr
+    return Vorbereitet(repo, os.path.join(umg.zustand(), "quelle"), shas, sha or shas[-1])
+
+
+def secrets(umg, v, *extra, env=None, quelle=None, sha=None):
+    return umg.lk("secrets", "--lauf", LAUF, "--repo", v.repo, "--quelle", quelle or v.quelle, "--sha", sha or v.sha,
+                  *extra, env=env)
+
+
+def ausgabe(r):
+    assert r.returncode == 0, r.stdout + r.stderr
+    return json.loads(r.stdout)
+
+
+def treffer(regel="generic-api-key", datei="src/a.js", zeile=1, von=7, bis=49, match='apiKey = "REDACTED"', commit="",
+            datum="2026-01-01T00:00:00Z", **extra):
+    d = {"RuleID": regel, "Description": "Detected a Generic API Key", "StartLine": zeile, "EndLine": zeile,
+         "StartColumn": von, "EndColumn": bis, "Match": match, "Secret": "SENTINEL-SECRET", "File": datei,
+         "SymlinkFile": "", "Commit": commit, "Entropy": 4.5, "Author": "SENTINEL-AUTHOR",
+         "Email": "sentinel@example.invalid", "Date": datum, "Message": "SENTINEL-MESSAGE", "Tags": [],
+         "Fingerprint": "SENTINEL-FINGERPRINT"}
+    d.update(extra)
+    return d
+
+
+def dir_treffer(inhalt, datei="src/a.js", regel="generic-api-key", wert=WERT, **extra):
+    """dir-Fundstelle für `apiKey = "<wert>"` in `inhalt` (Bytes) mit den Koordinaten von gitleaks 8.30 (Byte-Spalten, ab
+    Zeile 2 um 1 verschoben)."""
+    voll = b'apiKey = "' + wert.encode() + b'"'
+    i = inhalt.index(voll)
+    zeile = inhalt.count(b"\n", 0, i) + 1
+    sc = i - (inhalt.rfind(b"\n", 0, i) + 1) + 1
+    ec = sc + len(voll) - 1
+    if zeile > 1:
+        sc, ec = sc + 1, ec + 1
+    return treffer(regel=regel, datei="{ziel}/" + datei, zeile=zeile, von=sc, bis=ec, **extra)
+
+
+def lieferkette_inhalt(umg):
+    pfad = umg.lieferkette_ordner()
+    return sorted(os.listdir(pfad)) if os.path.isdir(pfad) else []
+
+
+def lesen(pfad):
+    with open(pfad, "rb") as f:
+        return f.read()
+
+
+MINI = {"src/a.js": JS_ZEILE, "package.json": "{}"}
+
+
+# ------------------------------------------------------------------------------------ werkzeug_ausfuehren
+
+def test_werkzeug_ausfuehren_liefert_rc_und_ausgabe(tmp_path):
+    r = gitkopie.werkzeug_ausfuehren([sys.executable, "-c", "import sys; print('a'); sys.stderr.write('b'); sys.exit(3)"],
+                                     10, str(tmp_path))
+    assert r.rc == 3 and r.out.strip() == b"a" and r.err == b"b"
+
+
+def test_werkzeug_ausfuehren_cwd_und_umgebung(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_DIR", "/x")
+    monkeypatch.setenv("GITLEAKS_CONFIG", "/y")
+    r = gitkopie.werkzeug_ausfuehren(
+        [sys.executable, "-c", "import os, json; print(json.dumps([os.getcwd(), sorted(k for k in os.environ if k.startswith(('GIT_', 'GITLEAKS_')))]))"],
+        10, str(tmp_path))
+    cwd, namen = json.loads(r.out)
+    assert os.path.realpath(cwd) == os.path.realpath(tmp_path)
+    assert "GIT_DIR" not in namen and "GITLEAKS_CONFIG" not in namen and "GIT_CONFIG_NOSYSTEM" in namen
+
+
+def test_werkzeug_ausfuehren_timeout_beendet_eigene_gruppe(tmp_path):
+    start = time.monotonic()
+    r = gitkopie.werkzeug_ausfuehren([sys.executable, "-c", "import time; time.sleep(60)"], 1, str(tmp_path))
+    assert r.rc is None
+    assert time.monotonic() - start < 20
+
+
+def test_werkzeug_ausfuehren_nicht_startbar(tmp_path):
+    with pytest.raises(gitkopie.GitFehler):
+        gitkopie.werkzeug_ausfuehren([str(tmp_path / "gibt-es-nicht")], 5, str(tmp_path))
+
+
+# ------------------------------------------------------------------------------------ Spiegel
+
+def marker_skript(tmp_path, name):
+    skript = tmp_path / name
+    skript.write_text(f"#!/bin/sh\ntouch '{tmp_path}/MARKER-{name}'\ncat\n")
+    skript.chmod(0o755)
+    return skript
+
+
+def test_spiegel_klont_alle_refs(umg, tmp_path):
+    repo, shas = repo_bauen(umg, [{"a.txt": "1"}, {"a.txt": "2"}])
+    umg.git(repo, "branch", "nebenzweig", shas[0])
+    umg.git(repo, "tag", "v1", shas[0])
+    ziel = str(tmp_path / "spiegel.git")
+    hinweise = gitkopie.spiegel(repo, ziel, 60)
+    assert hinweise == []
+    def refs(pfad):
+        return gitkopie.git(pfad, "for-each-ref", "--format=%(refname) %(objectname)").stdout.decode().splitlines()
+    assert refs(ziel) == refs(repo)
+    assert gitkopie.git(ziel, "rev-parse", "--is-bare-repository").stdout.strip() == b"true"
+    assert gitkopie.git(ziel, "cat-file", "-e", f"{shas[0]}:a.txt").returncode == 0
+
+
+def test_spiegel_keine_treiber_ausgefuehrt(umg, tmp_path):
+    """Filter, Textconv, Fsmonitor und Hooks aus der Konfiguration des Kundenrepos laufen weder beim Klonen noch danach."""
+    repo, shas = repo_bauen(umg, [{"a.txt": "1", ".gitattributes": "* filter=x diff=x\n"}, {"a.txt": "2"}])
+    skripte = {n: marker_skript(tmp_path, n) for n in ("clean.sh", "smudge.sh", "textconv.sh", "fsm.sh", "pack.sh")}
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    for h in ("post-checkout", "post-merge", "reference-transaction", "pre-auto-gc", "post-update"):
+        (hooks / h).write_text(f"#!/bin/sh\ntouch '{tmp_path}/MARKER-{h}'\n")
+        (hooks / h).chmod(0o755)
+    for schluessel, wert in {"filter.x.clean": skripte["clean.sh"], "filter.x.smudge": skripte["smudge.sh"],
+                             "filter.x.process": skripte["smudge.sh"], "diff.x.textconv": skripte["textconv.sh"],
+                             "core.fsmonitor": skripte["fsm.sh"], "core.hooksPath": hooks,
+                             "uploadpack.packObjectsHook": skripte["pack.sh"]}.items():
+        umg.git(repo, "config", schluessel, str(wert))
+    ziel = str(tmp_path / "spiegel.git")
+    gitkopie.spiegel(repo, ziel, 60)
+    gitkopie.git(ziel, "log", "-p", "--all")                          # was gitleaks danach tut
+    assert sorted(p.name for p in tmp_path.glob("MARKER-*")) == []
+    config = (tmp_path / "spiegel.git" / "config").read_text()
+    assert "textconv" not in config and "filter" not in config and "fsmonitor" not in config
+
+
+def test_spiegel_versteckte_refs_hinweis(umg, tmp_path):
+    repo, shas = repo_bauen(umg, [{"a.txt": "1"}])
+    umg.git(repo, "branch", "geheim-intern", shas[0])
+    umg.git(repo, "config", "transfer.hideRefs", "refs/heads/geheim-intern")
+    ziel = str(tmp_path / "spiegel.git")
+    hinweise = gitkopie.spiegel(repo, ziel, 60)
+    assert len(hinweise) == 1 and "Refs fehlen im Spiegel" in hinweise[0] and "refs/heads/geheim-intern" in hinweise[0]
+
+
+def test_spiegel_flache_quelle_hinweis(umg, tmp_path):
+    repo, _ = repo_bauen(umg, [{"a.txt": "1"}, {"a.txt": "2"}, {"a.txt": "3"}])
+    flach = str(tmp_path / "flach")
+    r = subprocess.run(["git", "clone", "-q", "--depth", "1", "--no-local", repo, flach], env=umg.env(), capture_output=True)
+    assert r.returncode == 0, r.stderr
+    hinweise = gitkopie.spiegel(flach, str(tmp_path / "spiegel.git"), 60)
+    assert any("flach" in h and "shallow" in h for h in hinweise)
+
+
+def test_spiegel_budget_wirft_zeitbudgetfehler(umg, tmp_path, monkeypatch):
+    """Ein hängender Klon wird nach der Frist beendet (nur die eigene Gruppe) und als ZeitbudgetFehler gemeldet."""
+    repo, _ = repo_bauen(umg, [{"a.txt": "1"}])
+    git_echt = shutil.which("git")
+    (umg.bin / "git").write_text(SPIEGEL_SLEEP_GIT.format(git=git_echt))
+    (umg.bin / "git").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{umg.bin}{os.pathsep}{os.environ['PATH']}")
+    start = time.monotonic()
+    with pytest.raises(gitkopie.ZeitbudgetFehler):
+        gitkopie.spiegel(repo, str(tmp_path / "spiegel.git"), 1)
+    assert time.monotonic() - start < 20
+
+
+def test_spiegel_fehler_bei_ungueltiger_quelle(tmp_path):
+    with pytest.raises(gitkopie.GitFehler):
+        gitkopie.spiegel(str(tmp_path / "kein-repo"), str(tmp_path / "spiegel.git"), 20)
+
+
+# ------------------------------------------------------------------------------------ schwaerzen (Einheit)
+
+def datei_mit(tmp_path, inhalt, name="a.js"):
+    pfad = tmp_path / name
+    pfad.write_bytes(inhalt)
+    return str(pfad)
+
+
+def test_schwaerzen_zeile_1_behaelt_praefix_und_suffix(tmp_path):
+    inhalt = JS_ZEILE.encode()
+    pfad = datei_mit(tmp_path, inhalt)
+    hinweise = lieferkette.schwaerzen(pfad, [dir_treffer(inhalt, datei="a.js") | {"File": pfad}])
+    assert hinweise == []
+    assert lesen(pfad) == f'const apiKey = "{"*" * len(WERT)}";\n'.encode()
+
+
+def test_schwaerzen_zeile_ueber_1_korrigiert_verschiebung(tmp_path):
+    inhalt = ("// kopf\nfoo();\n" + JS_ZEILE + "bar();\n").encode()
+    pfad = datei_mit(tmp_path, inhalt)
+    t = dir_treffer(inhalt, datei="a.js") | {"File": pfad}
+    assert t["StartLine"] == 3 and t["StartColumn"] == 8                      # so meldet gitleaks 8.30 (1-basiert + 1)
+    assert lieferkette.schwaerzen(pfad, [t]) == []
+    assert lesen(pfad) == inhalt.replace(WERT.encode(), b"*" * len(WERT))
+
+
+def test_schwaerzen_utf8_vor_dem_treffer_zaehlt_bytes(tmp_path):
+    inhalt = ("// ä😀\nvar s = 'ä😀' + " + f'apiKey = "{WERT}"' + ";\n").encode()
+    pfad = datei_mit(tmp_path, inhalt)
+    assert lieferkette.schwaerzen(pfad, [dir_treffer(inhalt, datei="a.js") | {"File": pfad}]) == []
+    assert lesen(pfad) == inhalt.replace(WERT.encode(), b"*" * len(WERT))
+    assert "ä😀".encode() in lesen(pfad)
+
+
+def test_schwaerzen_endspalte_hinter_zeilenende_wird_geklemmt(tmp_path):
+    inhalt = f'x\nconst apiKey = "{WERT}"'.encode()                           # kein Zeilenende, Suffix `"` am Ende
+    pfad = datei_mit(tmp_path, inhalt)
+    t = dir_treffer(inhalt, datei="a.js") | {"File": pfad}
+    t["EndColumn"] += 5                                                      # gitleaks meldet gelegentlich zu weit
+    t["Match"] = 'apiKey = "REDACTED"'
+    assert lieferkette.schwaerzen(pfad, [t]) == []                           # auf das Zeilenende geklemmt: Suffix `"` passt
+    assert lesen(pfad) == inhalt.replace(WERT.encode(), b"*" * len(WERT))
+
+
+def test_schwaerzen_ohne_end_newline_und_crlf(tmp_path):
+    inhalt = f'a\r\nb\r\nconst apiKey = "{WERT}";\r\nrest\r\n'.encode()
+    pfad = datei_mit(tmp_path, inhalt)
+    assert lieferkette.schwaerzen(pfad, [dir_treffer(inhalt, datei="a.js") | {"File": pfad}]) == []
+    neu = lesen(pfad)
+    assert neu == inhalt.replace(WERT.encode(), b"*" * len(WERT))
+    assert neu.count(b"\r\n") == 4
+
+
+def test_schwaerzen_decoded_schwaerzt_ganzes_segment(tmp_path):
+    b64 = base64.b64encode(f'password = "{WERT}"'.encode()).decode()
+    inhalt = f"x\ndata = {b64}\ny\n".encode()
+    pfad = datei_mit(tmp_path, inhalt, "h.txt")
+    sc = len("data = ") + 1 + 1                                              # 1-basiert, Zeile 2: +1
+    t = treffer(regel="generic-api-key", datei=pfad, zeile=2, von=sc, bis=sc + len(b64) - 1, match='password = "REDACTED"',
+                Tags=["decoded:base64", "decode-depth:1"])
+    assert lieferkette.schwaerzen(pfad, [t]) == []
+    assert lesen(pfad) == f"x\ndata = {'*' * len(b64)}\ny\n".encode()
+
+
+def test_schwaerzen_mehrzeilig_behaelt_umbrueche(tmp_path):
+    pem = "-----BEGIN RSA PRIVATE KEY-----\r\nAAAAAAAAAAAA\r\nBBBBBBBBBBBB\r\n-----END RSA PRIVATE KEY-----"
+    inhalt = f"kopf\r\n{pem}\r\nende\r\n".encode()
+    pfad = datei_mit(tmp_path, inhalt, "k.pem")
+    t = treffer(regel="private-key", datei=pfad, zeile=2, von=2, bis=len("-----END RSA PRIVATE KEY-----") + 1,
+                match="REDACTED")
+    t["EndLine"] = 5
+    assert lieferkette.schwaerzen(pfad, [t]) == []
+    neu = lesen(pfad)
+    assert len(neu) == len(inhalt) and neu.count(b"\n") == inhalt.count(b"\n") and neu.count(b"\r") == inhalt.count(b"\r")
+    assert neu.startswith(b"kopf\r\n") and neu.endswith(b"\r\nende\r\n")
+    assert b"AAAA" not in neu and b"BEGIN" not in neu and b"END RSA" not in neu
+
+
+def test_schwaerzen_unscharf_schwaerzt_ganze_spanne_ohne_umbrueche(tmp_path):
+    inhalt = f'ab\nconst apiKey = "{WERT}";\nzz\n'.encode()
+    pfad = datei_mit(tmp_path, inhalt)
+    t = dir_treffer(inhalt, datei="a.js") | {"File": pfad, "Match": 'passwort = "REDACTED"'}   # Präfix passt nicht
+    hinweise = lieferkette.schwaerzen(pfad, [t], wurzel=str(tmp_path))
+    assert hinweise == ["Schwärzung unscharf: a.js:2"]
+    voll = f'apiKey = "{WERT}"'.encode()
+    assert lesen(pfad) == b"ab\nconst " + b"*" * len(voll) + b";\nzz\n"      # ganze Spanne, Umbrüche bleiben
+
+
+def test_schwaerzen_ueberlappende_treffer_gleicher_wert(tmp_path):
+    inhalt = JS_ZEILE.encode()
+    pfad = datei_mit(tmp_path, inhalt)
+    t1 = dir_treffer(inhalt, datei="a.js") | {"File": pfad}
+    t2 = dir_treffer(inhalt, datei="a.js", regel="andere-regel") | {"File": pfad}
+    assert lieferkette.schwaerzen(pfad, [t1, t2]) == []                      # beide gegen das Original geprüft
+    assert lesen(pfad) == f'const apiKey = "{"*" * len(WERT)}";\n'.encode()
+
+
+def test_schwaerzen_zeile_ausserhalb_der_datei_wirft(tmp_path):
+    inhalt = JS_ZEILE.encode()
+    pfad = datei_mit(tmp_path, inhalt)
+    t = dir_treffer(inhalt, datei="a.js") | {"File": pfad, "StartLine": 9, "EndLine": 9}
+    with pytest.raises(lieferkette.SchwaerzFehler):
+        lieferkette.schwaerzen(pfad, [t])
+    assert lesen(pfad) == inhalt
+
+
+def test_schwaerzen_schreibt_keinen_symlink(tmp_path):
+    ziel = tmp_path / "ziel.js"
+    ziel.write_bytes(JS_ZEILE.encode())
+    link = tmp_path / "link.js"
+    os.symlink(ziel, link)
+    with pytest.raises(lieferkette.SchwaerzFehler):
+        lieferkette.schwaerzen(str(link), [dir_treffer(JS_ZEILE.encode(), datei="x") | {"File": str(link)}])
+    assert ziel.read_bytes() == JS_ZEILE.encode()
+
+
+def test_schwaerzen_behaelt_dateirechte(tmp_path):
+    pfad = datei_mit(tmp_path, JS_ZEILE.encode())
+    os.chmod(pfad, 0o755)
+    lieferkette.schwaerzen(pfad, [dir_treffer(JS_ZEILE.encode(), datei="a.js") | {"File": pfad}])
+    assert stat.S_IMODE(os.stat(pfad).st_mode) == 0o755
+
+
+# ------------------------------------------------------------------------------------ secrets (Fake-gitleaks)
+
+def historie(v, *eintraege, regel="generic-api-key", datei="src/a.js"):
+    return [treffer(regel=regel, datei=datei, commit=sha, **kw) for sha, kw in eintraege]
+
+
+def test_secrets_ausgabe_ohne_wertfelder(umg, tmp_path):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": [dir_treffer(JS_ZEILE.encode())]},
+                      git={"report": [treffer(commit=v.shas[0])]})
+    r = secrets(umg, v)
+    out = ausgabe(r)
+    for sentinel in SENTINELS:
+        assert sentinel not in r.stdout and sentinel not in r.stderr
+    gesamt = r.stdout + r.stderr
+    for feld in ("Secret", "Match", "Author", "Email", "Message", "Fingerprint"):
+        assert f'"{feld}"' not in gesamt
+    assert set(out) == {"befunde_roh", "hinweise", "geschwaerzt"}
+    assert out["befunde_roh"] == [{"regel": "generic-api-key", "datei": "src/a.js", "zeile": 1, "commits": [v.shas[0]],
+                                   "in_head": True}]
+    assert out["geschwaerzt"] == 1
+    assert "1 Secret-Fundstellen in der Arbeitskopie geschwärzt" in out["hinweise"]
+
+
+def test_secrets_reihenfolge_dir_vor_git_und_optionen(umg, tmp_path):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    r = secrets(umg, v, env=umg.env(GITLEAKS_CONFIG="/geerbt.toml", GITLEAKS_BASELINE_PATH="/b", OSV_SCANNER_CONFIG="/o",
+                                    GIT_DIR="/g", GIT_WORK_TREE="/w"))
+    ausgabe(r)
+    aufrufe = umg.aufrufe()
+    assert [a["modus"] for a in aufrufe] == ["dir", "git"]
+    lk = os.path.realpath(umg.lieferkette_ordner())
+    for a in aufrufe:
+        args = a["args"]
+        assert args[1] == (v.quelle if a["modus"] == "dir" else os.path.join(lk, "spiegel.git"))
+        for opt in ("--redact", "--no-banner", "--ignore-gitleaks-allow"):
+            assert opt in args
+        assert args[args.index("--exit-code") + 1] == "0" and args[args.index("--report-format") + 1] == "json"
+        assert a["config_text"].strip().splitlines() == ["[extend]", "useDefault = true"]
+        assert not os.path.realpath(args[args.index("--config") + 1]).startswith((v.quelle, v.repo))
+        assert a["ignore_leer"] is True                                          # leerer Ordner, keine Repo-.gitleaksignore
+        assert os.path.realpath(a["cwd"]).startswith(lk + os.sep) and a["cwd_leer"] is True
+        assert not [k for k in a["env"] if k.startswith(("GITLEAKS_", "OSV_"))]
+        assert set(a["env"]) == {"GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_NO_LAZY_FETCH", "GIT_TERMINAL_PROMPT",
+                                 "GIT_OPTIONAL_LOCKS"}
+        assert a["env"]["GIT_CONFIG_GLOBAL"] == "/dev/null"
+        assert not args[args.index("--report-path") + 1].startswith((v.quelle, v.repo))
+
+
+def test_secrets_aufraeumen(umg):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": [dir_treffer(JS_ZEILE.encode())]}, git={"report": [treffer(commit=v.shas[0])]})
+    ausgabe(secrets(umg, v))
+    assert lieferkette_inhalt(umg) == ["geschwaerzt"]                           # Reports, Spiegel, Config, leere Ordner weg
+    assert not os.path.lexists(os.path.join(umg.lieferkette_ordner(), "spiegel.git"))
+
+
+def test_secrets_gitleaks_fehlt_ohne_env_und_im_path(umg):
+    v = vorbereiten(umg, [MINI])
+    r = secrets(umg, v, env=umg.env(PATH=str(umg.bin)))                         # kein gitleaks im PATH
+    out = ausgabe(r)
+    assert out["werkzeug"] == "gitleaks" and out["fehlt"] is True
+    assert "gitleaks fehlt" in out["hinweis"] and any("gitleaks fehlt" in h for h in out["hinweise"])
+    assert out["befunde_roh"] == [] and not os.path.lexists(umg.marker())
+    assert lesen(os.path.join(v.quelle, "src/a.js")) == JS_ZEILE.encode()    # nichts angefasst
+
+
+@pytest.mark.parametrize("ohne", ["gitleaks", " Gitleaks , osv-scanner", "docker,GITLEAKS"])
+def test_secrets_gitleaks_fehlt_per_ohne(umg, ohne):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": [dir_treffer(JS_ZEILE.encode())]})
+    out = ausgabe(secrets(umg, v, env=umg.env(SECURITY_AUDIT_OHNE=ohne)))
+    assert out["werkzeug"] == "gitleaks" and out["fehlt"] is True and out["befunde_roh"] == []
+    assert umg.aufrufe() == [] and not os.path.lexists(umg.marker())
+    assert lesen(os.path.join(v.quelle, "src/a.js")) == JS_ZEILE.encode()
+
+
+def test_secrets_gitleaksignore_wird_aus_arbeitskopie_entfernt(umg):
+    v = vorbereiten(umg, [dict(MINI, **{".gitleaksignore": "x:y:1\n", "sub/dir/.gitleaksignore": "x:y:2\n",
+                                         "sub/.gitleaksignore.bak": "bleibt\n"})])
+    assert os.path.exists(os.path.join(v.quelle, ".gitleaksignore"))
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    ausgabe(secrets(umg, v))
+    assert umg.aufrufe()[0]["ignore_in_quelle"] is False                       # schon beim dir-Aufruf weg
+    assert not os.path.lexists(os.path.join(v.quelle, ".gitleaksignore"))
+    assert not os.path.lexists(os.path.join(v.quelle, "sub/dir/.gitleaksignore"))
+    assert os.path.exists(os.path.join(v.quelle, "sub/.gitleaksignore.bak"))   # nur exakt `.gitleaksignore`
+    assert os.path.exists(os.path.join(v.quelle, "src/a.js")) and os.path.isdir(v.repo)
+
+
+def test_repo_konfig_hinweise(umg):
+    v = vorbereiten(umg, [dict(MINI, **{".gitleaks.toml": "[allowlist]\n", ".gitleaksignore": "x\n",
+                                         "web/osv-scanner.toml": "[[IgnoredVulns]]\n",
+                                         "src/b.js": 'const k = "x"; // gitleaks:allow\n'})])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    out = ausgabe(secrets(umg, v))
+    text = "\n".join(out["hinweise"])
+    assert ".gitleaks.toml" in text and ".gitleaksignore" in text and "web/osv-scanner.toml" in text
+    assert "gitleaks:allow" in text and "src/b.js" in text
+    assert all("ignoriert" in h for h in out["hinweise"] if ".toml" in h or "allow" in h)
+    assert os.path.exists(os.path.join(v.quelle, ".gitleaks.toml")) and os.path.exists(os.path.join(v.quelle, "web/osv-scanner.toml"))
+    assert not os.path.exists(os.path.join(v.quelle, ".gitleaksignore"))        # erkannt, bevor sie gelöscht wurde
+
+
+def test_repo_konfig_hinweise_ohne_konfig_keine_meldung(umg):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    assert ausgabe(secrets(umg, v))["hinweise"] == []
+
+
+def test_marker_gesetzt_und_vor_historie(umg):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": [dir_treffer(JS_ZEILE.encode())]}, git={"report": []})
+    ausgabe(secrets(umg, v))
+    dir_aufruf, git_aufruf = umg.aufrufe()
+    assert dir_aufruf["marker"] is False and git_aufruf["marker"] is True        # test_marker_vor_historie
+    assert os.path.isfile(umg.marker()) and not os.path.islink(umg.marker())
+
+
+def test_marker_ohne_treffer(umg):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    out = ausgabe(secrets(umg, v))
+    assert out["geschwaerzt"] == 0 and out["befunde_roh"] == [] and os.path.isfile(umg.marker())
+
+
+def test_marker_alt_wird_vor_dem_lauf_entfernt(umg):
+    v = vorbereiten(umg, [MINI])
+    os.makedirs(umg.lieferkette_ordner(), exist_ok=True)
+    open(umg.marker(), "w").close()
+    umg.fake_gitleaks(dir={"rc": 2})
+    assert secrets(umg, v).returncode == 4
+    assert not os.path.lexists(umg.marker())
+
+
+@pytest.mark.parametrize("dir_verhalten", [
+    {"rc": 2},
+    {"rc": 1, "report": []},
+    {"roh": "das ist kein json"},
+    {"roh": '{"kein": "array"}'},
+    {"kein_report": True},
+    {"report": [{"RuleID": "x", "File": "{ziel}/src/a.js", "StartLine": "eins", "EndLine": 1, "StartColumn": 1, "EndColumn": 2}]},
+])
+def test_schwaerzung_scheitert_exit4_ohne_marker(umg, dir_verhalten):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir=dir_verhalten, git={"report": [treffer(commit=v.shas[0])]})
+    r = secrets(umg, v)
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "nicht geschwärzt" in r.stdout + r.stderr
+    assert not os.path.lexists(umg.marker())
+    assert [a["modus"] for a in umg.aufrufe()] == ["dir"]                         # keine Historie nach gescheiterter Schwärzung
+    assert lieferkette_inhalt(umg) == []
+    for sentinel in SENTINELS:
+        assert sentinel not in r.stdout and sentinel not in r.stderr
+
+
+def test_schwaerzung_scheitert_bei_zeitablauf_des_teilbudgets(umg):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"sleep": 60, "report": []})
+    start = time.monotonic()
+    r = secrets(umg, v, env=umg.env(SECURITY_AUDIT_SECRETS_DIR_BUDGET="1"))
+    assert r.returncode == 4 and "Zeit" in r.stdout + r.stderr
+    assert time.monotonic() - start < 30
+    assert not os.path.lexists(umg.marker()) and lieferkette_inhalt(umg) == []
+
+
+def test_schwaerzung_unscharf_hinweis(umg):
+    v = vorbereiten(umg, [dict(MINI, **{"src/a.js": "x\n" + JS_ZEILE})])
+    inhalt = lesen(os.path.join(v.quelle, "src/a.js"))
+    t = dir_treffer(inhalt) | {"Match": 'passwort = "REDACTED"'}
+    umg.fake_gitleaks(dir={"report": [t]}, git={"report": []})
+    out = ausgabe(secrets(umg, v))
+    assert "Schwärzung unscharf: src/a.js:2" in out["hinweise"]
+    neu = lesen(os.path.join(v.quelle, "src/a.js"))
+    assert WERT.encode() not in neu and len(neu) == len(inhalt) and neu.count(b"\n") == 2
+    assert os.path.isfile(umg.marker())
+
+
+def test_schwaerzung_pfad_ausserhalb_nicht_geschrieben(umg, tmp_path):
+    v = vorbereiten(umg, [MINI])
+    aussen = tmp_path / "aussen"
+    aussen.mkdir()
+    ziele = {"absolut": aussen / "a.js", "punktpunkt": os.path.join(umg.zustand(), "aussen-b.js"),
+             "relativ": os.path.join(os.path.realpath(umg.tmp), "c.js"), "symlink": str(tmp_path / "d.js")}
+    ziele = {k: type(aussen)(z) for k, z in ziele.items()}
+    for ziel in ziele.values():
+        ziel.write_bytes(JS_ZEILE.encode())
+    os.symlink(ziele["symlink"], os.path.join(v.quelle, "link.js"))               # Symlink in der Kopie zeigt nach außen
+    treffer_liste = [
+        dir_treffer(JS_ZEILE.encode(), datei="a.js") | {"File": str(ziele["absolut"])},
+        dir_treffer(JS_ZEILE.encode(), datei="a.js") | {"File": os.path.join(v.quelle, "..", "aussen-b.js")},
+        dir_treffer(JS_ZEILE.encode(), datei="a.js") | {"File": "../../c.js"},
+        dir_treffer(JS_ZEILE.encode(), datei="a.js") | {"File": os.path.join(v.quelle, "link.js")},
+    ]
+    umg.fake_gitleaks(dir={"report": treffer_liste}, git={"report": []})
+    vorher = {k: z.read_bytes() for k, z in ziele.items()}
+    out = ausgabe(secrets(umg, v))
+    assert {k: z.read_bytes() for k, z in ziele.items()} == vorher
+    assert out["geschwaerzt"] == 0 and any("außerhalb" in h for h in out["hinweise"])
+    assert os.path.isfile(umg.marker())
+
+
+def test_secrets_mehrere_commits(umg):
+    v = vorbereiten(umg, [MINI, {"x": "1"}, {"x": "2"}])
+    a, b, c = v.shas
+    umg.fake_gitleaks(dir={"report": []}, git={"report": [
+        treffer(commit=a, zeile=3, datum="2026-01-01T10:00:00Z"),
+        treffer(commit=c, zeile=7, datum="2026-03-01T10:00:00Z"),
+        treffer(commit=b, zeile=5, datum="2026-02-01T10:00:00+01:00")]})
+    out = ausgabe(secrets(umg, v))
+    assert out["befunde_roh"] == [{"regel": "generic-api-key", "datei": "src/a.js", "zeile": 7, "commits": [c, b, a],
+                                   "in_head": True}]                          # jüngster Commit zuerst, Zeile aus dem jüngsten
+    assert all(len(x) == 40 for x in out["befunde_roh"][0]["commits"])
+
+
+def test_secrets_dedup_je_regel_und_datei(umg):
+    v = vorbereiten(umg, [MINI, {"src/b.js": "1"}])
+    a, b = v.shas
+    umg.fake_gitleaks(dir={"report": []}, git={"report": [
+        treffer(regel="r1", datei="src/a.js", commit=a, zeile=1),
+        treffer(regel="r2", datei="src/a.js", commit=a, zeile=1),            # ≥ 2 Regeln je Datei
+        treffer(regel="r1", datei="src/b.js", commit=b, zeile=4),            # ≥ 2 Dateien je Regel
+        treffer(regel="r1", datei="src/a.js", commit=b, zeile=2, datum="2027-01-01T00:00:00Z")]})
+    out = ausgabe(secrets(umg, v))
+    kurz = [(x["regel"], x["datei"], x["zeile"], x["commits"]) for x in out["befunde_roh"]]
+    assert kurz == [("r1", "src/a.js", 2, [b, a]), ("r2", "src/a.js", 1, [a]), ("r1", "src/b.js", 4, [b])]
+
+
+def test_secrets_commits_gekappt_auf_20(umg):
+    v = vorbereiten(umg, [MINI])
+    shas = [f"{i:040x}" for i in range(1, 26)]
+    umg.fake_gitleaks(dir={"report": []}, git={"report": [
+        treffer(commit=s, datum=f"2026-01-{i + 1:02d}T00:00:00Z") for i, s in enumerate(shas)]})
+    out = ausgabe(secrets(umg, v))
+    commits = out["befunde_roh"][0]["commits"]
+    assert len(commits) == 20 and commits[0] == shas[-1] and commits[-1] == shas[5]
+
+
+def test_secrets_verwirft_ungueltige_commits_und_dateinamen(umg):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": [
+        treffer(commit="nicht-hex"), treffer(commit=v.shas[0], datei="src/‮gpj.js"), treffer(commit=v.shas[0], datei="")]})
+    out = ausgabe(secrets(umg, v))
+    assert [x["datei"] for x in out["befunde_roh"]] == ["src/\\u202egpj.js"]     # Bidi-Zeichen escaped, Ungültiges verworfen
+
+
+def test_secrets_in_head_env_datei(umg):
+    """`.env*` fehlt in der Arbeitskopie, liegt aber in HEAD; eine gelöschte Datei liegt nicht mehr in HEAD."""
+    v = vorbereiten(umg, [{".env.local": f'KEY="{WERT}"\n', "alt.js": JS_ZEILE, "package.json": "{}"}, {"alt.js": None}])
+    assert not os.path.exists(os.path.join(v.quelle, ".env.local"))
+    a, b = v.shas
+    umg.fake_gitleaks(dir={"report": []}, git={"report": [
+        treffer(datei=".env.local", commit=a), treffer(datei="alt.js", commit=a)]})
+    out = ausgabe(secrets(umg, v))
+    in_head = {x["datei"]: x["in_head"] for x in out["befunde_roh"]}
+    assert in_head == {".env.local": True, "alt.js": False}
+
+
+def test_secrets_in_head_nutzt_den_uebergebenen_sha(umg):
+    repo, shas = repo_bauen(umg, [{"alt.js": JS_ZEILE}, {"alt.js": None, "neu.txt": "1"}])
+    r = umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo, "--sha", shas[0])
+    assert r.returncode == 0, r.stderr
+    v = Vorbereitet(repo, os.path.join(umg.zustand(), "quelle"), shas, shas[0])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": [treffer(datei="alt.js", commit=shas[0])]})
+    out = ausgabe(secrets(umg, v))
+    assert out["befunde_roh"][0]["in_head"] is True                               # im übergebenen Commit, nicht in HEAD
+
+
+def test_secrets_quelle_ausserhalb_verweigert(umg, tmp_path):
+    v = vorbereiten(umg, [MINI])
+    fremd = tmp_path / "fremd"
+    schreibe(str(fremd), "src/a.js", JS_ZEILE)
+    schreibe(str(fremd), ".gitleaksignore", "x\n")
+    open(fremd / "quelle.fertig", "w").close()
+    vorher = {p: lesen(os.path.join(fremd, p)) for p in ("src/a.js", ".gitleaksignore")}
+    umg.fake_gitleaks(dir={"report": [dir_treffer(JS_ZEILE.encode())]})
+    r = secrets(umg, v, quelle=str(fremd))
+    assert r.returncode == 2 and "quelle" in r.stderr.lower()
+    assert {p: lesen(os.path.join(fremd, p)) for p in vorher} == vorher
+    assert umg.aufrufe() == [] and not os.path.lexists(umg.marker())
+    # auch der Elternordner der echten Quelle und ein `..`-Pfad zählen nicht
+    for falsch in (umg.zustand(), os.path.join(v.quelle, "..", "quelle", "src")):
+        assert secrets(umg, v, quelle=falsch).returncode == 2
+
+
+def test_secrets_quelle_ohne_fertig_marker_verweigert(umg):
+    v = vorbereiten(umg, [MINI])
+    os.unlink(os.path.join(umg.zustand(), "quelle.fertig"))
+    umg.fake_gitleaks(dir={"report": []})
+    r = secrets(umg, v)
+    assert r.returncode == 2 and umg.aufrufe() == []
+
+
+def test_secrets_symlink_auf_echte_quelle_ist_erlaubt(umg, tmp_path):
+    v = vorbereiten(umg, [MINI])
+    link = tmp_path / "quelle-link"
+    link.symlink_to(v.quelle)
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    assert secrets(umg, v, quelle=str(link)).returncode == 0
+
+
+def test_secrets_ungueltige_argumente(umg):
+    v = vorbereiten(umg, [MINI])
+    assert umg.lk("secrets", "--lauf", "xyz", "--repo", v.repo, "--quelle", v.quelle, "--sha", v.sha).returncode == 2
+    assert umg.lk("secrets", "--lauf", LAUF, "--repo", v.repo, "--quelle", v.quelle, "--sha", "HEAD").returncode == 2
+    assert umg.lk("secrets", "--lauf", LAUF, "--repo", str(umg.tmp_path / "nix"), "--quelle", v.quelle,
+                  "--sha", v.sha).returncode == 2
+    assert umg.lk("unbekannt").returncode == 2
+
+
+def test_secrets_budget_beendet_historie_und_raeumt_auf(umg):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": [dir_treffer(JS_ZEILE.encode())]}, git={"sleep": 60, "report": []})
+    start = time.monotonic()
+    r = secrets(umg, v, env=umg.env(SECURITY_AUDIT_SECRETS_BUDGET="3"))
+    out = ausgabe(r)
+    assert time.monotonic() - start < 40
+    assert "Secret-Prüfung abgebrochen (Zeitbudget)" in out["hinweise"]
+    assert os.path.isfile(umg.marker())                                          # Schwärzung war fertig
+    assert lieferkette_inhalt(umg) == ["geschwaerzt"]                              # Spiegel und Reports trotzdem gelöscht
+    assert out["befunde_roh"] == [] and out["geschwaerzt"] == 1
+
+
+def test_secrets_budget_im_spiegelklon(umg, monkeypatch):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    git_echt = shutil.which("git")
+    (umg.bin / "git").write_text(SPIEGEL_SLEEP_GIT.format(git=git_echt))
+    (umg.bin / "git").chmod(0o755)
+    start = time.monotonic()
+    out = ausgabe(secrets(umg, v, env=umg.env(SECURITY_AUDIT_SECRETS_BUDGET="3")))
+    assert time.monotonic() - start < 40
+    assert "Secret-Prüfung abgebrochen (Zeitbudget)" in out["hinweise"]
+    assert [a["modus"] for a in umg.aufrufe()] == ["dir"]
+    assert lieferkette_inhalt(umg) == ["geschwaerzt"]
+
+
+def test_secrets_git_fehler_ist_hinweis_und_kein_exit4(umg):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"rc": 1})
+    out = ausgabe(secrets(umg, v))
+    assert any("Historie" in h and "fehlgeschlagen" in h for h in out["hinweise"])
+    assert os.path.isfile(umg.marker()) and out["befunde_roh"] == []
+
+
+def test_secrets_stderr_von_gitleaks_wird_nicht_ausgegeben(umg):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": [], "stderr": "SENTINEL-SECRET im Log\n"}, git={"rc": 1, "stderr": "SENTINEL-MESSAGE\n"})
+    r = secrets(umg, v)
+    assert "SENTINEL" not in r.stdout + r.stderr
+
+
+def test_secrets_ordner_der_quelle_nur_anlegen_wo_erlaubt(umg):
+    """`lieferkette` im Zustandsordner darf kein Symlink sein."""
+    v = vorbereiten(umg, [MINI])
+    ziel = umg.tmp_path / "umgeleitet"
+    ziel.mkdir()
+    (ziel / "wichtig.txt").write_text("bleibt")
+    os.symlink(ziel, umg.lieferkette_ordner())
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    r = secrets(umg, v)
+    assert r.returncode != 0 and (ziel / "wichtig.txt").read_text() == "bleibt" and sorted(os.listdir(ziel)) == ["wichtig.txt"]
+
+
+# ------------------------------------------------------------------------------------ echtes gitleaks
+
+def echt_lauf(umg, dateien, *, historie=None, env=None, nachher=None):
+    """Repo mit `dateien` (+ optional weiteren Commits), poc vorbereiten, echtes `secrets`. Gibt (ausgabe, Vorbereitet) zurück."""
+    commits = (historie or []) + [dateien]
+    v = vorbereiten(umg, commits)
+    r = secrets(umg, v, env=env)
+    return ausgabe(r), v
+
+
+def erwartet_geschwaerzt(inhalt: bytes, wert: bytes) -> bytes:
+    return inhalt.replace(wert, b"*" * len(wert))
+
+
+@echt
+def test_schwaerzung_echt_zeile_1_und_api_key_praefix(umg):
+    inhalt = JS_ZEILE.encode()
+    out, v = echt_lauf(umg, {"src/a.js": inhalt})
+    neu = lesen(os.path.join(v.quelle, "src/a.js"))
+    assert neu == erwartet_geschwaerzt(inhalt, WERT.encode())                     # Präfix `apiKey = "` und `";` bleiben
+    assert neu.startswith(b'const apiKey = "*') and neu.endswith(b'*";\n')
+    assert out["geschwaerzt"] >= 1 and os.path.isfile(umg.marker())
+    assert [(b["regel"], b["datei"], b["in_head"]) for b in out["befunde_roh"]] == [("generic-api-key", "src/a.js", True)]
+    assert len(out["befunde_roh"][0]["commits"]) == 1 and len(out["befunde_roh"][0]["commits"][0]) == 40
+    assert WERT not in json.dumps(out)
+
+
+@echt
+def test_schwaerzung_echt_zeile_ueber_1(umg):
+    inhalt = ("// kopf\nfoo();\nbar();\n" + JS_ZEILE + "baz();\n").encode()
+    out, v = echt_lauf(umg, {"src/a.js": inhalt})
+    assert lesen(os.path.join(v.quelle, "src/a.js")) == erwartet_geschwaerzt(inhalt, WERT.encode())
+    assert not [h for h in out["hinweise"] if "unscharf" in h]
+
+
+@echt
+def test_schwaerzung_echt_utf8_davor(umg):
+    inhalt = ("// ä😀 öü\nvar s = 'ä😀ß' + " + f'apiKey = "{WERT}"' + ";\n").encode()
+    out, v = echt_lauf(umg, {"src/a.js": inhalt})
+    neu = lesen(os.path.join(v.quelle, "src/a.js"))
+    assert neu == erwartet_geschwaerzt(inhalt, WERT.encode())
+    assert not [h for h in out["hinweise"] if "unscharf" in h]
+
+
+@echt
+def test_schwaerzung_echt_ohne_end_newline(umg):
+    inhalt = ("x\n" + f'const apiKey = "{WERT}";').encode()
+    out, v = echt_lauf(umg, {"src/a.js": inhalt})
+    assert lesen(os.path.join(v.quelle, "src/a.js")) == erwartet_geschwaerzt(inhalt, WERT.encode())
+
+
+@echt
+def test_schwaerzung_echt_crlf(umg):
+    inhalt = f'a\r\nb\r\nconst apiKey = "{WERT}";\r\nrest\r\n'.encode()
+    out, v = echt_lauf(umg, {"src/a.js": inhalt})
+    neu = lesen(os.path.join(v.quelle, "src/a.js"))
+    assert neu == erwartet_geschwaerzt(inhalt, WERT.encode()) and neu.count(b"\r\n") == 4
+
+
+@echt
+def test_schwaerzung_echt_pem(umg):
+    zeilen = [base64.b64encode(random.Random(i).randbytes(48)).decode() for i in range(12)]
+    pem = "-----BEGIN RSA PRIVATE KEY-----\n" + "\n".join(zeilen) + "\n-----END RSA PRIVATE KEY-----\n"
+    inhalt = ("hdr\n" + pem + "tail\n").encode()
+    out, v = echt_lauf(umg, {"keys/k.pem": inhalt})
+    neu = lesen(os.path.join(v.quelle, "keys/k.pem"))
+    assert len(neu) == len(inhalt) and neu.count(b"\n") == inhalt.count(b"\n")
+    assert neu.startswith(b"hdr\n") and neu.endswith(b"\ntail\n")
+    for zeile in zeilen:
+        assert zeile.encode() not in neu
+    assert b"BEGIN RSA" not in neu
+    assert [b["regel"] for b in out["befunde_roh"]] == ["private-key"]
+
+
+@echt
+def test_schwaerzung_echt_base64(umg):
+    b64 = base64.b64encode(f'password = "{WERT}"'.encode()).decode()
+    inhalt = f"x\ndata = {b64}\ny\n".encode()
+    out, v = echt_lauf(umg, {"conf/data.txt": inhalt})
+    neu = lesen(os.path.join(v.quelle, "conf/data.txt"))
+    assert neu == f"x\ndata = {'*' * len(b64)}\ny\n".encode()
+    assert WERT.encode() not in neu and b64.encode() not in neu
+
+
+@echt
+def test_secrets_echt_historie_geloeschte_datei(umg):
+    out, v = echt_lauf(umg, {"src/a.js": None, "package.json": "{}"}, historie=[{"src/a.js": JS_ZEILE, "package.json": "{}"}])
+    assert [(b["datei"], b["in_head"], b["commits"]) for b in out["befunde_roh"]] == [("src/a.js", False, [v.shas[0]])]
+    assert out["geschwaerzt"] == 0 and os.path.isfile(umg.marker())              # in HEAD nichts mehr, Marker trotzdem gesetzt
+    assert lieferkette_inhalt(umg) == ["geschwaerzt"]
+
+
+KONFIG_ALLOW = "[extend]\nuseDefault = true\n\n[[allowlists]]\npaths = ['''.*''']\n"
+
+
+@echt
+def test_repo_konfig_wirkt_nicht_gitleaks_toml_und_env(umg, tmp_path):
+    fremd = tmp_path / "eigene.toml"
+    fremd.write_text(KONFIG_ALLOW)
+    out, v = echt_lauf(umg, {"src/a.js": JS_ZEILE, ".gitleaks.toml": KONFIG_ALLOW},
+                       env=umg.env(GITLEAKS_CONFIG=str(fremd), GITLEAKS_CONFIG_TOML=KONFIG_ALLOW))
+    assert [b["datei"] for b in out["befunde_roh"]] == ["src/a.js"] and out["geschwaerzt"] >= 1
+    assert WERT.encode() not in lesen(os.path.join(v.quelle, "src/a.js"))
+    assert any(".gitleaks.toml" in h and "ignoriert" in h for h in out["hinweise"])
+
+
+@echt
+def test_repo_konfig_wirkt_nicht_gitleaksignore(umg):
+    """Fingerabdrücke im Format von gitleaks: dir `<abs>:<regel>:<zeile>`, git `<commit>:<datei>:<regel>:<zeile>`; die Datei liegt
+    im Repo (HEAD) und damit in der Arbeitskopie."""
+    quelle = os.path.join(umg.zustand(), "quelle")
+    ignore = lambda shas: {".gitleaksignore": f"{quelle}/src/a.js:generic-api-key:1\n{shas[0]}:src/a.js:generic-api-key:1\n"}
+    out, v = echt_lauf(umg, ignore, historie=[{"src/a.js": JS_ZEILE}])
+    assert [(b["datei"], b["commits"]) for b in out["befunde_roh"]] == [("src/a.js", [v.shas[0]])]
+    assert out["geschwaerzt"] >= 1 and WERT.encode() not in lesen(os.path.join(v.quelle, "src/a.js"))
+    assert not os.path.exists(os.path.join(v.quelle, ".gitleaksignore"))
+    assert any(".gitleaksignore" in h and "ignoriert" in h for h in out["hinweise"])
+
+
+@echt
+def test_repo_konfig_wirkt_nicht_gitleaks_allow(umg):
+    inhalt = f'const apiKey = "{WERT}"; // gitleaks:allow\n'.encode()
+    out, v = echt_lauf(umg, {"src/a.js": inhalt})
+    assert [b["datei"] for b in out["befunde_roh"]] == ["src/a.js"] and out["geschwaerzt"] >= 1
+    assert WERT.encode() not in lesen(os.path.join(v.quelle, "src/a.js"))
+    assert any("gitleaks:allow" in h for h in out["hinweise"])
+
+
+@echt
+def test_spiegel_keine_treiber_ausgefuehrt_echt(umg, tmp_path):
+    """Komplettlauf mit echtem gitleaks: Treiber aus der Konfiguration des Kundenrepos bleiben ungenutzt."""
+    repo, shas = repo_bauen(umg, [{"src/a.js": JS_ZEILE, ".gitattributes": "* diff=x filter=x\n"}])
+    skript = marker_skript(tmp_path, "textconv.sh")
+    for schluessel in ("diff.x.textconv", "filter.x.clean", "filter.x.smudge", "core.fsmonitor"):
+        umg.git(repo, "config", schluessel, str(skript))
+    r = umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo)
+    assert r.returncode == 0
+    v = Vorbereitet(repo, os.path.join(umg.zustand(), "quelle"), shas, shas[-1])
+    out = ausgabe(secrets(umg, v))
+    assert out["befunde_roh"] and not list(tmp_path.glob("MARKER-*"))

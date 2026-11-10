@@ -447,9 +447,10 @@ def test_werkzeug_umgebung_ohne_git_variablen(monkeypatch):
     env = gitkopie.werkzeug_umgebung()
     assert not [k for k in env if k.startswith(("GITLEAKS_", "OSV_"))]
     assert {k for k in env if k.startswith("GIT_")} == {
-        "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_NO_LAZY_FETCH", "GIT_TERMINAL_PROMPT"}
+        "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_NO_LAZY_FETCH", "GIT_TERMINAL_PROMPT", "GIT_OPTIONAL_LOCKS"}
     assert env["GIT_CONFIG_NOSYSTEM"] == "1" and env["GIT_CONFIG_GLOBAL"] == "/dev/null"
     assert env["GIT_NO_LAZY_FETCH"] == "1" and env["GIT_TERMINAL_PROMPT"] == "0"
+    assert env["GIT_OPTIONAL_LOCKS"] == "0"
     assert env["PATH"] == "/usr/bin:/bin" and env["HOME"] == os.environ["HOME"]
     assert env["MEIN_GIT_NAME"] == "bleibt"
     assert os.environ["GIT_DIR"] == "/x" and os.environ["GITLEAKS_CONFIG"] == "/c"   # Prozessumgebung unverändert

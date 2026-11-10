@@ -760,11 +760,16 @@ def _vorbereiten(a: argparse.Namespace, repo: str, ordner: str, quelle: str, mar
     return 0
 
 
+def _marker_vorhanden(lauf: str) -> bool:
+    """Schwärzungs-Marker ist eine reguläre Datei (kein Symlink, kein Ordner, kein Gerät)."""
+    try:
+        return stat.S_ISREG(os.lstat(schwaerz_marker(lauf)).st_mode)
+    except OSError:
+        return False
+
+
 def cmd_bauen(a: argparse.Namespace) -> int:
     _daemon_pruefen()
-    if not werkzeug_fehlt("gitleaks") and not os.path.isfile(schwaerz_marker(a.lauf)):
-        return _fehler_ende("nicht-geschwaerzt", "Arbeitskopie nicht auf Secrets geprüft und geschwärzt: erst "
-                            "`lieferkette.py secrets --lauf … --repo … --quelle … --sha …` (Marker fehlt), dann erneut bauen.")
     ordner = _ordner(a.lauf)
     quelle = os.path.join(ordner, "quelle")
     if not os.path.isdir(quelle):
@@ -772,6 +777,9 @@ def cmd_bauen(a: argparse.Namespace) -> int:
     if not os.path.isfile(os.path.join(ordner, "quelle.fertig")):
         raise PocFehler("Arbeitskopie unvollständig (kein Fertig-Marker, Abbruch beim Kopieren?): "
                         "erneut `poc.py vorbereiten --lauf … --repo …`")
+    if not werkzeug_fehlt("gitleaks") and not _marker_vorhanden(a.lauf):
+        return _fehler_ende("nicht-geschwaerzt", "Arbeitskopie nicht auf Secrets geprüft und geschwärzt: erst "
+                            "`lieferkette.py secrets --lauf … --repo … --quelle … --sha …` (Marker fehlt), dann erneut bauen.")
     kategorie = lockfile_pruefen(quelle)
     if kategorie:
         return _fehler_ende(kategorie)
