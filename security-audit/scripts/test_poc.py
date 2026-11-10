@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 import pytest
 
@@ -27,9 +28,10 @@ ANDERER_LAUF = "ffeeddcc"
 FAKE_DOCKER = '''#!{python}
 import json, os, sys, time
 args = sys.argv[1:]
-eingabe = sys.stdin.buffer.read().decode("utf-8", "replace") if "-i" in args[:3] else None
+roh = sys.stdin.buffer.read() if "-i" in args[:3] else None
+eingabe = roh.decode("utf-8", "replace") if roh is not None else None
 with open(os.environ["FAKE_DOCKER_LOG"], "a") as f:
-    f.write(json.dumps({{"args": args, "stdin": eingabe}}) + "\\n")
+    f.write(json.dumps({{"args": args, "stdin": eingabe, "stdin_hex": roh.hex() if roh is not None else None}}) + "\\n")
 try:
     with open(os.environ["FAKE_DOCKER_CONFIG"]) as f:
         cfg = json.load(f)
@@ -38,7 +40,10 @@ except OSError:
 antwort = cfg.get(" ".join(args[:2])) or cfg.get(args[0] if args else "") or {{}}
 if antwort.get("sleep"):
     time.sleep(antwort["sleep"])
+for _ in range(antwort.get("flood", 0)):
+    sys.stdout.write(("y" * 1023 + "\\n") * 1024)
 sys.stdout.write(antwort.get("stdout", ""))
+sys.stdout.flush()
 sys.stderr.write(antwort.get("stderr", ""))
 sys.exit(antwort.get("rc", 0))
 '''
@@ -255,6 +260,9 @@ def node_in(tmp_path, engines=None, nvmrc=None):
     (">=22", "24"), ("^20.11", "20"), (">=18 <21", "20"), ("20.x || 22.x", "22"), ("*", "24"),
     (">= 18", "24"), ("<22", "20"), ("22", "22"), ("=22", "22"), ("^22.3.0", "22"), ("~20", "20"),
     (">20", "24"), ("<=22", "22"), ("20 || >=24", "24"), ("^0.8", "22"), (">=26", "22"), ("???", "22"),
+    # T3-M2: Bereiche, die nur einzelne Minor-Versionen eines Majors treffen
+    ("~20.11", "20"), ("=20.11.0", "20"), ("<=20.11.0", "20"), (">=20.11.0 <20.12.0", "20"), ("18 - 20", "20"),
+    ("20.11.x", "20"), ("~22.3 || ~20.11", "22"), ("18 - 22", "22"), ("16 - 18", "22"), ("20.11.0 - 20.11.9", "20"),
 ])
 def test_node_version_engines(tmp_path, engines, erwartet):
     assert poc.node_version(node_in(tmp_path, engines=engines), None) == erwartet
@@ -266,6 +274,15 @@ def test_node_version_engines(tmp_path, engines, erwartet):
 ])
 def test_node_version_nvmrc(tmp_path, nvmrc, erwartet):
     assert poc.node_version(node_in(tmp_path, nvmrc=nvmrc), None) == erwartet
+
+
+def test_node_version_riesige_zahlen(tmp_path):
+    """T3-M3: Zahlen über dem int-Stringlimit lösen kein ValueError aus, es gilt der Fallback."""
+    gross = "9" * 5000
+    assert poc.node_version(node_in(tmp_path, engines=f"^{gross}"), None) == "22"
+    assert poc.node_version(node_in(tmp_path / "a", engines=f">={gross}.1.2 || ^20"), None) == "20"
+    assert poc.node_version(node_in(tmp_path / "b", nvmrc=gross), None) == "22"
+    assert poc.node_version(node_in(tmp_path / "c", engines=f"~20.{gross}", nvmrc="v24"), None) == "24"
 
 
 def test_node_version_standard_und_vorgabe(tmp_path):
@@ -861,7 +878,8 @@ def test_aufraeumen_ohne_treffer(umg):
 
 def test_aufraeumen_ohne_daemon(umg, tmp_path):
     vorbereitet(umg, tmp_path)
-    umg.konfig({"ps": {"rc": 1, "stderr": "Cannot connect to the Docker daemon at unix:///x.sock. Is the docker daemon running?"},
+    umg.konfig({"version": {"rc": 1, "stderr": "Cannot connect to the Docker daemon"},
+                "ps": {"rc": 1, "stderr": "Cannot connect to the Docker daemon at unix:///x.sock. Is the docker daemon running?"},
                 "network": {"rc": 1, "stderr": "Cannot connect to the Docker daemon"},
                 "images": {"rc": 1, "stderr": "Cannot connect to the Docker daemon"}})
     r = umg.poc("aufraeumen", "--lauf", LAUF)
@@ -939,3 +957,164 @@ def test_dockerfile_und_ignore():
     assert zeilen[-1] != "USER root" and "USER root" not in zeilen
     ignore = open(os.path.join(docker, "Dockerfile.poc.dockerignore"), encoding="utf-8").read().split()
     assert any(z.endswith("node_modules") for z in ignore) and any(z.endswith(".git") for z in ignore)
+
+
+# ------------------------------------------------------------------------------------ Fix-Runde 1 (Review T3)
+
+def test_daemon_erkennung_nicht_in_container_ausgabe(umg):
+    """T3-M1: Ein Treffer in der Ausgabe des Befehls ist kein Daemon-Ausfall, solange `docker version` antwortet."""
+    umg.konfig({"exec": {"rc": 1, "stderr": "error during connect: Cannot connect to the Docker daemon (gespielt)\n"}})
+    r = umg.poc("ausfuehren", "--lauf", LAUF, "--rolle", "p1", "--", "false")
+    assert r.returncode == 1
+    assert "kategorie: docker-fehlt" not in r.stdout
+
+
+def test_daemon_erkennung_prueft_version_erneut(umg):
+    umg.konfig({"exec": {"rc": 1, "stderr": "Cannot connect to the Docker daemon\n"},
+                "version": {"rc": 1, "stderr": "Cannot connect to the Docker daemon\n"}})
+    r = umg.poc("ausfuehren", "--lauf", LAUF, "--rolle", "p1", "--", "true")
+    assert r.returncode == 3
+    assert r.stdout.splitlines()[0] == "kategorie: docker-fehlt"
+
+
+def test_daemon_erkennung_nur_bei_exit_1_und_125(umg):
+    umg.konfig({"exec": {"rc": 2, "stderr": "Cannot connect to the Docker daemon\n"},
+                "version": {"rc": 1, "stderr": "Cannot connect to the Docker daemon\n"}})
+    r = umg.poc("ausfuehren", "--lauf", LAUF, "--rolle", "p1", "--", "true")
+    assert r.returncode == 1
+    assert [a for a in umg.aufrufe() if a["args"][0] == "version"] == []
+
+
+def test_build_ausgabe_mit_daemon_text_ist_build_fehler(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    umg.konfig({"build": {"rc": 1, "stderr": "npm error: error during connect: Cannot connect to the Docker daemon\n"}})
+    r = umg.poc("bauen", "--lauf", LAUF)
+    assert r.returncode == 4
+    assert r.stdout.splitlines()[0] == "kategorie: build-fehler"
+
+
+def test_daten_mit_ungueltigem_utf8(temp_ordner, umg, tmp_path, monkeypatch, capsys):
+    """T3-M4: argv mit surrogateescape (ungültiges UTF-8) wird byte-genau durchgereicht, kein Traceback."""
+    vorbereitet(umg, tmp_path)
+    gestartet(umg)
+    for k, v in umg.env().items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(tempfile, "tempdir", str(umg.tmp))
+    roh = b"a\xffb"
+    arg = os.fsdecode(roh)
+    assert poc.main(["anfrage", "--lauf", LAUF, "--rolle", "p1", "--methode", "POST", "--pfad", "/",
+                     "--daten", arg]) == 0
+    assert anfrage_aufrufe(umg)[-1]["stdin_hex"] == roh.hex()
+
+
+def test_ausgabe_wird_gekappt(umg, tmp_path):
+    """T3-M5: 20 MiB Ausgabe sprengen weder Speicher noch Ausgabe; der Hinweis steht auf stderr."""
+    vorbereitet(umg, tmp_path)
+    gestartet(umg)
+    umg.konfig({"exec": {"flood": 20, "stdout": "ENDE\n"}})
+    r = umg.poc("ausfuehren", "--lauf", LAUF, "--rolle", "p1", "--", "cat", "gross")
+    assert r.returncode == 0
+    assert len(r.stdout) <= 70 * 1024
+    assert "gekürzt" in r.stderr
+    umg.konfig({"build": {"rc": 1, "flood": 20, "stderr": "ENDE-FEHLER\n"}})
+    r = umg.poc("bauen", "--lauf", LAUF)
+    assert r.returncode == 4
+    zeilen = r.stdout.splitlines()
+    assert zeilen[0] == "kategorie: build-fehler" and zeilen[-1] == "ENDE-FEHLER" and len(zeilen) <= 41
+    assert "gekürzt" in r.stderr
+
+
+def test_lesen_nach_kill_haengt_nicht(umg, tmp_path):
+    """T3-M5: Ein Enkelprozess, der die Pipe offen hält, blockiert nach dem Timeout nicht."""
+    fake = umg.bin / "docker"
+    fake.write_text(fake.read_text().replace("antwort = cfg.get", "if args[0] == 'exec':\n    import subprocess\n"
+                    "    subprocess.Popen(['sleep', '20'])\n    time.sleep(30)\nantwort = cfg.get", 1))
+    inicio = time.monotonic()
+    r = umg.poc("ausfuehren", "--lauf", LAUF, "--rolle", "p1", "--", "x",
+                env=umg.env(SECURITY_AUDIT_DOCKER_TIMEOUT="1"), timeout=40)
+    assert r.returncode == 1
+    assert time.monotonic() - inicio < 25
+
+
+def test_pull_never(umg, tmp_path):
+    """T3-M6: Kein Container-Start zieht Images nach; das DB-Image wird vorher gezielt geholt."""
+    vorbereitet(umg, tmp_path)
+    umg.konfig({"image inspect": {"rc": 1, "stderr": "Error: No such image"}})
+    r = umg.poc("starten", "--lauf", LAUF, "--rolle", "p1", "--start-befehl", "node s.js", "--port", "3000",
+                "--dienst", "postgres")
+    assert r.returncode == 0, r.stdout + r.stderr
+    runs = laeufe(umg)
+    assert len(runs) == 3  # DB, App, Wartecontainer
+    for a in runs:
+        assert wert(a, "--pull") == ["never"], a
+    aufrufe = [a["args"] for a in umg.aufrufe()]
+    pull = aufrufe.index(["pull", "postgres:16-alpine"])
+    assert pull < next(i for i, a in enumerate(aufrufe) if a[0] == "run" and "postgres:16-alpine" in a)
+
+
+def test_pull_nur_wenn_image_fehlt(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    r = umg.poc("starten", "--lauf", LAUF, "--rolle", "p1", "--start-befehl", "node s.js", "--port", "3000",
+                "--dienst", "postgres")
+    assert r.returncode == 0
+    assert [a for a in umg.aufrufe() if a["args"][0] == "pull"] == []
+
+
+def test_anfrage_container_ohne_pull(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    gestartet(umg)
+    assert umg.poc("anfrage", "--lauf", LAUF, "--rolle", "p1", "--pfad", "/").returncode == 0
+    assert wert(anfrage_aufrufe(umg)[0]["args"], "--pull") == ["never"]
+
+
+def test_antwort_wird_entschaerft(umg, tmp_path):
+    """T3-M8: Steuerzeichen, ANSI und unsichtbare Zeichen der Kunden-App erreichen stdout nicht roh."""
+    vorbereitet(umg, tmp_path)
+    gestartet(umg)
+    boese = "status: 200\nbody:\n\x1b[31mrot\x1b[0m\x1b]0;titel\x07 a\rb\tc \u202eX\u200b \x00 \x7f\nzweite Zeile ä\n"
+    umg.konfig({"run": {"stdout": boese}})
+    r = umg.poc("anfrage", "--lauf", LAUF, "--rolle", "p1", "--pfad", "/")
+    assert r.returncode == 0
+    for z in ("\x1b", "\x07", "\r", "\x00", "\x7f", "\u202e", "\u200b"):
+        assert z not in r.stdout
+    assert "\\x1b[31mrot" in r.stdout and "\\r" in r.stdout and "\\u202e" in r.stdout
+    assert "\tc" in r.stdout and "\nzweite Zeile ä\n" in r.stdout  # Tab und Zeilenumbrüche bleiben
+    umg.konfig({"exec": {"stdout": "\x1b[2Jweg\n", "stderr": "\x1b[1mfehler\n"}})
+    r = umg.poc("ausfuehren", "--lauf", LAUF, "--rolle", "p1", "--", "x")
+    assert "\x1b" not in r.stdout and "\x1b" not in r.stderr
+
+
+def test_daten_datei_zu_gross(umg, tmp_path):
+    """T3-M9: DATEN_MAX = 1 MiB; ein Byte mehr ist Exit 2, genau 1 MiB geht durch."""
+    vorbereitet(umg, tmp_path)
+    gestartet(umg)
+    gross = tmp_path / "gross"
+    gross.write_bytes(b"x" * (1024 * 1024 + 1))
+    basis = ["anfrage", "--lauf", LAUF, "--rolle", "p1", "--methode", "POST", "--pfad", "/"]
+    assert umg.poc(*basis, "--daten-datei", str(gross)).returncode == 2
+    assert anfrage_aufrufe(umg) == []
+    gross.write_bytes(b"x" * (1024 * 1024))
+    assert umg.poc(*basis, "--daten-datei", str(gross)).returncode == 0
+    assert len(anfrage_aufrufe(umg)[0]["stdin"]) == 1024 * 1024
+
+
+def test_lockfile_v1_version_url(tmp_path):
+    inhalt = json.dumps({"lockfileVersion": 1, "dependencies": {"a": {"version": "https://evil.test/x.tgz"}}})
+    assert poc.lockfile_pruefen(lock_in(tmp_path, inhalt)) == "lockfile-fremde-quelle"
+
+
+def test_timeouts_werden_uebergeben(temp_ordner, monkeypatch):
+    """T3-M9: ANFRAGE_TIMEOUT und EXEC_TIMEOUT gehen an _docker."""
+    poc._schreibe_atomar(os.path.join(poc._ordner(LAUF, anlegen=True), "rolle-p1.json"),
+                         {"start_befehl": "x", "port": 3000, "env": [], "dienst": None, "seed": None})
+    aufrufe = []
+
+    def fake(args, timeout, **kw):
+        aufrufe.append((args[0], timeout))
+        return poc.Ergebnis(0, b"", b"")
+
+    monkeypatch.setattr(poc, "_docker", fake)
+    assert poc.main(["anfrage", "--lauf", LAUF, "--rolle", "p1", "--pfad", "/"]) == 0
+    assert poc.main(["ausfuehren", "--lauf", LAUF, "--rolle", "p1", "--", "true"]) == 0
+    assert ("run", poc.ANFRAGE_TIMEOUT) in aufrufe and ("exec", poc.EXEC_TIMEOUT) in aufrufe
+    assert poc.ANFRAGE_TIMEOUT == 45 and poc.EXEC_TIMEOUT == 120

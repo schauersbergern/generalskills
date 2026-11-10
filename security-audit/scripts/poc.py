@@ -25,7 +25,9 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import unicodedata
 from typing import NamedTuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -45,11 +47,14 @@ ANFRAGE_TIMEOUT = 45
 WARTEN_SEKUNDEN = 60
 WARTEN_TIMEOUT = 90
 SEED_TIMEOUT = 180
+PULL_TIMEOUT = 300
 EXEC_TIMEOUT = 120
 DB_WARTEN = 60
 TAIL_ZEILEN = 40
 ZEILE_MAX = 300
 DATEN_MAX = 1024 * 1024
+LESE_MAX = 4 * 1024 * 1024      # je Strom beim Lesen von docker
+AUSGABE_MAX = 64 * 1024         # was anfrage/ausfuehren höchstens auf stdout ausgeben
 APP_PORT_DB = 5432
 POSTGRES_IMAGE = "postgres:16-alpine"
 DB_URL = "postgres://poc:poc@db:5432/poc"
@@ -58,7 +63,7 @@ LAUF_RE = re.compile(r"[0-9a-f]{8}")
 ROLLE_RE = re.compile(r"p[12]")
 ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 HEADER_NAME_RE = re.compile(r"[A-Za-z0-9!#$%&'*+.^_`|~-]+")
-STEUERZEICHEN = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+DAEMON_EXIT = (1, 125)
 DAEMON_WEG = ("cannot connect to the docker daemon", "error during connect", "is the docker daemon running",
               "docker.sock: connect", "failed to connect to the docker api")
 
@@ -178,6 +183,7 @@ class Ergebnis(NamedTuple):
     rc: int | None  # None = Timeout
     out: bytes
     err: bytes
+    gekuerzt: bool = False
 
     @property
     def text(self) -> str:
@@ -196,10 +202,77 @@ def _timeout(sekunden: int) -> int:
     return min(sekunden, grenze) if grenze > 0 else sekunden
 
 
+class _Puffer:
+    """Liest einen Strom mit Obergrenze (`ende`: die letzten, sonst die ersten `grenze` Bytes); der Rest wird
+    verworfen, aber weiter gelesen, damit docker nie an einer vollen Pipe hängt."""
+
+    def __init__(self, strom, grenze: int, ende: bool):
+        self.daten = bytearray()
+        self.gekuerzt = False
+        self._grenze = grenze
+        self._ende = ende
+        self.thread = threading.Thread(target=self._lesen, args=(strom,), daemon=True)
+        self.thread.start()
+
+    def _lesen(self, strom) -> None:
+        fd = strom.fileno()
+        while True:
+            try:
+                teil = os.read(fd, 65536)
+            except OSError:
+                return
+            if not teil:
+                return
+            if self._ende:
+                self.daten += teil
+                if len(self.daten) > 2 * self._grenze:
+                    del self.daten[:len(self.daten) - self._grenze]
+                    self.gekuerzt = True
+            else:
+                frei = self._grenze - len(self.daten)
+                if frei > 0:
+                    self.daten += teil[:frei]
+                if len(teil) > frei:
+                    self.gekuerzt = True
+
+    def ergebnis(self) -> tuple[bytes, bool]:
+        self.thread.join(timeout=5)  # ein Enkelprozess mit offener Pipe darf nicht blockieren
+        daten, gekuerzt = bytes(self.daten), self.gekuerzt
+        if self._ende and len(daten) > self._grenze:
+            daten, gekuerzt = daten[-self._grenze:], True
+        return daten, gekuerzt
+
+
+def _schreiben(strom, daten: bytes) -> None:
+    try:
+        strom.write(daten)
+    except OSError:
+        pass
+    finally:
+        try:
+            strom.close()
+        except OSError:
+            pass
+
+
+def _beenden(p: subprocess.Popen) -> None:
+    p.terminate()
+    try:
+        p.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        try:
+            p.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+
+
 def _docker(args: list[str], timeout: int, eingabe: bytes | None = None, env: dict | None = None,
-            begrenzen: bool = True) -> Ergebnis:
-    """docker ohne Shell mit Timeout (erst SIGTERM, dann SIGKILL). Wirft DockerFehlt, wenn docker fehlt oder
-    der Daemon nicht erreichbar ist."""
+            begrenzen: bool = True, anfang: bool = False) -> Ergebnis:
+    """docker ohne Shell mit Timeout (erst SIGTERM, dann SIGKILL) und Lesegrenze (LESE_MAX je Strom; behalten
+    wird das Ende, mit `anfang` der Anfang). Wirft DockerFehlt, wenn docker fehlt oder der Daemon nicht erreichbar
+    ist: bei Exit 1/125 und Treffer in stderr nur, wenn `docker version` danach ebenfalls scheitert (die Ausgabe von
+    Build und Container stammt vom Kunden und beweist nichts)."""
     umgebung = dict(os.environ)
     umgebung.update(env or {})
     try:
@@ -207,20 +280,23 @@ def _docker(args: list[str], timeout: int, eingabe: bytes | None = None, env: di
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=umgebung)
     except OSError as e:
         raise DockerFehlt(f"docker nicht startbar: {e}") from e
-    grenze = _timeout(timeout) if begrenzen else timeout
+    out, err = _Puffer(p.stdout, LESE_MAX, not anfang), _Puffer(p.stderr, LESE_MAX, not anfang)
+    if eingabe is not None:
+        threading.Thread(target=_schreiben, args=(p.stdin, eingabe), daemon=True).start()
     try:
-        out, err = p.communicate(eingabe, timeout=grenze)
-        r = Ergebnis(p.returncode, out, err)
+        rc: int | None = p.wait(timeout=_timeout(timeout) if begrenzen else timeout)
     except subprocess.TimeoutExpired:
-        p.terminate()
-        try:
-            out, err = p.communicate(timeout=10)
-        except subprocess.TimeoutExpired:
-            p.kill()
-            out, err = p.communicate()
-        r = Ergebnis(None, out, err)
-    if r.rc not in (0, None) and any(m in r.text.lower() for m in DAEMON_WEG):
-        raise DockerFehlt(_tail(r.text, 3))
+        _beenden(p)
+        rc = None
+    (o, ko), (e, ke) = out.ergebnis(), err.ergebnis()
+    r = Ergebnis(rc, o, e, ko or ke)
+    if r.gekuerzt:
+        print(f"docker {args[0]}: Ausgabe auf {LESE_MAX // 1024 // 1024} MiB gekürzt", file=sys.stderr)
+    if (rc in DAEMON_EXIT and args[0] != "version"
+            and any(m in e.decode("utf-8", "replace").lower() for m in DAEMON_WEG)):
+        v = _docker(["version", "--format", "{{.Server.Version}}"], VERSION_TIMEOUT)
+        if not v.ok:
+            raise DockerFehlt(_tail(e.decode("utf-8", "replace"), 3))
     return r
 
 
@@ -232,9 +308,35 @@ def _daemon_pruefen() -> str:
     return r.out.decode("utf-8", "replace").strip()
 
 
+def _entschaerfen(text: str) -> str:
+    """Kundenstämmigen Text für die Ausgabe entschärfen (fließt in den LLM-Kontext): Steuer- und Formatzeichen
+    (ESC, ANSI, NUL, CR, Bidi, Zero-Width, Zeilentrenner) als Escape-Sequenz; `\\n` und `\\t` bleiben."""
+    aus = []
+    for ch in text:
+        if ch in "\n\t":
+            aus.append(ch)
+        elif ch == "\r":
+            aus.append("\\r")
+        elif unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Zl", "Zp"):
+            o = ord(ch)
+            aus.append(f"\\x{o:02x}" if o < 0x100 else f"\\u{o:04x}" if o < 0x10000 else f"\\U{o:08x}")
+        else:
+            aus.append(ch)
+    return "".join(aus)
+
+
 def _tail(text: str, n: int = TAIL_ZEILEN) -> str:
-    zeilen = [STEUERZEICHEN.sub("", z.rstrip())[:ZEILE_MAX] for z in text.splitlines() if z.strip()]
+    zeilen = [_entschaerfen(z.rstrip())[:ZEILE_MAX] for z in text.splitlines() if z.strip()]
     return "\n".join(zeilen[-n:])
+
+
+def _gib_aus(r: Ergebnis) -> None:
+    """stdout/stderr eines Kunden-Containers entschärft und auf AUSGABE_MAX Bytes begrenzt ausgeben."""
+    for strom, ziel in ((r.out, sys.stdout), (r.err, sys.stderr)):
+        text = strom[:AUSGABE_MAX].decode("utf-8", "replace")
+        ziel.write(_entschaerfen(text))
+        if len(strom) > AUSGABE_MAX:
+            print(f"\n[Ausgabe auf {AUSGABE_MAX // 1024} KiB gekürzt]", file=sys.stderr)
 
 
 def _ausgabe(text: str) -> None:
@@ -333,7 +435,7 @@ _VERGLEICH = re.compile(r"(\^|~|>=|<=|>|<|=)?v?([0-9]+|[xX*])(?:\.([0-9]+|[xX*])
 
 
 def _teil(s: str | None) -> int | None:
-    return None if s is None or s in ("x", "X", "*") else int(s)
+    return None if s is None or s in ("x", "X", "*") else int(s)  # ValueError bei über 4300 Ziffern: s. _vergleich_passt
 
 
 def _vergleich_passt(v: tuple[int, int, int], token: str) -> bool | None:
@@ -342,7 +444,10 @@ def _vergleich_passt(v: tuple[int, int, int], token: str) -> bool | None:
     if not m:
         return None
     op = m.group(1) or "^"
-    a, b, c = (_teil(m.group(i)) for i in (2, 3, 4))
+    try:
+        a, b, c = (_teil(m.group(i)) for i in (2, 3, 4))
+    except ValueError:
+        return None
     if a is None:
         return True
     if b is None:
@@ -374,6 +479,9 @@ def _vergleich_passt(v: tuple[int, int, int], token: str) -> bool | None:
 def _range_erfuellt(v: tuple[int, int, int], bereich: str) -> bool:
     """Minimale semver-Auswertung: `||`, Leerzeichen = UND, ^ ~ >= > <= < = x * und nackte Version (= ^)."""
     for alternative in bereich.split("||"):
+        bis = re.fullmatch(r"\s*(\S+)\s+-\s+(\S+)\s*", alternative)  # Bindestrich-Bereich `a - b`
+        if bis:
+            alternative = f">={bis.group(1)} <={bis.group(2)}"
         text = re.sub(r"(\^|~|>=|<=|>|<|=)\s+", r"\1", alternative.strip())
         tokens = text.split()
         ergebnisse = [_vergleich_passt(v, t) for t in tokens]
@@ -397,13 +505,17 @@ def node_version(quelle: str, vorgabe: str | None) -> str:
         for major in KANDIDATEN:
             if _range_erfuellt((major, 99, 99), engines):
                 return str(major)
+        # Bereiche, die nur einzelne Minor-/Patch-Versionen treffen (~20.11, =20.11.0, <=20.11.0).
+        for major in KANDIDATEN:
+            if any(_range_erfuellt((major, m, pa), engines) for m in range(100) for pa in (0, 99)):
+                return str(major)
     try:
         with open(os.path.join(quelle, ".nvmrc"), encoding="utf-8", errors="replace") as f:
             nvmrc = f.readline().strip()
     except OSError:
         nvmrc = ""
     m = re.fullmatch(r"v?(\d+)(?:\.\d+){0,2}", nvmrc)
-    if m and int(m.group(1)) in KANDIDATEN:
+    if m and len(m.group(1)) <= 3 and int(m.group(1)) in KANDIDATEN:
         return m.group(1)
     return STANDARD_NODE
 
@@ -486,9 +598,9 @@ def _rolle_entfernen(lauf: str, rolle: str) -> None:
 def _anfrage_container(lauf: str, rolle: str, argumente: list[str], daten: bytes, timeout: int) -> Ergebnis:
     """Request-Container im internen Netz der Rolle; Daten per stdin, bei Timeout wird der Container entfernt."""
     name = f"security-audit-{lauf}-{rolle}-anfrage-{secrets.token_hex(3)}"
-    befehl = ["run", "-i", "--rm", "--name", name, "--network", _netz(lauf, rolle), *HAERTUNG_APP,
+    befehl = ["run", "-i", "--rm", "--pull", "never", "--name", name, "--network", _netz(lauf, rolle), *HAERTUNG_APP,
               _image(lauf), "node", "/poc/anfrage.mjs", *argumente]
-    r = _docker(befehl, timeout, eingabe=daten)
+    r = _docker(befehl, timeout, eingabe=daten, anfang=True)
     if r.rc is None:
         _docker(["rm", "-f", name], KURZ_TIMEOUT)
     return r
@@ -508,7 +620,11 @@ def _starte(lauf: str, rolle: str, p: dict) -> int:
     if not r.ok and "already exists" not in r.text:
         return _start_fehler(lauf, rolle, f"Netz {netz} nicht erstellt: {r.text}")
     if p["dienst"] == "postgres":
-        r = _docker(["run", "-d", "--name", db, "--network", netz, "--network-alias", "db", *HAERTUNG_DB,
+        if not _docker(["image", "inspect", POSTGRES_IMAGE], KURZ_TIMEOUT).ok:
+            r = _docker(["pull", POSTGRES_IMAGE], PULL_TIMEOUT)
+            if not r.ok:
+                return _start_fehler(lauf, rolle, f"{POSTGRES_IMAGE} nicht ladbar: {r.text}")
+        r = _docker(["run", "-d", "--pull", "never", "--name", db, "--network", netz, "--network-alias", "db", *HAERTUNG_DB,
                      "-e", "POSTGRES_USER=poc", "-e", "POSTGRES_PASSWORD=poc", "-e", "POSTGRES_DB=poc",
                      POSTGRES_IMAGE], 120)
         if not r.ok:
@@ -525,7 +641,7 @@ def _starte(lauf: str, rolle: str, p: dict) -> int:
     umgebung = ["-e", "HOST=0.0.0.0", "-e", f"PORT={p['port']}"]
     for e in p["env"]:
         umgebung += ["-e", e]
-    r = _docker(["run", "-d", "--name", app, "--network", netz, "--network-alias", "app", *HAERTUNG_APP, *umgebung,
+    r = _docker(["run", "-d", "--pull", "never", "--name", app, "--network", netz, "--network-alias", "app", *HAERTUNG_APP, *umgebung,
                  _image(lauf), "sh", "-c", p["start_befehl"]], 120)
     if not r.ok:
         return _start_fehler(lauf, rolle, f"App nicht gestartet: {r.text}")
@@ -557,9 +673,8 @@ def cmd_neustart(a: argparse.Namespace) -> int:
 
 
 def cmd_ausfuehren(a: argparse.Namespace) -> int:
-    r = _docker(["exec", f"{_netz(a.lauf, a.rolle)}-app", *a.kommando], EXEC_TIMEOUT)
-    sys.stdout.write(r.out.decode("utf-8", "replace"))
-    sys.stderr.write(r.err.decode("utf-8", "replace"))
+    r = _docker(["exec", f"{_netz(a.lauf, a.rolle)}-app", *a.kommando], EXEC_TIMEOUT, anfang=True)
+    _gib_aus(r)
     if r.rc is None:
         print("ausfuehren: Zeitüberschreitung", file=sys.stderr)
         return 1
@@ -573,7 +688,7 @@ def cmd_anfrage(a: argparse.Namespace) -> int:
     z = _lade_rolle(a.lauf, a.rolle)
     daten = b""
     if a.daten is not None:
-        daten = a.daten.encode("utf-8")
+        daten = os.fsencode(a.daten)  # argv kann ungültiges UTF-8 (surrogateescape) enthalten
     elif a.daten_datei:
         try:
             with open(a.daten_datei, "rb") as f:
@@ -586,8 +701,7 @@ def cmd_anfrage(a: argparse.Namespace) -> int:
     for h in a.header or []:
         argumente += ["--header", h]
     r = _anfrage_container(a.lauf, a.rolle, argumente, daten, ANFRAGE_TIMEOUT)
-    sys.stdout.write(r.out.decode("utf-8", "replace"))
-    sys.stderr.write(r.err.decode("utf-8", "replace"))
+    _gib_aus(r)
     if r.rc is None:
         print("anfrage: Zeitüberschreitung", file=sys.stderr)
         return 1
