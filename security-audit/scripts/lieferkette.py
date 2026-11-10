@@ -4,6 +4,7 @@
 Aufruf (immer als einzelner einfacher Befehl, siehe Netzregel):
   python3 -I lieferkette.py secrets --lauf <id> --repo <wurzel> --quelle <arbeitskopie> --sha <commit>
   python3 -I lieferkette.py abhaengigkeiten --lauf <id> --quelle <arbeitskopie>
+  python3 -I lieferkette.py lieferkette --lauf <id> --quelle <arbeitskopie>
 
 `secrets` (Budget 300 s, davon `gitleaks dir` samt Schwärzung zuerst höchstens 120 s) schwärzt zuerst jede Secret-Fundstelle der
 Arbeitskopie (gleiche Länge, Zeichen `*`, `\\n` und `\\r` bleiben), setzt dann den Marker `<zustand>/lieferkette/geschwaerzt` und
@@ -25,6 +26,14 @@ wenn der Katalog nicht geladen werden konnte), dazu `hinweise`. Der KEV-Katalog 
 (Cache `<zustand>/lieferkette/kev.json`); `SECURITY_AUDIT_KEV_DATEI` ersetzt den Download durch eine lokale Datei. Aus Kundendateien
 erscheinen nur Paketnamen, Versionen und Pfade.
 
+`lieferkette` (Budget 60 s, `SECURITY_AUDIT_LK_BUDGET` darf nur verkürzen) prüft die Arbeitskopie rein statisch (kein Kindprozess, kein
+Netz, keine Schreibzugriffe; `os.walk` ohne Symlinks, `node_modules` und `.git` übersprungen, nur reguläre Dateien, Textdateien
+höchstens 1 MiB). Ausgabe (JSON auf stdout): `entwuerfe` und `hinweise`. Ein Entwurf ist ein vollständiger Befund ohne `id`
+(die vergibt die Hauptsession) mit `werkzeug: lieferkette`, `kategorie: A03`, `status: unbestätigt` und `code_pfad` mit einem
+Eintrag; Klassen: `lockfile-fehlt` (P2), `installation-ohne-lockfile-treue` (P2), `install-skripte-offen` (P3). Befehlszeilen
+aus dem Repo stehen nie in der Ausgabe (nur der erkannte Befehl), Paketnamen nur, wenn sie dem npm-Namensmuster entsprechen.
+Läuft das Budget ab, bleiben die bis dahin gefundenen Entwürfe erhalten (Hinweis „Lieferketten-Prüfung abgebrochen (Zeitbudget)“).
+
 Exit-Codes: 0 ok (auch wenn gitleaks fehlt: `{"werkzeug": "gitleaks", "fehlt": true, ...}`, dann ohne Marker), 2 ungültige
 Argumente (auch `--quelle` ≠ Arbeitskopie des Laufs), 4 Schwärzung gescheitert (`kategorie: schwaerzung-fehlgeschlagen`, kein
 Marker), 1 sonstiger Fehler (z. B. Aufräumen unvollständig).
@@ -41,6 +50,7 @@ import functools
 import json
 import os
 import re
+import shlex
 import stat
 import sys
 import time
@@ -1178,6 +1188,653 @@ def cmd_abhaengigkeiten(a: argparse.Namespace) -> int:
     return 0
 
 
+# ------------------------------------------------------------------------------------ lieferkette: statische Prüfung
+
+LK_BUDGET = 60                 # Sekunden für `lieferkette` insgesamt (rein statisch, kein Kindprozess)
+TEXT_MAX = 1024 * 1024         # Bytes je Textdatei (Dockerfile, Workflow, Makefile, package.json, Konfiguration)
+MAX_TEXTDATEIEN = 500          # so viele Textdateien werden höchstens ausgewertet (Rest als Hinweis)
+MAX_EINTRAEGE = 200_000        # Verzeichniseinträge, die die Suche in der Arbeitskopie höchstens besucht
+MAX_ENTWUERFE = 200            # Entwürfe in der Ausgabe
+MAX_HINWEISE = 50              # Hinweise in der Ausgabe (feindliche Arbeitskopien erzeugen sonst beliebig viele)
+MAX_PAKETNAMEN = 20            # Paketnamen in der Beschreibung von `install-skripte-offen`
+PAKETNAME_MAX = 214
+ZEIT_HINWEIS = "Lieferketten-Prüfung abgebrochen (Zeitbudget)"
+LIEFERKETTE_LOCKFILES = LOCKFILE_NAMEN + ("bun.lock", "bun.lockb")
+ABHAENGIGKEIT_FELDER = ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies")
+BEFUND_GRUND = "Werkzeugbefund, kein Request-Beleg möglich"
+YARN_V1_MARKE = b"# yarn lockfile v1"
+YARN_V1_KOPF = 2048
+NPM_PAKETNAME = re.compile(r"(?:@[a-z0-9~-][a-z0-9._~-]*/)?[a-z0-9~-][a-z0-9._~-]*", re.ASCII)
+DOCKER_ANDERE = frozenset(("from", "copy", "add", "env", "arg", "cmd", "entrypoint", "workdir", "label", "expose", "user",
+                           "volume", "healthcheck", "shell", "stopsignal", "maintainer"))
+YAML_PRAEFIX = re.compile(r"(?:-\s+|(?:run|script|before_script|after_script|command|commands)\s*:\s*)")
+ENV_ZUWEISUNG = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+BEFEHLSTRENNER = re.compile(r"&&|\|\||;|\|")
+KURZ_GLOBAL = re.compile(r"-[A-Za-z]*g[A-Za-z]*")
+WERT_OPTIONEN = frozenset(("--prefix", "-C", "--cwd", "--workspace", "-w", "--registry", "--cache", "--loglevel",
+                           "--userconfig", "--filter", "-F", "--dir", "--modules-folder"))
+VORSATZ_BEFEHLE = ("sudo", "env", "exec", "time", "nohup")
+YARNRC_SKRIPTE_AUS = re.compile(r"enableScripts\s*:\s*[\"']?false[\"']?\s*(?:#.*)?")
+PNPM_LISTE = re.compile(r"\s*(?:only|never)BuiltDependencies\s*:")
+KONFIG_NAMEN_LK = (".npmrc", ".yarnrc.yml", "pnpm-workspace.yaml")
+KLASSEN_REIHENFOLGE = {"lockfile-fehlt": 0, "installation-ohne-lockfile-treue": 1, "install-skripte-offen": 2}
+
+
+class _Zeit(Exception):
+    """Das Zeitbudget von `lieferkette` ist aufgebraucht."""
+
+
+class _Sammler:
+    """Sammelt Entwürfe und Hinweise (beide begrenzt); Entwürfe bleiben auch erhalten, wenn das Budget abläuft."""
+
+    def __init__(self) -> None:
+        self.entwuerfe: list[dict] = []
+        self.hinweise: list[str] = []
+        self.zu_viele_entwuerfe = 0
+        self.zu_viele_hinweise = 0
+        self._gesehen: set[str] = set()
+
+    def hinweis(self, text: str) -> None:
+        if text in self._gesehen:
+            return
+        self._gesehen.add(text)
+        if len(self.hinweise) < MAX_HINWEISE:
+            self.hinweise.append(text)
+        else:
+            self.zu_viele_hinweise += 1
+
+    def entwurf(self, e: dict) -> None:
+        if len(self.entwuerfe) < MAX_ENTWUERFE:
+            self.entwuerfe.append(e)
+        else:
+            self.zu_viele_entwuerfe += 1
+
+    def abschluss(self) -> list[str]:
+        self.entwuerfe.sort(key=lambda e: (KLASSEN_REIHENFOLGE[e["klasse"]], e["datei"], e["zeile"]))
+        h = list(self.hinweise)
+        if self.zu_viele_entwuerfe:
+            h.append(f"{len(self.entwuerfe) + self.zu_viele_entwuerfe} Entwürfe gefunden, nur die ersten {MAX_ENTWUERFE} ausgegeben")
+        if self.zu_viele_hinweise:
+            h.append(f"{self.zu_viele_hinweise} weitere Hinweise ausgelassen")
+        return h
+
+
+def _zeitcheck(ende: float) -> None:
+    if time.monotonic() >= ende:
+        raise _Zeit()
+
+
+def _sauber(name: str) -> bool:
+    """Name ohne Steuer-, Format- oder unsichtbare Zeichen (und ohne ungültiges UTF-8)."""
+    return (name.isascii() and name.isprintable()) or _t(name, 10**9) == name
+
+
+def _eltern(ordner: str) -> list[str]:
+    """`a/b` -> [`a/b`, `a`, ``]: der Ordner und alle Elternordner bis zur Wurzel der Arbeitskopie (leerer String)."""
+    teile = ordner.split("/") if ordner else []
+    return ["/".join(teile[:n]) for n in range(len(teile), -1, -1)]
+
+
+def _ordner_von(rel: str) -> str:
+    return rel.rsplit("/", 1)[0] if "/" in rel else ""
+
+
+class _Baum:
+    """Ergebnis der Suche: reguläre Dateien der Arbeitskopie nach Art (relativer Pfad `/`, Größe)."""
+
+    def __init__(self) -> None:
+        self.lockfiles: list[tuple[str, int]] = []       # alle erkannten Lockfiles (auch bun)
+        self.pakete: list[tuple[str, int]] = []          # package.json
+        self.texte: list[tuple[str, str, int]] = []      # (rel, art, größe) mit art docker | ci | make
+        self.konfig: dict[tuple[str, str], tuple[str, int]] = {}    # (Ordner, Name) -> (rel, größe)
+
+
+def _art(name: str, ordner: str) -> str | None:
+    klein = name.lower()
+    if klein.startswith("dockerfile") or klein.endswith(".dockerfile"):
+        return "docker"
+    if name in ("Makefile", "makefile", "GNUmakefile"):
+        return "make"
+    if name == ".gitlab-ci.yml":
+        return "ci"
+    if klein.endswith((".yml", ".yaml")) and (ordner == ".github/workflows" or ordner.endswith("/.github/workflows")):
+        return "ci"
+    if name == "package.json":
+        return "pkg"
+    if name in LIEFERKETTE_LOCKFILES:
+        return "lock"
+    if name in KONFIG_NAMEN_LK:
+        return "konfig"
+    return None
+
+
+def _baum_suchen(quelle: str, ende: float, s: _Sammler) -> _Baum:
+    """`os.walk` ohne Symlinks; `node_modules` und `.git` werden nicht betreten, nur reguläre Dateien, Pfade mit Steuerzeichen
+    werden übersprungen und gezählt."""
+    baum = _Baum()
+    besucht = 0
+    steuer = 0
+    for ordner, unter, dateien in os.walk(quelle):
+        _zeitcheck(ende)
+        rel_ordner = "" if ordner == quelle else os.path.relpath(ordner, quelle).replace(os.sep, "/")
+        behalten = []
+        for u in sorted(unter):
+            if u in ("node_modules", ".git"):
+                continue
+            if _sauber(u):
+                behalten.append(u)
+            else:
+                steuer += 1
+        unter[:] = behalten
+        for name in sorted(dateien):
+            besucht += 1
+            if besucht > MAX_EINTRAEGE:
+                s.hinweis(f"Suche nach {MAX_EINTRAEGE} Einträgen abgebrochen: weitere Dateien nicht geprüft")
+                return _steuer_hinweis(baum, steuer, s)
+            art = _art(name, rel_ordner)
+            if art is None:
+                continue
+            if not _sauber(name):
+                steuer += 1
+                continue
+            rel = f"{rel_ordner}/{name}" if rel_ordner else name
+            try:
+                st = os.lstat(os.path.join(ordner, name))
+            except OSError:
+                continue
+            if not stat.S_ISREG(st.st_mode):               # Symlinks, FIFOs, Geräte: nie lesen
+                continue
+            if art == "lock":
+                baum.lockfiles.append((rel, st.st_size))
+            elif art == "pkg":
+                baum.pakete.append((rel, st.st_size))
+            elif art == "konfig":
+                baum.konfig[(rel_ordner, name)] = (rel, st.st_size)
+            else:
+                baum.texte.append((rel, art, st.st_size))
+    return _steuer_hinweis(baum, steuer, s)
+
+
+def _steuer_hinweis(baum: _Baum, steuer: int, s: _Sammler) -> _Baum:
+    if steuer:
+        s.hinweis(f"{steuer} Pfade mit Steuerzeichen oder ungültigen Zeichen übersprungen")
+    return baum
+
+
+def _lese_text(quelle: str, rel: str, groesse: int, s: _Sammler, grenze: int = TEXT_MAX) -> str | None:
+    """Textdatei (UTF-8 mit Ersatzzeichen) oder None: zu groß (Hinweis) oder nicht lesbar (Ausnahme nach oben)."""
+    if groesse > grenze:
+        s.hinweis(f"{rel}: zu groß (> {grenze // (1024 * 1024)} MiB), übersprungen")
+        return None
+    return _lese_datei(os.path.join(quelle, rel))[:grenze].decode("utf-8", "replace")
+
+
+def _kopf_lesen(pfad: str, n: int) -> bytes:
+    fd = os.open(pfad, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
+    with os.fdopen(fd, "rb") as f:
+        return f.read(n)
+
+
+def _je_datei(s: _Sammler, rel: str, fn):
+    """Ruft `fn()`; jede Ausnahme außer dem Zeitbudget wird zum Hinweis (nur der Typ, nie Inhalte oder Meldung)."""
+    try:
+        return fn()
+    except _Zeit:
+        raise
+    except Exception as e:
+        s.hinweis(f"{_t(rel)}: nicht auswertbar ({type(e).__name__})")
+        return None
+
+
+# ------------------------------------------------------------------------------------ lieferkette: Befehle erkennen
+
+class _Aufruf(NamedTuple):
+    zeile: int
+    pm: str                      # npm | pnpm | yarn
+    label: str | None            # erkannter Befehl für die Meldung; None: lockfile-treu oder kein Install-Befehl
+    skripte_aus: bool | None     # nur npm-Installationen (install/i/ci, nicht global): trägt `--ignore-scripts`?
+
+
+def _logische_zeilen(text: str) -> list[tuple[int, str]]:
+    """[(erste physische Zeile, Text)]; `\\` am Zeilenende verbindet mit der nächsten Zeile."""
+    erg: list[tuple[int, str]] = []
+    puffer: str | None = None
+    start = 0
+    for nr, z in enumerate(text.split("\n"), 1):
+        z = z.rstrip("\r")
+        if puffer is None:
+            start, puffer = nr, ""
+        rest = z.rstrip()
+        if rest.endswith("\\") and not (puffer == "" and rest.lstrip().startswith("#")):
+            puffer += rest[:-1] + " "
+            continue
+        erg.append((start, puffer + z))
+        puffer = None
+    if puffer is not None:
+        erg.append((start, puffer))
+    return erg
+
+
+def _tokenisieren(teil: str) -> list[str]:
+    try:
+        return shlex.split(teil, posix=True)
+    except ValueError:
+        return teil.split()
+
+
+def _ohne_vorsatz(tokens: list[str]) -> list[str]:
+    """Führende Make-Präfixe (`@`, `-`, `+`), Umgebungszuweisungen und `sudo`/`env`/`exec`/`time` übergehen."""
+    tokens = list(tokens)
+    if tokens:
+        tokens[0] = tokens[0].lstrip("@-+")
+    while tokens and not tokens[0]:
+        tokens.pop(0)
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if ENV_ZUWEISUNG.match(t):
+            i += 1
+        elif t in VORSATZ_BEFEHLE:
+            i += 1
+            while i < len(tokens) and tokens[i].startswith("-"):
+                i += 1
+        else:
+            break
+    return tokens[i:]
+
+
+def _befehle(zeile: str, art: str, tiefe: int = 0) -> list[list[str]]:
+    """Befehlssegmente (Token-Listen) einer logischen Zeile; Präfixe wie Docker-`RUN`, YAML-`- `/`run:`/`script:` entfernt."""
+    s = zeile.strip()
+    if not s or s.startswith("#"):
+        return []
+    if art == "ci":
+        for _ in range(4):
+            m = YAML_PRAEFIX.match(s)
+            if not m:
+                break
+            s = s[m.end():].lstrip()
+        if len(s) >= 2 and s[0] in "\"'" and s[-1] == s[0]:
+            s = s[1:-1]
+    if art == "docker":
+        wort, _, rest = s.partition(" ")
+        if wort.lower() == "onbuild":
+            wort, _, rest = rest.lstrip().partition(" ")
+        if wort.lower() in DOCKER_ANDERE:
+            return []
+        if wort.lower() == "run":
+            s = re.sub(r"^(?:--\S+\s+)+", "", rest.lstrip())
+            if s.startswith("["):
+                try:
+                    liste = json.loads(s)
+                except (ValueError, RecursionError):
+                    liste = None
+                if isinstance(liste, list) and liste and all(isinstance(x, str) for x in liste):
+                    return [list(liste)]
+    segmente = [_ohne_vorsatz(_tokenisieren(t)) for t in BEFEHLSTRENNER.split(s)]
+    erg = []
+    for tok in segmente:
+        if tiefe < 2 and len(tok) >= 3 and tok[0] in ("sh", "bash") and tok[1] in ("-c", "-lc", "-ec"):
+            erg.extend(_befehle(tok[2], "shell", tiefe + 1))
+        elif tok:
+            erg.append(tok)
+    return erg
+
+
+def _bewerte(tok: list[str]) -> tuple[str, str | None, bool | None] | None:
+    """(Paketmanager, Label, skripte_aus) für npm-, pnpm- und yarn-Befehle, die installieren; sonst None. Label None: der Aufruf
+    ist lockfile-treu (`npm ci`, `--frozen-lockfile`, `--immutable`) oder ein Sonderfall (global, nur Lockfile)."""
+    pm = tok[0]
+    if pm not in ("npm", "pnpm", "yarn"):
+        return None
+    args = tok[1:]
+    flags = {a.split("=", 1)[0] for a in args if a.startswith("-")}
+    sub = None
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a.startswith("-"):
+            i += 2 if (a in WERT_OPTIONEN and "=" not in a) else 1
+            continue
+        sub = a
+        break
+    ist_global = bool({"--global", "--package-lock-only", "--lockfile-only"} & flags) or "--location=global" in args or \
+        any(KURZ_GLOBAL.fullmatch(a) for a in args if not a.startswith("--"))
+    if pm == "npm":
+        if sub not in ("install", "i", "ci", "clean-install") or ist_global:
+            return None
+        aus = "--ignore-scripts" in args or "--ignore-scripts=true" in args
+        return pm, (f"npm {sub}" if sub in ("install", "i") else None), aus
+    if sub is None and flags & {"--version", "-v", "--help", "-h"}:
+        return None
+    if pm == "pnpm":
+        if sub not in (None, "install", "i") or ist_global:
+            return None
+        treu = any(a == "--frozen-lockfile" or a.startswith("--frozen-lockfile=") for a in args)
+        return pm, None if treu else ("nacktes `pnpm`" if sub is None else f"pnpm {sub}"), None
+    if sub not in (None, "install") or ist_global:
+        return None
+    treu = bool({"--frozen-lockfile", "--immutable"} & flags)
+    return pm, None if treu else ("nacktes `yarn`" if sub is None else "yarn install"), None
+
+
+def _aufrufe_von(zeile: int, befehle: list[list[str]]) -> list[_Aufruf]:
+    erg = []
+    for tok in befehle:
+        b = _bewerte(tok)
+        if b is not None:
+            pm, label, aus = b
+            erg.append(_Aufruf(zeile, pm, label if label is None or label.startswith("nacktes") else f"`{label}`", aus))
+    return erg
+
+
+def _installationen_in(rel: str, text: str, art: str) -> list[_Aufruf]:
+    """Install-Aufrufe in Dockerfile, CI-Datei oder Makefile (`art` docker | ci | make), je Befehlssegment."""
+    erg: list[_Aufruf] = []
+    for zeile, logisch in _logische_zeilen(text):
+        erg.extend(_aufrufe_von(zeile, _befehle(logisch, art)))
+    return erg
+
+
+def _skript_zeilen(text: str) -> dict[str, int]:
+    """Erste Zeile je Schlüsselname im package.json-Text (Schlüssel nach `"scripts"` bevorzugt, sonst die erste überhaupt)."""
+    muster = re.compile(r'\s*"((?:[^"\\]|\\.)*)"\s*:')
+    nach: dict[str, int] = {}
+    alle: dict[str, int] = {}
+    ab = None
+    for nr, z in enumerate(text.splitlines(), 1):
+        m = muster.match(z)
+        if not m:
+            continue
+        try:
+            name = json.loads(f'"{m.group(1)}"')
+        except ValueError:
+            continue
+        if name == "scripts" and ab is None:
+            ab = nr
+        alle.setdefault(name, nr)
+        if ab is not None and nr > ab:
+            nach.setdefault(name, nr)
+    return {**alle, **nach}
+
+
+def _skript_aufrufe(text: str, daten: dict) -> list[_Aufruf]:
+    scripts = daten.get("scripts")
+    if not isinstance(scripts, dict):
+        return []
+    zeilen = _skript_zeilen(text)
+    erg: list[_Aufruf] = []
+    for name, wert in scripts.items():
+        if not isinstance(wert, str):
+            continue
+        zeile = zeilen.get(name, 1) if isinstance(name, str) else 1
+        for teil in wert.splitlines():
+            erg.extend(_aufrufe_von(zeile, _befehle(teil, "skript")))
+    return erg
+
+
+# ------------------------------------------------------------------------------------ lieferkette: Lockfiles
+
+def _npm_skript_pakete(text: str) -> list[tuple[str, str]]:
+    """(Name, Version) der Pakete mit `"hasInstallScript": true` in einem npm-Lockfile (ab Version 2), Dateireihenfolge."""
+    daten = json.loads(text)
+    if not isinstance(daten, dict):
+        raise TypeError(type(daten).__name__)
+    pakete = daten.get("packages")
+    erg = []
+    for schl, eintrag in pakete.items() if isinstance(pakete, dict) else []:
+        if isinstance(schl, str) and "node_modules/" in schl and isinstance(eintrag, dict) and eintrag.get("hasInstallScript") is True:
+            version = eintrag.get("version")
+            erg.append((schl.rsplit("node_modules/", 1)[-1], version if isinstance(version, str) else ""))
+    return erg
+
+
+def _pnpm_name(kopf: str) -> str:
+    """Paketname aus einem Kopf von `pnpm-lock.yaml` (`/name@1.0.0`, `name@1.0.0(peer)`, `/@scope/name/1.0.0`)."""
+    h = kopf.strip().rstrip(":").strip().strip("\"'").lstrip("/")
+    gescopt = h.startswith("@")
+    i = h.find("@", 1 if gescopt else 0)
+    if i > 0:
+        return h[:i]
+    teile = h.split("/")
+    return "/".join(teile[:2] if gescopt else teile[:1])
+
+
+def _pnpm_skript_pakete(text: str) -> list[tuple[str, int]]:
+    """(Name, Zeile des Kopfs) der Pakete mit `requiresBuild: true` im Abschnitt `packages:` (Lockfile v5/v6)."""
+    erg: list[tuple[str, int]] = []
+    in_paketen = False
+    kopf: tuple[str, int] | None = None
+    for nr, z in enumerate(text.splitlines(), 1):
+        if z and not z[0].isspace() and z[0] != "#":
+            in_paketen = z.rstrip() == "packages:"
+            kopf = None
+            continue
+        if not in_paketen:
+            continue
+        m = re.match(r"  (\S.*):\s*$", z)
+        if m and not z.startswith("   "):
+            kopf = (_pnpm_name(m.group(1)), nr)
+        elif kopf is not None and re.fullmatch(r"    requiresBuild:\s*true\s*", z):
+            erg.append(kopf)
+            kopf = None
+    return erg
+
+
+def _paketnamen_text(namen: list[str]) -> str:
+    gueltig: list[str] = []
+    ungueltig = 0
+    for n in dict.fromkeys(namen):                              # Reihenfolge der Datei, ohne Dubletten
+        if len(n) <= PAKETNAME_MAX and NPM_PAKETNAME.fullmatch(n):
+            gueltig.append(n)
+        else:
+            ungueltig += 1
+    text = ", ".join(gueltig[:MAX_PAKETNAMEN]) if gueltig else "keine gültigen Paketnamen"
+    if len(gueltig) > MAX_PAKETNAMEN:
+        text += f", +{len(gueltig) - MAX_PAKETNAMEN} weitere"
+    if ungueltig:
+        text += f"; {ungueltig} ungültige Paketnamen ausgelassen"
+    return text
+
+
+def _npmrc_ignore_scripts(text: str) -> bool:
+    wert = False
+    for z in text.splitlines():
+        z = z.strip()
+        if not z or z[0] in "#;" or "=" not in z:
+            continue
+        k, v = z.split("=", 1)
+        if k.strip() == "ignore-scripts":
+            wert = v.strip().strip("\"'").lower() == "true"
+    return wert
+
+
+# ------------------------------------------------------------------------------------ lieferkette: Entwürfe
+
+def _entwurf(klasse: str, stufe: str, datei: str, zeile: int, titel: str, beschreibung: str, szenario: str, erwartet: str) -> dict:
+    return {"stufe": stufe, "status": "unbestätigt", "datei": datei, "zeile": zeile, "kategorie": "A03", "titel": titel,
+            "beschreibung": f"{BEFUND_GRUND}. {beschreibung}", "szenario": szenario, "erwartet": erwartet, "klasse": klasse,
+            "ohne_anmeldung": False, "mandantenuebergreifend": False, "werkzeug": "lieferkette",
+            "code_pfad": [f"{datei}:{zeile}"]}
+
+
+def _erwartet_installation(label: str) -> str:
+    if "npm" in label:
+        return "`npm ci` statt `npm install` verwenden (installiert exakt die Versionen aus dem Lockfile)"
+    if "pnpm" in label:
+        return "`pnpm install --frozen-lockfile` verwenden (bricht ab, wenn das Lockfile nicht passt)"
+    return "`yarn install --immutable` (yarn berry) bzw. `yarn install --frozen-lockfile` (yarn 1) verwenden"
+
+
+def _hat_abhaengigkeiten(daten: object) -> bool:
+    """Nicht parsebar oder fremde Form zählt als „hat Abhängigkeiten“."""
+    if not isinstance(daten, dict):
+        return True
+    return any(daten.get(k) for k in ABHAENGIGKEIT_FELDER)
+
+
+def _statisch(quelle: str, ende: float, s: _Sammler) -> None:
+    baum = _baum_suchen(quelle, ende, s)
+    lock_ordner = {_ordner_von(rel) for rel, _ in baum.lockfiles}
+    yarn_v1 = False
+    for rel, _ in baum.lockfiles:
+        if rel.rsplit("/", 1)[-1] == "yarn.lock":
+            _zeitcheck(ende)
+            kopf = _je_datei(s, rel, lambda r=rel: _kopf_lesen(os.path.join(quelle, r), YARN_V1_KOPF))
+            yarn_v1 = yarn_v1 or (kopf is not None and YARN_V1_MARKE in kopf)
+
+    npm_zeilen: list[bool] = []                       # `--ignore-scripts` je npm-Installationszeile (install/i/ci, nicht global)
+    pkg_daten: dict[str, object] = {}                 # Ordner -> geparstes package.json (None: nicht auswertbar)
+    gesehen: set[tuple[str, int]] = set()
+
+    def installation(rel: str, art: str, aufruf: _Aufruf) -> None:
+        if aufruf.skripte_aus is not None:
+            npm_zeilen.append(aufruf.skripte_aus)
+        if aufruf.label is None or (rel, aufruf.zeile) in gesehen:
+            return
+        if art == "ci" and (aufruf.pm == "pnpm" or (aufruf.pm == "yarn" and not yarn_v1)):
+            return                                    # W8: pnpm und yarn berry in CI nie, yarn nur mit v1-Lockfile
+        gesehen.add((rel, aufruf.zeile))
+        befehl = aufruf.label
+        s.entwurf(_entwurf(
+            "installation-ohne-lockfile-treue", "P2", rel, aufruf.zeile, f"Installation ohne Lockfile-Treue in {rel}",
+            f"In {rel}:{aufruf.zeile} installiert {befehl} die Abhängigkeiten, ohne an das Lockfile gebunden zu sein.",
+            "Builds und Deployments ziehen beim Installieren neue, ungeprüfte Versionen; ein kompromittiertes oder "
+            "manipuliertes Paket gelangt so unbemerkt in Build und Betrieb, und Builds sind nicht reproduzierbar.",
+            _erwartet_installation(befehl)))
+
+    # package.json: Abhängigkeiten (lockfile-fehlt) und scripts
+    pakete = baum.pakete
+    texte = baum.texte
+    if len(pakete) + len(texte) > MAX_TEXTDATEIEN:
+        s.hinweis(f"{len(pakete) + len(texte)} Dateien (package.json, Dockerfile, CI, Makefile) gefunden, nur die ersten "
+                  f"{MAX_TEXTDATEIEN} geprüft")
+        pakete = pakete[:MAX_TEXTDATEIEN]
+        texte = texte[:max(0, MAX_TEXTDATEIEN - len(pakete))]
+    for rel, groesse in pakete:
+        _zeitcheck(ende)
+        ordner = _ordner_von(rel)
+
+        def pruefen(rel=rel, groesse=groesse, ordner=ordner) -> None:
+            text = _lese_text(quelle, rel, groesse, s)
+            daten = None
+            if text is not None:
+                daten = json.loads(text)
+                if not isinstance(daten, dict):
+                    raise TypeError(type(daten).__name__)
+            pkg_daten[ordner] = daten
+            if text is not None:
+                for a in _skript_aufrufe(text, daten):
+                    installation(rel, "skript", a)
+
+        _je_datei(s, rel, pruefen)
+        daten = pkg_daten.get(ordner)
+        if not any(o in lock_ordner for o in _eltern(ordner)) and _hat_abhaengigkeiten(daten):
+            s.entwurf(_entwurf(
+                "lockfile-fehlt", "P2", rel, 1, f"Lockfile fehlt für {rel}",
+                f"Zu {rel} gibt es weder im selben Ordner noch in einem Elternordner ein Lockfile "
+                "(`package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lock`, `bun.lockb`).",
+                "Ohne Lockfile löst jede Installation die Abhängigkeiten neu auf; eine kompromittierte oder manipulierte "
+                "neue Version gelangt unbemerkt in Build und Betrieb, und Builds sind nicht reproduzierbar.",
+                "Lockfile erzeugen und einchecken (z. B. `npm install --package-lock-only`), danach mit `npm ci` installieren"))
+
+    # Dockerfile, CI, Makefile
+    for rel, art, groesse in texte:
+        _zeitcheck(ende)
+
+        def pruefen_text(rel=rel, art=art, groesse=groesse) -> None:
+            text = _lese_text(quelle, rel, groesse, s)
+            if text is not None:
+                for a in _installationen_in(rel, text, art):
+                    installation(rel, art, a)
+
+        _je_datei(s, rel, pruefen_text)
+
+    # Lockfiles mit Install-Skripten
+    lockfiles = [(rel, g) for rel, g in baum.lockfiles if rel.rsplit("/", 1)[-1] in NPM_LOCKFILES + ("pnpm-lock.yaml",)]
+    if len(lockfiles) > MAX_LOCKFILES:
+        s.hinweis(f"{len(lockfiles)} Lockfiles gefunden, nur die ersten {MAX_LOCKFILES} geprüft")
+        lockfiles = lockfiles[:MAX_LOCKFILES]
+    if not lockfiles:
+        return
+    npm_schutz = bool(npm_zeilen) and all(npm_zeilen)
+    cache: dict[tuple[str, str], str | None] = {}
+
+    def konfig_text(ordner: str, name: str) -> str | None:
+        if (ordner, name) not in cache:
+            eintrag = baum.konfig.get((ordner, name))
+            cache[(ordner, name)] = (_je_datei(s, eintrag[0], lambda e=eintrag: _lese_text(quelle, e[0], e[1], s))
+                                     if eintrag else None)
+        return cache[(ordner, name)]
+
+    def geschuetzt(ordner: str) -> bool:
+        if npm_schutz:
+            return True
+        for o in _eltern(ordner):
+            npmrc = konfig_text(o, ".npmrc")
+            if npmrc is not None and _npmrc_ignore_scripts(npmrc):
+                return True
+            yarnrc = konfig_text(o, ".yarnrc.yml")
+            if yarnrc is not None and any(YARNRC_SKRIPTE_AUS.fullmatch(z) for z in yarnrc.splitlines()):
+                return True
+            workspace = konfig_text(o, "pnpm-workspace.yaml")
+            if workspace is not None and any(PNPM_LISTE.match(z) for z in workspace.splitlines()):
+                return True
+            daten = pkg_daten.get(o)
+            if isinstance(daten, dict):
+                manager = daten.get("packageManager")
+                m = re.match(r"pnpm@(\d+)", manager) if isinstance(manager, str) else None
+                if m and len(m.group(1)) < 4 and int(m.group(1)) >= 10:
+                    return True
+                pnpm = daten.get("pnpm")
+                if isinstance(pnpm, dict) and ("onlyBuiltDependencies" in pnpm or "neverBuiltDependencies" in pnpm):
+                    return True
+        return False
+
+    for rel, groesse in lockfiles:
+        _zeitcheck(ende)
+        name = rel.rsplit("/", 1)[-1]
+
+        def pruefen_lock(rel=rel, groesse=groesse, name=name) -> None:
+            if groesse > LOCKFILE_MAX:
+                s.hinweis(f"Lockfile zu groß (> {LOCKFILE_MAX // (1024 * 1024)} MiB), übersprungen: {rel}")
+                return
+            text = _lese_datei(os.path.join(quelle, rel)).decode("utf-8", "replace")
+            if name == "pnpm-lock.yaml":
+                betroffen = _pnpm_skript_pakete(text)
+                namen = [n for n, _ in betroffen]
+                zeile = betroffen[0][1] if betroffen else 1
+            else:
+                betroffen = _npm_skript_pakete(text)
+                namen = [n for n, _ in betroffen]
+                zeile = _zeile(text.splitlines(), betroffen[0][0], betroffen[0][1], _npm_index(text), name) if betroffen else 1
+            if not betroffen or geschuetzt(_ordner_von(rel)):
+                return
+            s.entwurf(_entwurf(
+                "install-skripte-offen", "P3", rel, zeile, f"Install-Skripte in {rel} nicht abgeschaltet",
+                f"Das Lockfile {rel} enthält {len(betroffen)} Paket(e) mit Install-Skripten ({_paketnamen_text(namen)}), und keine "
+                "Schutzmaßnahme greift (`ignore-scripts=true` in `.npmrc`, `--ignore-scripts` in allen npm-Installationen, "
+                "pnpm-Freigabeliste, yarn `enableScripts: false`).",
+                "Beim Installieren laufen die Install-Skripte der Pakete (preinstall, install, postinstall) mit den Rechten des "
+                "Installierenden; ein kompromittiertes Paket führt so Code auf Entwickler- und Build-Rechnern aus.",
+                "Install-Skripte abschalten (`ignore-scripts=true` in `.npmrc`) oder gezielt freigeben "
+                "(pnpm: `onlyBuiltDependencies`)"))
+
+        _je_datei(s, rel, pruefen_lock)
+
+
+def cmd_lieferkette(a: argparse.Namespace) -> int:
+    _, quelle = _arbeitskopie(a.lauf, a.quelle)
+    ende = time.monotonic() + _sekunden("SECURITY_AUDIT_LK_BUDGET", LK_BUDGET)
+    s = _Sammler()
+    try:
+        _statisch(quelle, ende, s)
+    except _Zeit:
+        s.hinweis(ZEIT_HINWEIS)
+    _ausgabe({"entwuerfe": s.entwuerfe, "hinweise": s.abschluss()})
+    return 0
+
+
 # ------------------------------------------------------------------------------------ Argumente
 
 def _parser() -> argparse.ArgumentParser:
@@ -1191,6 +1848,10 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--sha", required=True, type=poc._typ_sha, help="geprüfter Commit (voller Hash)")
     s = sub.add_parser("abhaengigkeiten", allow_abbrev=False, help="Lockfiles mit osv-scanner prüfen (Advisories, KEV)")
     s.set_defaults(fn=cmd_abhaengigkeiten)
+    s.add_argument("--lauf", required=True, type=poc._typ_lauf)
+    s.add_argument("--quelle", required=True, help="Arbeitskopie des Laufs (`<zustand>/quelle`)")
+    s = sub.add_parser("lieferkette", allow_abbrev=False, help="Lockfile, Installation und Install-Skripte statisch prüfen")
+    s.set_defaults(fn=cmd_lieferkette)
     s.add_argument("--lauf", required=True, type=poc._typ_lauf)
     s.add_argument("--quelle", required=True, help="Arbeitskopie des Laufs (`<zustand>/quelle`)")
     return p
