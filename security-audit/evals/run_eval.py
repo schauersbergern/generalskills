@@ -383,10 +383,19 @@ def _smoke_test(basis: list[str], cwd: str, env: dict) -> tuple[bool, str]:
     text, fehler = out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
     if p.returncode != 0:
         return False, f"Exit {p.returncode}: {(fehler or text).strip()[-500:]}"
+    return _smoke_antwort(text)
+
+
+def _smoke_antwort(text: str) -> tuple[bool, str]:
+    """Wertet die Ausgabe von `claude -p --output-format json` aus. Je nach CLI-Version ist das ein einzelnes
+    Ergebnisobjekt oder eine Liste aller Nachrichten; maßgeblich ist das letzte Objekt mit `type: result`."""
     try:
         antwort = json.loads(text)
     except ValueError:
         return False, f"Ausgabe ist kein JSON: {text.strip()[-300:]}"
+    if isinstance(antwort, list):
+        ergebnisse = [x for x in antwort if isinstance(x, dict) and x.get("type") == "result"]
+        antwort = ergebnisse[-1] if ergebnisse else None
     if not isinstance(antwort, dict) or antwort.get("is_error"):
         return False, f"Fehlerantwort: {text.strip()[-300:]}"
     return True, ""
