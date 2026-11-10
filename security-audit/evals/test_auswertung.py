@@ -2547,3 +2547,26 @@ def test_temp_repo_deps_skill_ohne_erwartung(tmp_path, monkeypatch):
                                                               and not n.startswith("."))
     finally:
         shutil.rmtree(wurzel, ignore_errors=True)
+
+
+def test_secret_wert_wird_neu_gezogen_bis_gitleaks_ihn_erkennt(monkeypatch):
+    """Härtung Verifikation: übersieht gitleaks einen Zufallswert (Stoppwort), zieht der Einbau neu; ohne gitleaks gilt der erste."""
+    antworten = iter([False, False, True])
+    monkeypatch.setattr(run_eval, "_gitleaks_erkennt", lambda w: next(antworten))
+    gezogen = []
+    echt = run_eval.secrets.choice
+    monkeypatch.setattr(run_eval.secrets, "choice", lambda a: gezogen.append(1) or echt(a))
+    wert = run_eval._wert_ziehen()
+    assert len(wert) == run_eval.SECRET_LAENGE and len(gezogen) == 3 * run_eval.SECRET_LAENGE
+    monkeypatch.setattr(run_eval, "_gitleaks_erkennt", lambda w: None)
+    assert len(run_eval._wert_ziehen()) == run_eval.SECRET_LAENGE
+    monkeypatch.setattr(run_eval, "_gitleaks_erkennt", lambda w: False)
+    with pytest.raises(RuntimeError):
+        run_eval._wert_ziehen()
+
+
+@pytest.mark.skipif(shutil.which("gitleaks") is None, reason="gitleaks nicht installiert")
+def test_gitleaks_erkennt_stoppwort_wert_nicht():
+    """Gemessener Fehlschlag (Stoppwort „fake“, Zufallswert ohne Bedeutung) vs. ein erkannter Wert."""
+    assert run_eval._gitleaks_erkennt("ifAkeAplMhOAXoZW8qfDrVfz2bYsYGPX") is False
+    assert run_eval._gitleaks_erkennt("Zq8Rk2Xw7Pv4Lm9Tn3Hb6Jc5Gd1Fs0Wy") is True

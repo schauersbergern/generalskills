@@ -263,6 +263,46 @@ SECRET_DATEI = "config/keys.js"
 GIT_KENNUNG = ("-c", "user.name=eval", "-c", "user.email=eval@localhost", "-c", "commit.gpgsign=false")
 
 
+SECRET_ZIEHUNGEN = 50
+
+
+def _gitleaks_erkennt(wert: str) -> bool | None:
+    """Findet das lokale gitleaks (Standardregeln, ohne Netz) den Wert in der Einbauzeile? None, wenn gitleaks fehlt oder
+    nicht auswertbar ist. Hintergrund (gemessen 2026-11-10): Rund 0,85 % der Zufallswerte enthalten ein Stoppwort der Regel
+    `generic-api-key` (z. B. „data“, „fake“) und werden übersehen; TF2-D2 wäre dann ohne Fehler des Skills rot."""
+    gitleaks = shutil.which("gitleaks")
+    if gitleaks is None:
+        return None
+    with tempfile.TemporaryDirectory(prefix="eval-secret-probe-") as tmp:
+        ordner = os.path.join(tmp, "d")
+        os.mkdir(ordner)
+        with open(os.path.join(ordner, "keys.js"), "w", encoding="utf-8") as f:
+            f.write(f'const apiKey = "{wert}";\n')
+        with open(os.path.join(tmp, "gl.toml"), "w", encoding="utf-8") as f:
+            f.write("[extend]\nuseDefault = true\n")
+        bericht = os.path.join(tmp, "r.json")
+        try:
+            r = subprocess.run([gitleaks, "dir", ordner, "--config", os.path.join(tmp, "gl.toml"), "--report-format", "json",
+                                "--report-path", bericht, "--exit-code", "0", "--no-banner", "--log-level", "error",
+                                "--redact"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               env={"PATH": os.environ.get("PATH", ""), "HOME": tmp}, cwd=tmp, timeout=60)
+            with open(bericht, encoding="utf-8") as f:
+                funde = json.load(f)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return None
+        return r.returncode == 0 and isinstance(funde, list) and len(funde) > 0
+
+
+def _wert_ziehen() -> str:
+    """Zufallswert (32 Zeichen [A-Za-z0-9]); ist gitleaks vorhanden, so oft neu gezogen, bis gitleaks ihn erkennt
+    (höchstens `SECRET_ZIEHUNGEN`), damit TF2-D2 nur an Fehlern des Skills scheitert."""
+    for _ in range(SECRET_ZIEHUNGEN):
+        wert = "".join(secrets.choice(SECRET_ALPHABET) for _ in range(SECRET_LAENGE))
+        if _gitleaks_erkennt(wert) is not False:
+            return wert
+    raise RuntimeError(f"gitleaks erkennt keinen von {SECRET_ZIEHUNGEN} Zufallswerten (Regeln geändert?)")
+
+
 def secret_einbauen(repo: str) -> tuple[str, dict]:
     """Fake-Secret in die Historie des Temp-Repos: `config/keys.js` mit `const apiKey = "<32 Zeichen [A-Za-z0-9]>";`
     committen, danach löschen und erneut committen (zwei Commits). Gibt (Wert, `secret_info`) zurück; `secret_info` ist
@@ -270,7 +310,7 @@ def secret_einbauen(repo: str) -> tuple[str, dict]:
     in diese Datei und damit in die Git-Historie des Temp-Repos; der Aufrufer hält ihn nur im Speicher. Bleibt das
     Temp-Verzeichnis liegen (`--behalten` oder gescheiterter Lauf), steht der (lokal erzeugte, wertlose) Fake-Wert dort im
     Einbau-Commit; er gelangt nie in `ergebnis.json`, stdout oder stderr."""
-    wert = "".join(secrets.choice(SECRET_ALPHABET) for _ in range(SECRET_LAENGE))
+    wert = _wert_ziehen()
     pfad = os.path.join(repo, *SECRET_DATEI.split("/"))
     os.makedirs(os.path.dirname(pfad), exist_ok=True)
     with open(pfad, "w", encoding="utf-8") as f:
