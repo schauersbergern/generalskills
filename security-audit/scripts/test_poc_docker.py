@@ -56,7 +56,8 @@ class Stack:
         self.lauf = lauf
         self.tmp = tmp
         self.repo = repo
-        self.env = dict(os.environ, TMPDIR=str(tmp))
+        # SECURITY_AUDIT_OHNE=gitleaks: `bauen` verlangt sonst den Schwärzungs-Marker (setzt `lieferkette.py secrets`)
+        self.env = dict(os.environ, TMPDIR=str(tmp), SECURITY_AUDIT_OHNE="gitleaks")
         self.netz = f"security-audit-{lauf}-p1"
         self.image = f"security-audit-{lauf}-app"
 

@@ -30,11 +30,16 @@ STUFEN = ("P1", "P2", "P3")
 STATUS = ("bestätigt", "unbestätigt", "verworfen", "verdacht")
 IN_LISTE = ("bestätigt", "unbestätigt")
 EINZEILIG = ("titel", "szenario", "erwartet", "klasse")
+WERKZEUGE = ("osv-scanner", "gitleaks", "lieferkette")
+LIEFERKETTE_KLASSEN = ("lockfile-fehlt", "installation-ohne-lockfile-treue", "install-skripte-offen")
+MAX_COMMITS = 20
+MARKDOWN_COMMITS = 5      # Commits je Befund im Detailabschnitt, der Rest als „+n“
 MAX_JSON_BYTES = 16 * 1024 * 1024
 KONTEXT_BUDGET = 300      # Sekunden für `kontext` insgesamt (SECURITY_AUDIT_KONTEXT_TIMEOUT überschreibt es); Bash-Limit des Skills: 600 s
 _ID = re.compile(r"S-[1-9][0-9]{0,8}")
 _KATEGORIE = re.compile(r"A(0[1-9]|10)")
 _ZEILE_IM_PFAD = re.compile(r"(:[0-9]+(:[0-9]+)?|#L[0-9]+(C[0-9]+)?(-L?[0-9]+(C[0-9]+)?)?)\Z")
+_COMMIT = re.compile(r"[0-9a-f]{7,64}")
 _CODE_PFAD = re.compile(r"(.+):([1-9][0-9]*)", re.DOTALL)
 
 
@@ -229,6 +234,70 @@ def _unter_teilpfad(datei: str, teilpfad: str) -> bool:
     return d == t or d.startswith(t + "/")
 
 
+def _pakete_fehler(pakete: object) -> list[str]:
+    """Fehlertexte (ohne Label) für `pakete`: Liste von Objekten mit `name`, `version` (einzeilige Texte), `advisories`
+    (Liste einzeiliger Texte), optional `behoben_in` (Text) und `kev` (true/false/null)."""
+    if not isinstance(pakete, list) or not pakete:
+        return ["muss eine nichtleere Liste von Objekten {name, version, advisories} sein"]
+    f: list[str] = []
+    for i, p in enumerate(pakete):
+        if not isinstance(p, dict):
+            f.append(f"[{i}] muss ein Objekt {{name, version, advisories}} sein")
+            continue
+        for feld in ("name", "version"):
+            if feld not in p:
+                f.append(f"[{i}].{feld} fehlt")
+            elif msg := _text_fehler(p[feld], True):
+                f.append(f"[{i}].{feld} {msg}")
+        adv = p.get("advisories")
+        if "advisories" not in p:
+            f.append(f"[{i}].advisories fehlt")
+        elif not isinstance(adv, list):
+            f.append(f"[{i}].advisories muss eine Liste von Texten sein")
+        else:
+            f.extend(f"[{i}].advisories[{j}] {msg}" for j, a in enumerate(adv) if (msg := _text_fehler(a, True)))
+        if "behoben_in" in p and (msg := _text_fehler(p["behoben_in"], True)):
+            f.append(f"[{i}].behoben_in {msg}")
+        if "kev" in p and p["kev"] is not None and type(p["kev"]) is not bool:
+            f.append(f"[{i}].kev muss true, false oder null sein")
+    return f
+
+
+def _werkzeug_fehler(b: dict) -> tuple[list[str], bool]:
+    """(Fehlertexte, gekoppelt) zu `werkzeug`, `commits`, `pakete` eines Befunds. `gekoppelt` heißt: `werkzeug` ist gültig
+    und seine Bedingungen sind erfüllt; nur dann genügt ein Code-Pfad mit einem Eintrag. Fehlertexte beginnen mit dem Feldnamen."""
+    f: list[str] = []
+    werkzeug = b.get("werkzeug") if "werkzeug" in b else None
+    gueltig = "werkzeug" in b and isinstance(werkzeug, str) and werkzeug in WERKZEUGE
+    if "werkzeug" in b and not gueltig:
+        f.append(f"werkzeug muss osv-scanner, gitleaks oder lieferkette sein, ist {_t(werkzeug)!r}")
+    if "commits" in b:
+        c = b["commits"]
+        if werkzeug != "gitleaks":
+            f.append("commits nur mit werkzeug gitleaks erlaubt")
+        elif not (isinstance(c, list) and 1 <= len(c) <= MAX_COMMITS
+                  and all(isinstance(x, str) and _COMMIT.fullmatch(x) for x in c)):
+            f.append(f"commits muss eine Liste von 1 bis {MAX_COMMITS} Hex-Hashes (7 bis 64 Zeichen, klein) sein")
+    if "pakete" in b:
+        if werkzeug != "osv-scanner":
+            f.append("pakete nur mit werkzeug osv-scanner erlaubt")
+        else:
+            f.extend("pakete" + (m if m.startswith("[") else " " + m) for m in _pakete_fehler(b["pakete"]))
+    if gueltig:
+        kategorie = {"osv-scanner": "A03", "gitleaks": "A07", "lieferkette": "A03"}[werkzeug]
+        if b.get("kategorie") != kategorie and "kategorie" in b:
+            f.append(f"kategorie muss bei werkzeug {werkzeug} {kategorie} sein, ist {_t(b['kategorie'])!r}")
+        if werkzeug == "osv-scanner" and "pakete" not in b:
+            f.append("pakete fehlt (werkzeug osv-scanner braucht mindestens ein Paket)")
+        if werkzeug == "gitleaks" and "commits" not in b:
+            f.append("commits fehlt (werkzeug gitleaks braucht mindestens einen Commit)")
+        if werkzeug == "lieferkette" and b.get("klasse") not in LIEFERKETTE_KLASSEN:
+            f.append(f"klasse muss bei werkzeug lieferkette {', '.join(LIEFERKETTE_KLASSEN)} sein, ist {_t(b.get('klasse'))!r}")
+        if isinstance(b.get("status"), str) and unicodedata.normalize("NFC", b["status"]) == "bestätigt":
+            f.append("status bestätigt ist mit werkzeug nicht erlaubt (Werkzeugbefunde sind ohne Request-Beleg höchstens unbestätigt)")
+    return f, gueltig and not f
+
+
 def _befund_fehler(b: dict, label: str, teilpfad: str | None = None) -> list[str]:
     f: list[str] = []
 
@@ -276,10 +345,14 @@ def _befund_fehler(b: dict, label: str, teilpfad: str | None = None) -> list[str
             f.extend(f"{label}: poc enthält nicht erlaubten Host: {_t(h)}" for h in netzregel.verstoesse_poc(b["poc"]))
     elif status == "bestätigt":
         f.append(f"{label}: Pflichtfeld fehlt: poc (Status bestätigt)")
+    werkzeug_fehler, gekoppelt = _werkzeug_fehler(b)
+    f.extend(f"{label}: {m}" for m in werkzeug_fehler)
     if "code_pfad" in b:
         cp = b["code_pfad"]
-        if not isinstance(cp, list) or len(cp) < 2:
-            fehler("code_pfad", "muss eine Liste von mindestens 2 Einträgen datei:zeile sein")
+        # Werkzeugbefund: nur bei erfüllter Kopplung genügt ein Eintrag (kein Request-Pfad möglich)
+        if not isinstance(cp, list) or len(cp) < (1 if gekoppelt else 2):
+            fehler("code_pfad", "muss eine Liste von mindestens 1 Eintrag datei:zeile sein" if gekoppelt
+                   else "muss eine Liste von mindestens 2 Einträgen datei:zeile sein")
         else:
             for i, eintrag in enumerate(cp):
                 m = _CODE_PFAD.fullmatch(eintrag) if isinstance(eintrag, str) else None
@@ -415,6 +488,14 @@ def markdown(daten: dict) -> str:
                   "", "Beschreibung:"] + _block(b["beschreibung"])
             if b.get("poc"):
                 z += ["", "PoC:"] + _block(b["poc"])
+            if b.get("commits"):
+                rest = len(b["commits"]) - MARKDOWN_COMMITS
+                z += ["", "Commits: " + ", ".join(c[:7] for c in b["commits"][:MARKDOWN_COMMITS])
+                      + (f" (+{rest})" if rest > 0 else "")]
+            if b.get("pakete"):
+                z += ["", "Pakete: " + "; ".join(
+                    _inline(f"{p['name']}@{p['version']}") + (f" ({_inline(', '.join(p['advisories']))})" if p["advisories"] else "")
+                    for p in b["pakete"])]
             if b.get("code_pfad"):
                 z += ["", "Code-Pfad:"] + [f"1. {_inline(p)}" for p in b["code_pfad"]]
     if daten["hinweise"]:

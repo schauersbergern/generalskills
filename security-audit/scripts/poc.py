@@ -14,6 +14,10 @@ Aufruf (immer als einzelner einfacher Befehl, siehe Netzregel):
 Exit-Codes: 0 ok, 2 ungültige Argumente, 3 Docker fehlt oder Daemon nicht erreichbar, 4 Bau/Start scheitert
 (erste stdout-Zeile `kategorie: <wert>`, danach höchstens die letzten 40 Zeilen der Docker-Ausgabe),
 1 sonstiger Fehler (Request fehlgeschlagen, Befehl im Container mit Exit ≠ 0, Aufräumen unvollständig).
+
+`SECURITY_AUDIT_OHNE` (kommagetrennt): `docker` lässt `pruefen`, `bauen`, `starten` und `neustart` mit Exit 3 `docker-fehlt` enden.
+`bauen` verlangt den Schwärzungs-Marker (`schwaerz_marker`, gesetzt von `lieferkette.py secrets`; `vorbereiten` löscht ihn),
+solange gitleaks im PATH liegt und nicht in `SECURITY_AUDIT_OHNE` steht: sonst Exit 4 `kategorie: nicht-geschwaerzt`.
 """
 from __future__ import annotations
 
@@ -109,6 +113,22 @@ def zustand_ordner(lauf: str) -> str:
     if os.path.commonpath([basis, pfad]) != basis or os.path.dirname(pfad) != basis:
         raise ValueError("Zustandsordner liegt nicht unter dem Temp-Ordner")
     return pfad
+
+
+def schwaerz_marker(lauf: str) -> str:
+    """Marker `<zustand>/lieferkette/geschwaerzt`: `lieferkette.py secrets` setzt ihn, sobald die Arbeitskopie geschwärzt ist
+    (auch ohne Treffer); `vorbereiten` löscht ihn, `bauen` verlangt ihn, solange gitleaks verfügbar ist."""
+    return os.path.join(zustand_ordner(lauf), "lieferkette", "geschwaerzt")
+
+
+def _ohne_werkzeuge() -> set[str]:
+    """Namen aus `SECURITY_AUDIT_OHNE` (kommagetrennt, getrimmt, klein geschrieben): Werkzeuge, die der Aufrufer ausschließt."""
+    return {n.strip().casefold() for n in os.environ.get("SECURITY_AUDIT_OHNE", "").split(",") if n.strip()}
+
+
+def werkzeug_fehlt(name: str) -> bool:
+    """True, wenn `name` nicht im PATH liegt oder in `SECURITY_AUDIT_OHNE` steht. Der einzige Parser dieser Variable."""
+    return name.strip().casefold() in _ohne_werkzeuge() or shutil.which(name) is None
 
 
 def _ordner(lauf: str, anlegen: bool = False) -> str:
@@ -353,6 +373,8 @@ def _docker(args: list[str], timeout: int, eingabe: bytes | None = None, env: di
 
 
 def _daemon_pruefen() -> str:
+    if "docker" in _ohne_werkzeuge():         # zentral für pruefen, bauen, starten, neustart: kein docker-Aufruf
+        raise DockerFehlt("docker per SECURITY_AUDIT_OHNE ausgeschlossen")
     r = _docker(["version", "--format", "{{.Server.Version}}"], VERSION_TIMEOUT, budget=False)
     if not r.ok:
         grund = "Timeout" if r.rc is None else _tail(r.text, 3)
@@ -706,6 +728,7 @@ def cmd_vorbereiten(a: argparse.Namespace) -> int:
 
 
 def _vorbereiten(a: argparse.Namespace, repo: str, ordner: str, quelle: str, marker: str) -> int:
+    _entferne(schwaerz_marker(a.lauf), os.path.join(ordner, "lieferkette"))    # neue Kopie ist ungeschwärzt: `secrets` erneut
     _entferne(marker, ordner)          # erst der Marker, dann die Kopie: ein Absturz dazwischen hinterlässt keine „fertige“ Kopie
     _entferne(quelle, ordner)          # lokale Dateioperation: wird nicht unterbrochen, zählt aber gegen das Budget
     sha = a.sha or "HEAD"
@@ -739,6 +762,9 @@ def _vorbereiten(a: argparse.Namespace, repo: str, ordner: str, quelle: str, mar
 
 def cmd_bauen(a: argparse.Namespace) -> int:
     _daemon_pruefen()
+    if not werkzeug_fehlt("gitleaks") and not os.path.isfile(schwaerz_marker(a.lauf)):
+        return _fehler_ende("nicht-geschwaerzt", "Arbeitskopie nicht auf Secrets geprüft und geschwärzt: erst "
+                            "`lieferkette.py secrets --lauf … --repo … --quelle … --sha …` (Marker fehlt), dann erneut bauen.")
     ordner = _ordner(a.lauf)
     quelle = os.path.join(ordner, "quelle")
     if not os.path.isdir(quelle):

@@ -79,6 +79,16 @@ def _umgebung() -> dict[str, str]:
     return env
 
 
+def werkzeug_umgebung() -> dict[str, str]:
+    """Umgebung für Werkzeuge (gitleaks, osv-scanner) und deren git-Aufrufe auf Kundenmaterial: ohne `GIT_*`, `GITLEAKS_*`
+    und `OSV_*` aus der Prozessumgebung (kein umgeleitetes Repo, keine Konfiguration, Allowlist oder Baseline von außen),
+    mit `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_NO_LAZY_FETCH=1`, `GIT_TERMINAL_PROMPT=0`.
+    Jeder Aufruf liefert ein neues Dict."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("GIT_", "GITLEAKS_", "OSV_"))}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null", GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0")
+    return env
+
+
 def _befehl(repo: str, args: tuple[str, ...]) -> list[str]:
     return ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C", repo, *args]
 
