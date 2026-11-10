@@ -14,7 +14,7 @@ KOPF = "# Fehlerklassen-Kandidaten\n\nKopftext.\n\n## Kandidaten\n"
 GUT = """## K-? · Token-Prüfung je schreibender Store-Methode getestet
 - Beleg: PR #191 R1-2 [P2], `upload-store.ts:705`, 2026-11-06 — release ohne Token-Prüfung blieb 36/36 grün
 - Durchgerutscht: Review Focus Plan Nr. 3 nannte nur delete; Härtungsfrage 3 meldete „Token-Semantik getestet“
-- Prüfpunkt (auto-feature Review Focus): „Jede Methode, die einen Claim-Token annimmt, bekommt einen Test mit veraltetem Token.“
+- Prüfpunkt (auto-feature Review Focus): „Jede Methode, die einen Claim-Token annimmt → Test mit veraltetem Token, der rot wird.“
 - Deterministisch: keine, weil die Token-Methoden je Repo anders heißen
 - Status: offen
 """
@@ -82,7 +82,7 @@ class Neu(Basis):
     def test_pruefpunkt_braucht_ort_und_wortlaut(self):
         ohne_ort = GUT.replace("- Prüfpunkt (auto-feature Review Focus):", "- Prüfpunkt:")
         self.assertNotEqual(lauf("neu", self.datei, eingabe=ohne_ort).returncode, 0)
-        ohne_zitat = GUT.replace("„Jede Methode", "Jede Methode").replace("veraltetem Token.“", "veraltetem Token.")
+        ohne_zitat = GUT.replace("„Jede Methode", "Jede Methode").replace("rot wird.“", "rot wird.")
         self.assertNotEqual(lauf("neu", self.datei, eingabe=ohne_zitat).returncode, 0)
 
     def test_ort_mit_klammer_im_pruefpunkt(self):
@@ -188,6 +188,68 @@ class Struktur(Basis):
             self.assertNotEqual(r.returncode, 0, args)
             self.assertIn("## K-2 - Klasse", r.stderr)
         self.abgelehnt(GUT, vorher)
+
+
+class Validierung(Basis):
+    """Die Prüfung entspricht der Vorlage in retro.md (Review R1-9, R1-7)."""
+
+    def pruefe(self, aendere, erlaubt):
+        with open(self.datei, "w", encoding="utf-8") as f:
+            f.write(KOPF)
+        r = lauf("neu", self.datei, eingabe=aendere)
+        if erlaubt:
+            self.assertEqual(r.returncode, 0, r.stderr)
+        else:
+            self.assertNotEqual(r.returncode, 0, r.stdout)
+            self.assertEqual(self.text(), KOPF)
+
+    def test_pruefpunkt_braucht_pfeil_mit_beiden_seiten(self):
+        self.pruefe(GUT.replace(" → ", " "), False)
+        self.pruefe(GUT.replace("Claim-Token annimmt → Test", "Claim-Token annimmt → "), False)
+        self.pruefe(GUT.replace("„Jede Methode, die einen Claim-Token annimmt →", "„ →"), False)
+        self.pruefe(GUT, True)
+
+    def test_pruefpunkt_ohne_schliessendes_anfuehrungszeichen(self):
+        self.pruefe(GUT.replace("rot wird.“", "rot wird."), False)
+
+    def test_pruefpunkt_mit_leerem_ort(self):
+        self.pruefe(GUT.replace("(auto-feature Review Focus)", "()"), False)
+
+    def test_datum_steht_an_der_stelle_der_vorlage(self):
+        self.pruefe(GUT.replace("`upload-store.ts:705`, 2026-11-06 — release", "`upload-store.ts:705` — seit 2026-11-06 release"), False)
+        self.pruefe(GUT.replace("- Beleg: PR #191 R1-2 [P2], `upload-store.ts:705`, 2026-11-06 — release ohne Token-Prüfung blieb 36/36 grün",
+                                "- Beleg: irgendwas `x:1` — seit 2026-11-06 kaputt"), False)
+
+    def test_datum_muss_ein_echtes_datum_sein(self):
+        self.pruefe(GUT.replace("2026-11-06", "2026-99-99"), False)
+        self.pruefe(GUT.replace("2026-11-06", "26-11-06"), False)
+        self.pruefe(GUT.replace("2026-11-06", "2026-1-6"), False)
+
+    def test_beleg_braucht_pr_und_befund_id_und_art(self):
+        self.pruefe(GUT.replace("PR #191 R1-2 [P2]", "[P2]"), False)
+        self.pruefe(GUT.replace(" [P2]", ""), False)
+        self.pruefe(GUT.replace("[P2]", "[Wichtig]"), True)
+        self.pruefe(GUT.replace("[P2]", "[Design]"), True)
+        self.pruefe(GUT.replace("[P2]", "[egal]"), False)
+
+    def test_beleg_ohne_backticks_um_die_stelle(self):
+        self.pruefe(GUT.replace("`upload-store.ts:705`", "upload-store.ts:705"), False)
+
+    def test_zeilenbereich_ist_eine_stelle(self):
+        self.pruefe(GUT.replace("`upload-store.ts:705`", "`upload-store.ts:705-710`"), True)
+        self.pruefe(GUT.replace("`upload-store.ts:705`", "`upload-store.ts:705–710`"), True)
+
+    def test_beleg_ohne_befundtext(self):
+        self.pruefe(GUT.replace(" — release ohne Token-Prüfung blieb 36/36 grün", ""), False)
+
+    def test_status_mit_zusatz_bei_neu_abgelehnt(self):
+        self.pruefe(GUT.replace("- Status: offen", "- Status: offen (x)"), False)
+
+    def test_kein_beleg_auf_stdin(self):
+        lauf("neu", self.datei, eingabe=GUT)
+        r = lauf("beleg", self.datei, "K-1", eingabe="\n  \n")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("Kein Beleg", r.stderr)
 
 
 class Liste(Basis):

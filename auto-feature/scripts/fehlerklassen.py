@@ -10,6 +10,7 @@ Schreibende Befehle halten eine Sperre auf <datei>.lock, damit parallele Review-
 Nur Python-Standardbibliothek.
 """
 import argparse
+import datetime
 import fcntl
 import os
 import re
@@ -18,8 +19,10 @@ import tempfile
 
 KOPF_RE = re.compile(r"^## (K-(\d+|\?)) · (.+)$")
 FELDER = ("Beleg", "Durchgerutscht", "Prüfpunkt", "Deterministisch", "Status")
-BELEG_RE = re.compile(r"^- Beleg: .*`[^`]+(?::\d+(?:[-–]\d+)?| §[^`]+)`.*\b\d{4}-\d{2}-\d{2}\b")
-PRUEF_RE = re.compile(r"^- Prüfpunkt \(.+?\): .*„.+“")
+ARTEN = ("P1", "P2", "P3", "Blocker", "Wichtig", "Klein", "Mutation", "Härtung", "Design")
+BELEG_RE = re.compile(r"^- Beleg: (?P<quelle>\S.*) \[(?:" + "|".join(ARTEN) + r")\], "
+                      r"`[^`]+(?::\d+(?:[-–]\d+)?| §[^`]+)`, (?P<datum>\d{4}-\d{2}-\d{2}) — \S")
+PRUEF_RE = re.compile(r"^- Prüfpunkt \(\S.*\): „\s*[^→“\s][^→“]*→\s*[^“\s][^“]*“$")
 ZEILE_RE = re.compile(r"^- (?:(Beleg|Durchgerutscht|Deterministisch|Status): |(Prüfpunkt) \(.+\): )\S")
 FORTSETZUNG_RE = re.compile(r"^  \S")
 STATUS = ("offen", "übernommen", "verworfen")
@@ -86,9 +89,14 @@ def finde(zeilen, kid):
 
 
 def pruefe_beleg(zeile):
-    if not BELEG_RE.match(zeile):
-        fehler("Beleg braucht die Form „- Beleg: <PR/Lauf> <ID> [P…], `datei:zeile`, YYYY-MM-DD — <Befund>“: "
-               + zeile)
+    m = BELEG_RE.match(zeile)
+    try:
+        datum_ok = bool(m) and datetime.date.fromisoformat(m.group("datum"))
+    except ValueError:
+        datum_ok = False
+    if not datum_ok:
+        fehler("Beleg braucht die Form „- Beleg: <PR/Lauf> <Befund-ID> [<" + "|".join(ARTEN) + ">], "
+               "`datei:zeile`, YYYY-MM-DD — <Befund>“ mit gültigem Datum: " + zeile)
 
 
 def pruefe_block(block):
@@ -110,7 +118,7 @@ def pruefe_block(block):
         if feld == "Beleg":
             pruefe_beleg(z)
         if feld == "Prüfpunkt" and not PRUEF_RE.match(z):
-            fehler(f"Prüfpunkt braucht Ort und Wortlaut: „- Prüfpunkt (<Ort>): „<Wortlaut>““: {z}")
+            fehler(f"Prüfpunkt braucht Ort und Wortlaut mit Pfeil: „- Prüfpunkt (<Ort>): „<Auslöser> → <Nachweis>““: {z}")
         if feld == "Status" and z.strip() != "- Status: offen":
             fehler("Neue Kandidaten haben „- Status: offen“")
     for feld in FELDER:
