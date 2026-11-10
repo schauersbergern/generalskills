@@ -4,7 +4,7 @@ Sammlung lokaler Skills fuer agentische Coding- und Content-Workflows.
 Jeder Skill liegt in einem eigenen Verzeichnis mit einer `SKILL.md` als
 Einstiegspunkt und optionalen Referenzen oder Scripts.
 
-Der aktuelle Stand des Repos umfasst neun produktiv nutzbare Skills plus drei Agent-Definitionen:
+Der aktuelle Stand des Repos umfasst zehn produktiv nutzbare Skills plus drei Agent-Definitionen:
 
 | Skill | Zweck | Wichtige Dateien |
 |---|---|---|
@@ -17,7 +17,8 @@ Der aktuelle Stand des Repos umfasst neun produktiv nutzbare Skills plus drei Ag
 | `fix-findings` | Fixer-Thread (Effort high, von `pr-review-loop` mit Sonnet gestartet): prueft eingefuegte Review-Befunde, setzt angenommene per Test → Fix → Commit um, vor dem Push nur Typecheck und abhaengige Tests (ganze Suite in der CI, ohne CI einmal vor dem Push), pusht, liefert Entscheidungstabelle; Merge/Deploy nur auf Befehlswort | `fix-findings/SKILL.md` |
 | `auto-feature` | Autonomer Feature-Workflow aus einem Feature-File ohne Zwischenhalt: Spec (Opus 5.5) → Opus-Review max. 2 → Plan (Opus 5.5) → Opus-Review max. 2 → Sonnet-5.5-Umsetzung → Haertung → PRs → harter Stopp (HITL); Effort xhigh, nur Re-Reviews, lesende Refactor-/UI-Reviews und mechanische Tasks mit `sonnet-high`; ganze Suite einmal je TF; Agent-Statistik Pflicht (Format gilt fuer alle Skills, Skript `scripts/agent-stats.py` fuer Eintrag, Auswertung (auch je Skill-Stand), Thread-Tokens aus Transkripten und den Stempel `Skills: generalskills@<sha>` im Kopf jeder Statistik); kein PR-Review-Loop, kein Merge; Format des Feature-Files mit DoD-IDs und Nachweis-Art in `references/feature-file.md` | `auto-feature/SKILL.md`, `auto-feature/references/feature-file.md`, `auto-feature/scripts/agent-stats.py` |
 | `feature-file` | Macht aus Kundenwunsch, Call-Notiz oder Idee ein Feature-File fuer `auto-feature`: Ist-Stand im Code zuerst, Interview nur fuer Entscheidungen von User oder Kunde, Recherche nur als Default mit Quelle, Builder-Check durch einen frischen `opus-xhigh`, Freigabe-Zeile erst nach OK | `feature-file/SKILL.md` |
-| `agents/opus-xhigh`, `agents/sonnet-xhigh`, `agents/sonnet-high` | Subagent-Definitionen mit `effort: xhigh` fuer Reviews bzw. Umsetzung, genutzt von `pr-review-loop`, `auto-feature` und `feature-file` (Builder-Check); `sonnet-high` (`effort: high`) fuer die Delta-Reviews in `pr-review-loop` und die Abschlaege nach der Effort-Regel in `auto-feature` | `agents/*.md` |
+| `security-audit` | Auditiert ganze Node/TS-Repos auf ausnutzbare Luecken: Karte der Angriffsflaeche, bis zu 6 Opus-Reviewer, 2 Pruefer, die jeden P1/P2 widerlegen oder per Docker-PoC im internen Netz belegen; Bericht ausserhalb des Repos unter `~/.claude/security-reviews/<repo>/`, Befundliste fuer `/fix-findings`; aendert das Repo nie | `security-audit/SKILL.md`, `security-audit/references/*`, `security-audit/scripts/bericht.py`, `security-audit/scripts/poc.py`, `security-audit/scripts/netzregel.py`, `security-audit/scripts/gitkopie.py`, `security-audit/evals/run_eval.py` |
+| `agents/opus-xhigh`, `agents/sonnet-xhigh`, `agents/sonnet-high` | Subagent-Definitionen mit `effort: xhigh` fuer Reviews bzw. Umsetzung, genutzt von `pr-review-loop`, `auto-feature`, `feature-file` (Builder-Check) und `security-audit` (Reviewer und Pruefer); `sonnet-high` (`effort: high`) fuer die Delta-Reviews in `pr-review-loop` und die Abschlaege nach der Effort-Regel in `auto-feature` | `agents/*.md` |
 
 ## Repository-Struktur
 
@@ -66,6 +67,30 @@ nikskills/
       test_agent_stats.py
   feature-file/
     SKILL.md
+  security-audit/
+    SKILL.md
+    docker/
+      Dockerfile.poc
+      Dockerfile.poc.dockerignore
+      anfrage.mjs
+    evals/
+      auswertung.py
+      run_eval.py
+      test_auswertung.py
+      test_fixture.py
+      expected/
+      fixture-web/
+      testdaten/
+    references/
+      agenten-briefings.md
+      bericht-format.md
+      pruefpunkte-web.md
+    scripts/
+      bericht.py
+      gitkopie.py
+      netzregel.py
+      poc.py
+      test_*.py
   agents/
     opus-xhigh.md
     sonnet-xhigh.md
@@ -260,17 +285,34 @@ Themen in postfaehige Fassungen ausgelegt.
 
 ## Coding-Workflow-Skills (Claude Code)
 
-`pr-review-loop`, `fix-findings`, `auto-feature` und `feature-file` sind globale Claude-Code-Skills.
+`pr-review-loop`, `fix-findings`, `auto-feature`, `feature-file` und `security-audit` sind globale Claude-Code-Skills.
 Sie werden per Symlink eingebunden:
 
 ```bash
-for s in pr-review-loop fix-findings auto-feature feature-file; do ln -sfn ~/Projects/skillz/nikskills/$s ~/.claude/skills/$s; done
+for s in pr-review-loop fix-findings auto-feature feature-file security-audit; do ln -sfn ~/Projects/skillz/nikskills/$s ~/.claude/skills/$s; done
 for a in opus-xhigh sonnet-xhigh sonnet-high; do ln -sfn ~/Projects/skillz/nikskills/agents/$a.md ~/.claude/agents/$a.md; done
 ```
 
 `pr-review-loop`, `auto-feature` und `feature-file` setzen `effort: xhigh` im Frontmatter, `auto-feature` und `feature-file` zusaetzlich `model: opus`; `fix-findings` setzt `effort: high`.
 Die Subagenten bekommen Effort ueber die Agent-Typen `opus-xhigh`/`sonnet-xhigh`/`sonnet-high`; fehlen sie,
 weichen die Skills auf `general-purpose` mit explizitem `model` aus und melden „Effort nicht garantiert“.
+`security-audit` nutzt `opus-xhigh` fuer Reviewer und Pruefer, sonst `general-purpose` mit `model: opus` und „Effort nicht garantiert“.
+
+`security-audit` (nur pruefen, aendert das Repo nie): Kundenrepos frisch klonen. Enthaelt das Repo eigene
+`.claude/`- oder `.mcp.json`-Konfiguration, die Session mit `claude --setting-sources user --strict-mcp-config`
+starten und `/security-audit … repo-konfig-geprueft` aufrufen. Die Netzregel (`scripts/netzregel.py`) ist nur
+Erkennung; die eigentliche Sperre ist die Rechtekonfiguration der Session.
+
+Tests fuer `security-audit`:
+
+```bash
+python3 -m pytest security-audit -q
+# Docker-Integration (braucht Docker)
+SECURITY_AUDIT_DOCKER=1 python3 -m pytest security-audit/scripts/test_poc_docker.py -q
+# Abnahme-Eval: startet `claude -p` mit Opus und bis zu 8 Subagenten,
+# grob 0,5–1 Mio. Tokens je Lauf; braucht Docker
+SECURITY_AUDIT_EVAL=1 python3 -m pytest security-audit/evals -q
+```
 
 Aufruf mit Argumenten, z. B. `/pr-review-loop 214 215` (je PR ein neuer Fixer, keine Rundengrenze) oder `/pr-review-loop 214 "Fixer 214" runden=3`, `/fix-findings <Liste> [mergen] [deployen]`,
 `/auto-feature docs/features/<datei>.md`. Projektspezifische Befehle (Tests, Lint, Deploy)
