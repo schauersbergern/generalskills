@@ -1676,3 +1676,20 @@ def test_eval_laeuft_nicht_parallel_haertung_b6(ev, capsys):
     ev.modus("bericht")
     assert run_eval.main(["--fixture", "fixture-web"]) == 0       # Sperre frei: läuft (und gibt sie wieder frei)
     assert run_eval.main(["--fixture", "fixture-web"]) == 0
+
+
+# ------------------------------------------------------------------------------------ Smoke-Test: Ausgabeformat der CLI
+
+@pytest.mark.parametrize("text, ok", [
+    ('{"type": "result", "is_error": false, "result": "ok"}', True),
+    ('{"type": "result", "is_error": true, "result": "401"}', False),
+    ('[{"type": "system"}, {"type": "assistant"}, {"type": "result", "is_error": false, "result": "ok"}]', True),
+    ('[{"type": "system"}, {"type": "result", "is_error": true, "result": "401"}]', False),
+    ('[{"type": "system"}, {"type": "assistant"}]', False),
+    ('[]', False),
+    ('"ok"', False),
+    ('kein json', False),
+])
+def test_smoke_antwort_objekt_und_liste(text, ok):
+    """CLI 2.1.x liefert `--output-format json` als Nachrichtenliste; das letzte `result`-Objekt entscheidet."""
+    assert run_eval._smoke_antwort(text)[0] is ok
