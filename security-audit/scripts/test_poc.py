@@ -7,6 +7,7 @@ Konfigurationsdatei (Schlüssel: die ersten zwei Argumente, sonst das erste). Al
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -423,7 +424,7 @@ def test_ohne_docker_binary(umg, tmp_path):
     assert umg.poc("starten", "--lauf", LAUF, "--rolle", "p1", "--start-befehl", "x", "--port", "1",
                    env=env).returncode == 3
     r = umg.poc("aufraeumen", "--lauf", LAUF, env=env)
-    assert r.returncode == 0
+    assert r.returncode == 1                      # Härtung B2: nicht geprüft heißt unvollständig
     assert "Docker" in r.stderr
 
 
@@ -685,7 +686,7 @@ def test_starten_fehler(umg, tmp_path):
     assert r.stdout.splitlines()[0] == "kategorie: start-fehler"
     assert "boom" in r.stdout
     aufrufe = [a["args"] for a in umg.aufrufe()]
-    assert ["rm", "-f", f"security-audit-{LAUF}-p1-app", f"security-audit-{LAUF}-p1-db"] in aufrufe  # eigene Reste
+    assert ["rm", "-f", "-v", f"security-audit-{LAUF}-p1-app", f"security-audit-{LAUF}-p1-db"] in aufrufe  # eigene Reste
 
 
 def test_starten_app_nicht_erreichbar(umg, tmp_path):
@@ -708,7 +709,7 @@ def test_starten_vorhandene_container_werden_ersetzt(umg, tmp_path):
     gestartet(umg)
     aufrufe = [a["args"] for a in umg.aufrufe()]
     erster_run = next(i for i, a in enumerate(aufrufe) if a[0] == "run")
-    assert ["rm", "-f", f"security-audit-{LAUF}-p1-app", f"security-audit-{LAUF}-p1-db"] in aufrufe[:erster_run]
+    assert ["rm", "-f", "-v", f"security-audit-{LAUF}-p1-app", f"security-audit-{LAUF}-p1-db"] in aufrufe[:erster_run]
 
 
 def test_starten_netz_existiert_schon(umg, tmp_path):
@@ -729,7 +730,7 @@ def test_neustart(umg, tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     aufrufe = [a["args"] for a in umg.aufrufe()]
     assert aufrufe[0][0] == "version"
-    assert aufrufe[1] == ["rm", "-f", f"security-audit-{LAUF}-p1-app", f"security-audit-{LAUF}-p1-db"]
+    assert aufrufe[1] == ["rm", "-f", "-v", f"security-audit-{LAUF}-p1-app", f"security-audit-{LAUF}-p1-db"]
     app = [a for a in laeufe(umg) if wert(a, "--name") == [f"security-audit-{LAUF}-p1-app"]][0]
     assert "PORT=3007" in wert(app, "-e") and "A=1" in wert(app, "-e")
     assert ["exec", f"security-audit-{LAUF}-p1-app", "sh", "-c", "node seed.js"] in aufrufe
@@ -896,7 +897,7 @@ def test_aufraeumen_idempotent(umg, tmp_path):
         assert r.returncode == 0, r.stderr
     assert not os.path.exists(umg.zustand())
     aufrufe = [a["args"] for a in umg.aufrufe()]
-    entfernt_c = [n for a in aufrufe if a[:2] == ["rm", "-f"] for n in a[2:]]
+    entfernt_c = [n for a in aufrufe if a[:3] == ["rm", "-f", "-v"] for n in a[3:]]    # -v: anonyme Volumes (Postgres) mit
     entfernt_n = [n for a in aufrufe if a[:2] == ["network", "rm"] for n in a[2:]]
     entfernt_i = [n for a in aufrufe if a[0] == "rmi" for n in a[1:] if not n.startswith("-")]
     assert sorted(set(entfernt_c)) == sorted(eigene)
@@ -923,8 +924,9 @@ def test_aufraeumen_ohne_daemon(umg, tmp_path):
                 "network": {"rc": 1, "stderr": "Cannot connect to the Docker daemon"},
                 "images": {"rc": 1, "stderr": "Cannot connect to the Docker daemon"}})
     r = umg.poc("aufraeumen", "--lauf", LAUF)
-    assert r.returncode == 0
+    assert r.returncode == 1                  # Härtung B2: Docker nicht geprüft heißt unvollständig, nicht „sauber“
     assert "Docker" in r.stderr and "Cannot connect" not in r.stdout
+    assert "aufraeumen --lauf" in r.stderr
     assert not os.path.exists(umg.zustand())  # Zustandsordner trotzdem entfernt
 
 
@@ -976,7 +978,8 @@ def test_kein_shell_und_kein_host_bezug():
     """Produktionscode ruft docker nie über eine Shell auf und nutzt keine Host-Mounts."""
     quelle = open(POC, encoding="utf-8").read()
     assert "shell=True" not in quelle and "os.system" not in quelle
-    assert '"-v"' not in quelle and "--volume" not in quelle and "--mount" not in quelle
+    ohne_rm = quelle.replace('"rm", "-f", "-v"', "")    # einzige Ausnahme: `docker rm -f -v` löscht anonyme Volumes
+    assert '"-v"' not in ohne_rm and "--volume" not in ohne_rm and "--mount" not in ohne_rm
     assert "--privileged" not in quelle and '"-p"' not in quelle and "--publish" not in quelle
     assert "--network\", \"host\"" not in quelle and "--net=host" not in quelle
 
@@ -1206,7 +1209,7 @@ def test_starten_fehler_mit_daemon_stoerung_entfernt_rollen_container_haertung_a
     r = umg.poc("starten", "--lauf", LAUF, "--rolle", "p1", "--start-befehl", "x", "--port", "1")
     assert r.returncode == 3
     aufrufe = [a["args"] for a in umg.aufrufe()]
-    rm = ["rm", "-f", f"security-audit-{LAUF}-p1-app", f"security-audit-{LAUF}-p1-db"]
+    rm = ["rm", "-f", "-v", f"security-audit-{LAUF}-p1-app", f"security-audit-{LAUF}-p1-db"]
     letzter_run = max(i for i, a in enumerate(aufrufe) if a[0] == "run")
     assert any(a == rm for a in aufrufe[letzter_run + 1:]), aufrufe
 
@@ -1302,3 +1305,172 @@ def test_lockfile_zu_gross_ist_lockfile_fehlt_mit_grund_haertung_b1(tmp_path, mo
     assert "zu groß" in capsys.readouterr().err
     monkeypatch.setattr(poc, "LOCKFILE_MAX", 10 * 1024 * 1024)
     assert poc.lockfile_pruefen(ordner) is None
+
+
+# ------------------------------------------------------------------------------------ Härtung TF1-B2 (Teilzustände, Übergänge)
+
+def test_container_entfernen_loescht_anonyme_volumes_haertung_b2(umg, tmp_path):
+    """Das Postgres-Image legt ein anonymes Volume an; `docker rm -f` ohne `-v` ließe es je neustart liegen."""
+    vorbereitet(umg, tmp_path)
+    gestartet(umg)
+    rm = [a["args"] for a in umg.aufrufe() if a["args"][0] == "rm" and f"security-audit-{LAUF}-p1-db" in a["args"]]
+    assert rm and all(a[:3] == ["rm", "-f", "-v"] for a in rm), rm
+    umg.konfig({"ps": {"stdout": f"security-audit-{LAUF}-p1-db\n"}})
+    umg.poc("aufraeumen", "--lauf", LAUF)
+    rm = [a["args"] for a in umg.aufrufe() if a["args"][0] == "rm" and a["args"][-1] == f"security-audit-{LAUF}-p1-db"]
+    assert rm[-1][:3] == ["rm", "-f", "-v"]
+
+
+def test_neu_reserviert_den_zustandsordner_haertung_b2(umg):
+    r = umg.poc("neu")
+    lauf = r.stdout.strip()
+    assert re.fullmatch(r"[0-9a-f]{8}", lauf)
+    assert os.path.isdir(umg.zustand(lauf)) and (os.stat(umg.zustand(lauf)).st_mode & 0o777) == 0o700
+
+
+def test_neu_ueberspringt_belegte_ids_haertung_b2(temp_ordner, monkeypatch, capsys):
+    os.mkdir(os.path.join(os.path.realpath(temp_ordner), "security-audit-aaaaaaaa"))
+    ids = iter(["aaaaaaaa", "aaaaaaaa", "bbbbbbbb"])
+    monkeypatch.setattr(poc.secrets, "token_hex", lambda n: next(ids))
+    assert poc.cmd_neu(None) == 0
+    assert capsys.readouterr().out.strip() == "bbbbbbbb"
+    assert os.path.isdir(os.path.join(os.path.realpath(temp_ordner), "security-audit-bbbbbbbb"))
+
+
+def test_neu_ohne_freie_id_ist_fehler_haertung_b2(temp_ordner, monkeypatch):
+    os.mkdir(os.path.join(os.path.realpath(temp_ordner), "security-audit-aaaaaaaa"))
+    monkeypatch.setattr(poc.secrets, "token_hex", lambda n: "aaaaaaaa")
+    with pytest.raises(poc.PocFehler):
+        poc.cmd_neu(None)
+
+
+def test_vorbereiten_schreibt_fertig_marker_und_bauen_verlangt_ihn_haertung_b2(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    assert os.path.isfile(os.path.join(umg.zustand(), "quelle.fertig"))
+    os.unlink(os.path.join(umg.zustand(), "quelle.fertig"))        # Absturz mitten im Kopieren: Ordner da, Marker fehlt
+    r = umg.poc("bauen", "--lauf", LAUF)
+    assert r.returncode == 2 and "unvollständig" in r.stderr and "vorbereiten" in r.stderr
+    assert not any(a["args"][0] == "build" for a in umg.aufrufe())
+
+
+def test_vorbereiten_unvollstaendig_hinterlaesst_keinen_marker_haertung_b2(umg, tmp_path, monkeypatch):
+    repo = repo_mit(tmp_path, MINI, name="kunde-x")
+    r = umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo)
+    assert r.returncode == 0
+    shim = tmp_path / "gitshim"
+    shim.mkdir()
+    echtes = subprocess.run(["which", "git"], capture_output=True, text=True).stdout.strip()
+    skript = shim / "git"
+    skript.write_text('#!/bin/sh\ncase " $* " in *" cat-file "*) read x; echo garbage; cat >/dev/null; exit 0;; esac\n'
+                      f'exec {echtes} "$@"\n')
+    skript.chmod(0o755)
+    env = umg.env()
+    env["PATH"] = f"{shim}{os.pathsep}{env['PATH']}"
+    r = umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo, env=env)
+    assert r.returncode == 4
+    assert not os.path.exists(os.path.join(umg.zustand(), "quelle.fertig"))     # vom ersten Lauf entfernt, nicht neu gesetzt
+
+
+def test_entferne_meldet_unvollstaendiges_loeschen_haertung_b2(tmp_path, monkeypatch):
+    wurzel = tmp_path / "w"
+    ziel = wurzel / "x"
+    ziel.mkdir(parents=True)
+    (ziel / "datei").write_text("x")
+    monkeypatch.setattr(poc.shutil, "rmtree", lambda *a, **k: None)           # Löschen scheitert still
+    with pytest.raises(poc.PocFehler, match="nicht vollständig entfernt"):
+        poc._entferne(str(ziel), str(wurzel))
+
+
+def test_aufraeumen_meldet_nicht_loeschbaren_zustandsordner_haertung_b2(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    sperre = os.path.join(umg.zustand(), "quelle", "sperre")
+    os.makedirs(sperre)
+    with open(os.path.join(sperre, "x"), "w") as f:
+        f.write("x")
+    os.chflags(sperre, stat.UF_IMMUTABLE) if hasattr(os, "chflags") and sys.platform == "darwin" else None
+    try:
+        r = umg.poc("aufraeumen", "--lauf", LAUF)
+        if os.path.exists(umg.zustand()):
+            assert r.returncode == 1 and "nicht vollständig entfernt" in r.stderr
+        else:
+            pytest.skip("Plattform ließ das Löschen trotz Sperre zu")
+    finally:
+        if hasattr(os, "chflags") and sys.platform == "darwin":
+            os.chflags(sperre, 0)
+
+
+def test_auflisten_zeigt_laeufe_aus_ordnern_und_docker_haertung_b2(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    anderer = umg.poc("neu").stdout.strip()
+    nur_docker = "12345678"
+    umg.konfig({
+        "ps": {"stdout": f"security-audit-{LAUF}-p1-app\nsecurity-audit-{nur_docker}-p2-db\nfremd\n"},
+        "network ls": {"stdout": f"bridge\nsecurity-audit-{nur_docker}-p2\n"},
+        "images": {"stdout": f"security-audit-{LAUF}-app\npostgres\n"},
+    })
+    r = umg.poc("auflisten")
+    assert r.returncode == 0, r.stderr
+    zeilen = {z.split()[0]: z for z in r.stdout.splitlines() if z.strip()}
+    assert set(zeilen) == {LAUF, anderer, nur_docker}, r.stdout
+    assert "ordner=ja" in zeilen[LAUF] and "container=1" in zeilen[LAUF] and "images=1" in zeilen[LAUF]
+    assert "ordner=ja" in zeilen[anderer] and "container=0" in zeilen[anderer]
+    assert "ordner=nein" in zeilen[nur_docker] and "container=1" in zeilen[nur_docker] and "netze=1" in zeilen[nur_docker]
+    assert not any(a["args"][0] in ("rm", "rmi") or a["args"][:2] == ["network", "rm"] for a in umg.aufrufe())   # nur lesen
+
+
+def test_auflisten_ohne_docker_meldet_und_endet_mit_1_haertung_b2(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    umg.konfig({"version": {"rc": 1, "stderr": "Cannot connect to the Docker daemon"},
+                "ps": {"rc": 1, "stderr": "Cannot connect to the Docker daemon. Is the docker daemon running?"}})
+    r = umg.poc("auflisten")
+    assert r.returncode == 1 and LAUF in r.stdout and "ordner=ja" in r.stdout
+    assert "Docker" in r.stderr
+
+
+def test_auflisten_ignoriert_fremde_ordner_haertung_b2(umg):
+    os.makedirs(os.path.join(umg.tmp, "security-audit-xyz"))
+    os.makedirs(os.path.join(umg.tmp, "security-audit-0a1b2c3d-extra"))
+    os.makedirs(os.path.join(umg.tmp, "anderes"))
+    assert umg.poc("auflisten").stdout.strip() == ""
+
+
+def _sperre(umg, rolle, art):
+    import fcntl
+    os.makedirs(umg.zustand(), exist_ok=True)
+    fd = os.open(os.path.join(umg.zustand(), f"rolle-{rolle}.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, art)
+    return fd
+
+
+def test_rollen_sperre_exklusiv_blockiert_alle_anderen_aufrufe_haertung_b2(umg, tmp_path):
+    import fcntl
+    vorbereitet(umg, tmp_path)
+    gestartet(umg)
+    fd = _sperre(umg, "p1", fcntl.LOCK_EX)
+    try:
+        for args in (["neustart", "--lauf", LAUF, "--rolle", "p1"],
+                     ["starten", "--lauf", LAUF, "--rolle", "p1", "--start-befehl", "x", "--port", "1"],
+                     ["anfrage", "--lauf", LAUF, "--rolle", "p1", "--pfad", "/"],
+                     ["ausfuehren", "--lauf", LAUF, "--rolle", "p1", "--", "true"]):
+            umg.log_datei.unlink(missing_ok=True)
+            r = umg.poc(*args)
+            assert r.returncode == 1 and "Rolle p1" in r.stderr and "gerade" in r.stderr, (args, r.stderr)
+            assert not any(a["args"][0] in ("run", "rm", "exec") for a in umg.aufrufe()), args
+        r = umg.poc("anfrage", "--lauf", LAUF, "--rolle", "p2", "--pfad", "/")       # andere Rolle bleibt frei
+        assert "gerade" not in r.stderr
+    finally:
+        os.close(fd)
+
+
+def test_rollen_sperre_geteilt_erlaubt_anfragen_aber_kein_neustart_haertung_b2(umg, tmp_path):
+    import fcntl
+    vorbereitet(umg, tmp_path)
+    gestartet(umg)
+    fd = _sperre(umg, "p1", fcntl.LOCK_SH)                   # eine laufende anfrage
+    try:
+        assert umg.poc("anfrage", "--lauf", LAUF, "--rolle", "p1", "--pfad", "/").returncode == 0
+        r = umg.poc("neustart", "--lauf", LAUF, "--rolle", "p1")
+        assert r.returncode == 1 and "gerade" in r.stderr
+    finally:
+        os.close(fd)
+    assert umg.poc("neustart", "--lauf", LAUF, "--rolle", "p1").returncode == 0     # Sperre frei: geht

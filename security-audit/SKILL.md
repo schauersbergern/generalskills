@@ -49,7 +49,7 @@ python3 -I ${CLAUDE_SKILL_DIR}/scripts/poc.py neu
 python3 -I ${CLAUDE_SKILL_DIR}/scripts/poc.py vorbereiten --lauf <id> --repo <wurzel>
 ```
 
-`neu` gibt die Lauf-ID (8 Hex) aus, `vorbereiten` auf stdout den Pfad der Arbeitskopie. Die stderr-Meldungen von `vorbereiten` (übersprungene Symlinks, Namenskollisionen, nicht kopierte `.env*`) kommen in die Hinweise. Exit 4 (`kategorie: git-fehler` oder `arbeitskopie-unvollstaendig`): Schritt 8, dann Ende, ein Audit auf unvollständiger Basis wäre irreführend.
+`neu` gibt die Lauf-ID (8 Hex) aus und legt den Zustandsordner an (zwei parallele Audits bekommen nie dieselbe ID), `vorbereiten` auf stdout den Pfad der Arbeitskopie. Die stderr-Meldungen von `vorbereiten` (übersprungene Symlinks, Namenskollisionen, nicht kopierte `.env*`) kommen in die Hinweise. Exit 4 (`kategorie: git-fehler` oder `arbeitskopie-unvollstaendig`): Schritt 8, dann Ende, ein Audit auf unvollständiger Basis wäre irreführend.
 
 ### 2. Karte der Angriffsfläche (Hauptsession)
 
@@ -106,7 +106,11 @@ Exit 2 liefert die Fehlerliste auf stderr: JSON korrigieren und erneut. Das Mark
 python3 -I ${CLAUDE_SKILL_DIR}/scripts/poc.py aufraeumen --lauf <id>
 ```
 
-Idempotent. Exit 1 heißt „unvollständig“: nenne dem User den Befehl zum Wiederholen. Gibt es keine Lauf-ID (Abbruch vor `neu`), entfällt der Schritt.
+Idempotent. Exit 1 heißt „unvollständig“ (auch wenn Docker nicht erreichbar war): nenne dem User den Befehl zum Wiederholen. Gibt es keine Lauf-ID (Abbruch vor `neu`), entfällt der Schritt. Ist die Lauf-ID verloren (abgebrochene Session), listet `poc.py auflisten` alle Läufe mit Resten (Zustandsordner, Container, Netze, Images); nur eigene, beendete Läufe räumst du dann je ID mit `aufraeumen` auf:
+
+```
+python3 -I ${CLAUDE_SKILL_DIR}/scripts/poc.py auflisten
+```
 
 ### 9. Agent-Statistik
 

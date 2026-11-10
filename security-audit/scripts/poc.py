@@ -7,7 +7,7 @@ Wegwerf-Container im Netz der Rolle. Es gibt keine Host-Mounts und keine veröff
 nur, was `security-audit-<lauf>` heißt (Container, Netze, Images) und der eigene Zustandsordner.
 
 Aufruf (immer als einzelner einfacher Befehl, siehe Netzregel):
-  python3 -I poc.py neu | pruefen | vorbereiten | bauen | starten | ausfuehren | neustart | anfrage | aufraeumen
+  python3 -I poc.py neu | pruefen | vorbereiten | bauen | starten | ausfuehren | neustart | anfrage | aufraeumen | auflisten
 
 Exit-Codes: 0 ok, 2 ungültige Argumente, 3 Docker fehlt oder Daemon nicht erreichbar, 4 Bau/Start scheitert
 (erste stdout-Zeile `kategorie: <wert>`, danach höchstens die letzten 40 Zeilen der Docker-Ausgabe),
@@ -16,6 +16,8 @@ Exit-Codes: 0 ok, 2 ungültige Argumente, 3 Docker fehlt oder Daemon nicht errei
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -127,11 +129,12 @@ def _image(lauf: str) -> str:
 
 
 def _entferne(pfad: str, wurzel: str) -> None:
-    """Direkten Eintrag `pfad` von `wurzel` löschen (ein Symlink: nur der Link). Schreibgeschützte Ordner werden
-    vorher freigegeben."""
+    """Direkten Eintrag `pfad` von `wurzel` löschen (Datei, Ordner oder Symlink: nur der Link). Schreibgeschützte Ordner werden
+    vorher freigegeben. Bleibt nach dem zweiten Versuch etwas übrig, wirft die Funktion PocFehler (Exit 1): ein stilles
+    Weitermachen ließe alte Dateien in einer neuen Arbeitskopie stehen oder meldete „aufgeräumt“ trotz Rest."""
     if os.path.realpath(os.path.dirname(pfad)) != os.path.realpath(wurzel):
         raise PocFehler(f"Löschen außerhalb des Zustandsordners verweigert: {pfad}")
-    if os.path.islink(pfad):
+    if os.path.islink(pfad) or os.path.isfile(pfad):
         os.unlink(pfad)
         return
     if not os.path.lexists(pfad):
@@ -139,12 +142,14 @@ def _entferne(pfad: str, wurzel: str) -> None:
     shutil.rmtree(pfad, ignore_errors=True)
     if os.path.lexists(pfad):
         for ordner, unter, _dateien in os.walk(pfad):  # os.walk folgt keinen Symlinks
-            os.chmod(ordner, 0o700)
-            for u in unter:
-                p = os.path.join(ordner, u)
-                if not os.path.islink(p):
+            for p in [ordner] + [os.path.join(ordner, u) for u in unter if not os.path.islink(os.path.join(ordner, u))]:
+                try:
                     os.chmod(p, 0o700)
+                except OSError:
+                    pass                   # unveränderlich o. ä.: der Rest wird unten als nicht entfernt gemeldet
         shutil.rmtree(pfad, ignore_errors=True)
+    if os.path.lexists(pfad):
+        raise PocFehler(f"{pfad} nicht vollständig entfernt (Rechte oder gesperrte Dateien)", code=1)
 
 
 def _schreibe_atomar(pfad: str, daten: dict) -> None:
@@ -388,6 +393,27 @@ def _fehler_ende(kategorie: str, text: str = "", hinweise: list[str] | None = No
     return 4
 
 
+@contextlib.contextmanager
+def _rollen_sperre(lauf: str, rolle: str, exklusiv: bool):
+    """Sperre je Rolle (`rolle-<r>.lock` im Zustandsordner, flock): starten/neustart exklusiv, anfrage/ausfuehren geteilt.
+    Ist die Rolle gerade belegt, endet der Aufruf mit Exit 1 und Meldung, statt Container eines anderen Aufrufs zu löschen
+    oder eine Anfrage mitten in einem Neustart zu verlieren. Ohne Zustandsordner gibt es nichts zu schützen."""
+    ordner = _ordner(lauf)
+    if not os.path.isdir(ordner):
+        yield
+        return
+    fd = os.open(os.path.join(ordner, f"rolle-{rolle}.lock"), os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        try:
+            fcntl.flock(fd, (fcntl.LOCK_EX if exklusiv else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise PocFehler(f"Rolle {rolle} wird gerade von einem anderen poc.py-Aufruf neu gestartet oder benutzt: "
+                            f"warten und erneut aufrufen", code=1) from None
+        yield
+    finally:
+        os.close(fd)
+
+
 # ------------------------------------------------------------------------------------ Lockfile / Node
 
 def _json_datei(pfad: str) -> object:
@@ -612,8 +638,17 @@ def node_version(quelle: str, vorgabe: str | None) -> str:
 # ------------------------------------------------------------------------------------ Befehle
 
 def cmd_neu(_a: argparse.Namespace) -> int:
-    print(secrets.token_hex(4))
-    return 0
+    """Neue Lauf-ID; der Zustandsordner wird dabei exklusiv angelegt (0700): zwei parallele Audits bekommen nie dieselbe ID,
+    und ein Lauf, der gleich danach abbricht, bleibt über `poc.py auflisten` auffindbar."""
+    for _ in range(50):
+        lauf = secrets.token_hex(4)
+        try:
+            os.mkdir(zustand_ordner(lauf), 0o700)
+        except FileExistsError:
+            continue
+        print(lauf)
+        return 0
+    raise PocFehler("keine freie Lauf-ID gefunden (Temp-Ordner voller security-audit-*-Ordner?)", code=1)
 
 
 def cmd_pruefen(_a: argparse.Namespace) -> int:
@@ -628,6 +663,8 @@ def cmd_vorbereiten(a: argparse.Namespace) -> int:
         raise PocFehler(f"--repo ist kein Ordner: {a.repo}")
     ordner = _ordner(a.lauf, anlegen=True)
     quelle = os.path.join(ordner, "quelle")
+    marker = os.path.join(ordner, "quelle.fertig")
+    _entferne(marker, ordner)          # erst der Marker, dann die Kopie: ein Absturz dazwischen hinterlässt keine „fertige“ Kopie
     _entferne(quelle, ordner)
     try:
         meldungen = gitkopie.arbeitskopie(repo, quelle)
@@ -644,6 +681,7 @@ def cmd_vorbereiten(a: argparse.Namespace) -> int:
     if any("Arbeitskopie unvollständig" in m for m in meldungen):
         print("kategorie: arbeitskopie-unvollstaendig")
         return 4
+    _schreibe_atomar(marker, {"fertig": True})
     print(quelle)
     return 0
 
@@ -654,6 +692,9 @@ def cmd_bauen(a: argparse.Namespace) -> int:
     quelle = os.path.join(ordner, "quelle")
     if not os.path.isdir(quelle):
         raise PocFehler("Arbeitskopie fehlt: erst `poc.py vorbereiten --lauf … --repo …`")
+    if not os.path.isfile(os.path.join(ordner, "quelle.fertig")):
+        raise PocFehler("Arbeitskopie unvollständig (kein Fertig-Marker, Abbruch beim Kopieren?): "
+                        "erneut `poc.py vorbereiten --lauf … --repo …`")
     kategorie = lockfile_pruefen(quelle)
     if kategorie:
         return _fehler_ende(kategorie)
@@ -682,7 +723,8 @@ def cmd_bauen(a: argparse.Namespace) -> int:
 
 def _rolle_entfernen(lauf: str, rolle: str) -> None:
     netz = _netz(lauf, rolle)
-    _docker(["rm", "-f", f"{netz}-app", f"{netz}-db"], KURZ_TIMEOUT, budget=False)  # fehlende Container sind kein Fehler
+    # `-v`: auch das anonyme Volume des Postgres-Images; sonst bliebe je neustart ein Volume liegen
+    _docker(["rm", "-f", "-v", f"{netz}-app", f"{netz}-db"], KURZ_TIMEOUT, budget=False)  # fehlende Container sind kein Fehler
 
 
 def _anfrage_container(lauf: str, rolle: str, argumente: list[str], daten: bytes, timeout: int) -> Ergebnis:
@@ -764,18 +806,21 @@ def cmd_starten(a: argparse.Namespace) -> int:
     _frist_setzen("SECURITY_AUDIT_START_BUDGET", START_BUDGET)
     ordner = _ordner(a.lauf, anlegen=True)
     p = {"start_befehl": a.start_befehl, "port": a.port, "env": a.env or [], "dienst": a.dienst, "seed": a.seed}
-    _schreibe_atomar(os.path.join(ordner, f"rolle-{a.rolle}.json"), {"lauf": a.lauf, "rolle": a.rolle, **p})
-    return _starte(a.lauf, a.rolle, p)
+    with _rollen_sperre(a.lauf, a.rolle, exklusiv=True):
+        _schreibe_atomar(os.path.join(ordner, f"rolle-{a.rolle}.json"), {"lauf": a.lauf, "rolle": a.rolle, **p})
+        return _starte(a.lauf, a.rolle, p)
 
 
 def cmd_neustart(a: argparse.Namespace) -> int:
     _daemon_pruefen()
     _frist_setzen("SECURITY_AUDIT_START_BUDGET", START_BUDGET)
-    return _starte(a.lauf, a.rolle, _lade_rolle(a.lauf, a.rolle))
+    with _rollen_sperre(a.lauf, a.rolle, exklusiv=True):
+        return _starte(a.lauf, a.rolle, _lade_rolle(a.lauf, a.rolle))
 
 
 def cmd_ausfuehren(a: argparse.Namespace) -> int:
-    r = _docker(["exec", f"{_netz(a.lauf, a.rolle)}-app", *a.kommando], EXEC_TIMEOUT, anfang=True)
+    with _rollen_sperre(a.lauf, a.rolle, exklusiv=False):
+        r = _docker(["exec", f"{_netz(a.lauf, a.rolle)}-app", *a.kommando], EXEC_TIMEOUT, anfang=True)
     _gib_aus(r)
     if r.rc is None:
         print("ausfuehren: Zeitüberschreitung. Der Befehl kann im Container weiterlaufen (docker exec beendet ihn nicht); "
@@ -803,7 +848,8 @@ def cmd_anfrage(a: argparse.Namespace) -> int:
     argumente = ["--url", f"http://app:{z['port']}{a.pfad}", "--methode", a.methode]
     for h in a.header or []:
         argumente += ["--header", h]
-    r = _anfrage_container(a.lauf, a.rolle, argumente, daten, ANFRAGE_TIMEOUT)
+    with _rollen_sperre(a.lauf, a.rolle, exklusiv=False):
+        r = _anfrage_container(a.lauf, a.rolle, argumente, daten, ANFRAGE_TIMEOUT)
     _gib_aus(r)
     if r.rc is None:
         print("anfrage: Zeitüberschreitung", file=sys.stderr)
@@ -831,7 +877,7 @@ def cmd_aufraeumen(a: argparse.Namespace) -> int:
     entfernt = {"container": 0, "netze": 0, "images": 0}
     try:
         schritte = (
-            ("container", ["ps", "-a", "--format", "{{.Names}}"], lambda n: ["rm", "-f", *n]),
+            ("container", ["ps", "-a", "--format", "{{.Names}}"], lambda n: ["rm", "-f", "-v", *n]),
             ("netze", ["network", "ls", "--format", "{{.Name}}"], lambda n: ["network", "rm", *n]),
             ("images", ["images", "--format", "{{.Repository}}"], lambda n: ["rmi", *n]),
         )
@@ -851,11 +897,60 @@ def cmd_aufraeumen(a: argparse.Namespace) -> int:
                 print(f"aufraeumen: {art} nicht vollständig entfernt: {_tail(r.text, 5) or 'Timeout'}", file=sys.stderr)
                 unvollstaendig = True
     except DockerFehlt as e:
+        unvollstaendig = True          # Docker nicht geprüft: nicht „sauber“ melden (Exit 1)
         print(f"aufraeumen: Docker nicht erreichbar ({e}); Docker-Ressourcen mit Präfix security-audit-{lauf} "
               f"nicht geprüft, später erneut `poc.py aufraeumen --lauf {lauf}` ausführen", file=sys.stderr)
     if os.path.lexists(ordner):
-        _entferne(ordner, os.path.dirname(ordner))
+        try:
+            _entferne(ordner, os.path.dirname(ordner))
+        except PocFehler as e:
+            unvollstaendig = True
+            print(f"aufraeumen: {e}", file=sys.stderr)
     print(f"aufgeräumt: {entfernt['container']} Container, {entfernt['netze']} Netze, {entfernt['images']} Images")
+    return 1 if unvollstaendig else 0
+
+
+_LAUF_NAME = re.compile(r"/?security-audit-([0-9a-f]{8})(?:-[^\n]*)?")
+
+
+def cmd_auflisten(_a: argparse.Namespace) -> int:
+    """Lesen, nie löschen: alle Läufe, deren Zustandsordner im Temp-Ordner oder deren Docker-Ressourcen `security-audit-<lauf>*`
+    noch existieren (ein Abbruch ohne Aufräumen, verlorene Lauf-ID). Pro Lauf eine Zeile; aufgeräumt wird je Lauf mit
+    `poc.py aufraeumen --lauf <id>`."""
+    laeufe: dict[str, dict[str, object]] = {}
+
+    def eintrag(lauf: str) -> dict[str, object]:
+        return laeufe.setdefault(lauf, {"ordner": "nein", "container": 0, "netze": 0, "images": 0})
+
+    basis = os.path.realpath(tempfile.gettempdir())
+    for name in sorted(os.listdir(basis)):
+        m = re.fullmatch(r"security-audit-([0-9a-f]{8})", name)
+        if m and os.path.isdir(os.path.join(basis, name)) and not os.path.islink(os.path.join(basis, name)):
+            eintrag(m.group(1))["ordner"] = "ja"
+    unvollstaendig = False
+    try:
+        for art, liste in (("container", ["ps", "-a", "--format", "{{.Names}}"]),
+                           ("netze", ["network", "ls", "--format", "{{.Name}}"]),
+                           ("images", ["images", "--format", "{{.Repository}}"])):
+            r = _docker(liste, KURZ_TIMEOUT)
+            if not r.ok:
+                print(f"auflisten: {art} nicht lesbar: {_tail(r.text, 3) or 'Timeout'}", file=sys.stderr)
+                unvollstaendig = True
+                continue
+            gesehen: set[str] = set()
+            for zeile in r.out.decode("utf-8", "replace").splitlines():
+                m = _LAUF_NAME.fullmatch(zeile.strip())
+                if m and zeile.strip().lstrip("/") not in gesehen:
+                    gesehen.add(zeile.strip().lstrip("/"))
+                    eintrag(m.group(1))[art] = int(eintrag(m.group(1))[art]) + 1
+    except DockerFehlt as e:
+        unvollstaendig = True
+        print(f"auflisten: Docker nicht erreichbar ({e}); nur Zustandsordner aufgelistet", file=sys.stderr)
+    for lauf in sorted(laeufe):
+        e = laeufe[lauf]
+        print(f"{lauf} ordner={e['ordner']} container={e['container']} netze={e['netze']} images={e['images']}")
+    if laeufe:
+        print("auflisten: je Lauf aufräumen mit `poc.py aufraeumen --lauf <id>` (nur eigene, beendete Läufe!)", file=sys.stderr)
     return 1 if unvollstaendig else 0
 
 
@@ -942,6 +1037,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--daten")
     s.add_argument("--daten-datei")
     neu("aufraeumen", cmd_aufraeumen)
+    neu("auflisten", cmd_auflisten, lauf=False)
     return p
 
 
