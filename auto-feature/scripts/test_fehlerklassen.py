@@ -205,7 +205,7 @@ class Validierung(Basis):
 
     def test_pruefpunkt_braucht_pfeil_mit_beiden_seiten(self):
         self.pruefe(GUT.replace(" → ", " "), False)
-        self.pruefe(GUT.replace("Claim-Token annimmt → Test", "Claim-Token annimmt → "), False)
+        self.pruefe(GUT.replace(" → Test mit veraltetem Token, der rot wird.“", " → “"), False)
         self.pruefe(GUT.replace("„Jede Methode, die einen Claim-Token annimmt →", "„ →"), False)
         self.pruefe(GUT, True)
 
