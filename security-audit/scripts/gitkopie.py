@@ -20,13 +20,15 @@ import os
 import stat
 import subprocess
 import threading
+import time
 import unicodedata
 from typing import NamedTuple
 
 MAX_SYMLINK_KETTE = 8
 MAX_SYMLINK_GROESSE = 4096
 MAX_TEXT = 300
-BATCH_TIMEOUT = 600
+BATCH_TIMEOUT = 400          # ganzer cat-file-Prozess; mit ls-tree (120 s) unter dem 600-s-Limit des Skills
+HINWEIS_BUDGET = 90          # Sekunden für das Hashen des Arbeitsbaums in repo_hinweise
 LFS_PREFIX = b"version https://git-lfs"
 LFS_MAX_GROESSE = 1024
 DATEI_MODI = ("100644", "100755")
@@ -434,11 +436,13 @@ def repo_konfiguration(repo: str) -> list[str]:
 # ------------------------------------------------------------------------------------ Hinweise
 
 def _blob_hash(algo: str, fd: int, groesse: int) -> str | None:
+    """Git-Blob-Hash der Datei hinter `fd`; None, wenn sie nicht genau `groesse` Bytes hat. Liest höchstens `groesse + 1`
+    Bytes: eine Datei, die beim Lesen weiter wächst, ergibt None statt einer Endlosschleife."""
     h = hashlib.new(algo)
     h.update(b"blob %d\0" % groesse)
     gelesen = 0
-    while True:
-        stueck = os.read(fd, 1 << 20)
+    while gelesen <= groesse:
+        stueck = os.read(fd, min(1 << 20, groesse - gelesen + 1))
         if not stueck:
             break
         gelesen += len(stueck)
@@ -528,9 +532,13 @@ def repo_hinweise(repo: str) -> list[str]:
 
     wurzel = os.path.realpath(repo)
     ordner_ok: dict[str, bool] = {}
-    for pfad, (modus, sha) in sorted(index.items()):
-        if modus not in DATEI_MODI:
-            continue
+    kandidaten = [(pfad, ms) for pfad, ms in sorted(index.items()) if ms[0] in DATEI_MODI]
+    ende = time.monotonic() + HINWEIS_BUDGET
+    for geprueft, (pfad, (modus, sha)) in enumerate(kandidaten):
+        if time.monotonic() > ende:
+            hinweise.append(f"Prüfung auf Änderungen im Arbeitsbaum abgebrochen (Zeitbudget {HINWEIS_BUDGET} s): "
+                            f"{geprueft} von {len(kandidaten)} Dateien geprüft")
+            break
         voll = os.path.join(wurzel, pfad)
         eltern = os.path.dirname(voll)
         if eltern not in ordner_ok:

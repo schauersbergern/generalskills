@@ -49,6 +49,9 @@ SEED_TIMEOUT = 180
 PULL_TIMEOUT = 300
 EXEC_TIMEOUT = 120
 DB_WARTEN = 60
+START_BUDGET = 440               # Gesamtzeit der Arbeitsphase von starten/neustart (Skill-Bash-Limit: 600 s, Aufräumen folgt)
+AUFRAEUMEN_BUDGET = 440          # Gesamtzeit der Docker-Aufrufe von aufraeumen
+LOCKFILE_MAX = 64 * 1024 * 1024  # größere package-lock.json gelten als unlesbar
 TAIL_ZEILEN = 40
 ZEILE_MAX = 300
 DATEN_MAX = 1024 * 1024
@@ -196,6 +199,26 @@ class Ergebnis(NamedTuple):
         return self.rc == 0
 
 
+_ENDE: float | None = None          # monotone Frist des laufenden Befehls (starten, neustart, aufraeumen)
+_BUDGET_SEKUNDEN = 0
+
+
+def _frist_setzen(umgebungsvariable: str, standard: int) -> None:
+    """Gesamtbudget des Befehls: Docker-Aufrufe mit `budget=True` werden auf die Restzeit gekürzt, danach nicht mehr gestartet.
+    Die Umgebungsvariable überschreibt den Standard (Tests)."""
+    global _ENDE, _BUDGET_SEKUNDEN
+    try:
+        sekunden = int(os.environ.get(umgebungsvariable, ""))
+    except ValueError:
+        sekunden = standard
+    _BUDGET_SEKUNDEN = sekunden if sekunden > 0 else standard
+    _ENDE = time.monotonic() + _BUDGET_SEKUNDEN
+
+
+def _budget_erschoepft() -> bool:
+    return _ENDE is not None and time.monotonic() >= _ENDE
+
+
 def _timeout(sekunden: int) -> int:
     try:
         grenze = int(os.environ.get("SECURITY_AUDIT_DOCKER_TIMEOUT", ""))
@@ -270,11 +293,16 @@ def _beenden(p: subprocess.Popen) -> None:
 
 
 def _docker(args: list[str], timeout: int, eingabe: bytes | None = None, env: dict | None = None,
-            begrenzen: bool = True, anfang: bool = False) -> Ergebnis:
+            begrenzen: bool = True, anfang: bool = False, budget: bool = True) -> Ergebnis:
     """docker ohne Shell mit Timeout (erst SIGTERM, dann SIGKILL) und Lesegrenze (LESE_MAX je Strom; behalten
     wird das Ende, mit `anfang` der Anfang). Wirft DockerFehlt, wenn docker fehlt oder der Daemon nicht erreichbar
     ist: bei Exit 1/125 und Treffer in stderr nur, wenn `docker version` danach ebenfalls scheitert (die Ausgabe von
     Build und Container stammt vom Kunden und beweist nichts)."""
+    if budget and _ENDE is not None and args[0] != "version":
+        rest = _ENDE - time.monotonic()
+        if rest <= 0:                                       # Gesamtbudget aufgebraucht: nichts mehr starten
+            return Ergebnis(None, b"", b"", False)
+        timeout = min(timeout, rest)
     umgebung = dict(os.environ)
     umgebung.update(env or {})
     try:
@@ -297,14 +325,14 @@ def _docker(args: list[str], timeout: int, eingabe: bytes | None = None, env: di
         print(f"docker {args[0]}: Ausgabe auf {LESE_MAX // 1024 // 1024} MiB gekürzt", file=sys.stderr)
     if (rc in DAEMON_EXIT and args[0] != "version"
             and any(m in e.decode("utf-8", "replace").lower() for m in DAEMON_WEG)):
-        v = _docker(["version", "--format", "{{.Server.Version}}"], VERSION_TIMEOUT)
+        v = _docker(["version", "--format", "{{.Server.Version}}"], VERSION_TIMEOUT, budget=False)
         if not v.ok:
             raise DockerFehlt(_tail(e.decode("utf-8", "replace"), 3))
     return r
 
 
 def _daemon_pruefen() -> str:
-    r = _docker(["version", "--format", "{{.Server.Version}}"], VERSION_TIMEOUT)
+    r = _docker(["version", "--format", "{{.Server.Version}}"], VERSION_TIMEOUT, budget=False)
     if not r.ok:
         grund = "Timeout" if r.rc is None else _tail(r.text, 3)
         raise DockerFehlt(f"Docker-Server nicht erreichbar: {grund}")
@@ -368,8 +396,12 @@ def _json_datei(pfad: str) -> object:
 
 
 def _lock_laden(quelle: str) -> dict | None:
+    pfad = os.path.join(quelle, "package-lock.json")
     try:
-        daten = _json_datei(os.path.join(quelle, "package-lock.json"))
+        if os.path.getsize(pfad) > LOCKFILE_MAX:
+            print(f"poc.py: package-lock.json zu groß (über {LOCKFILE_MAX // 1024 // 1024} MiB), nicht gelesen", file=sys.stderr)
+            return None
+        daten = _json_datei(pfad)
     except (OSError, ValueError, RecursionError):
         return None
     return daten if isinstance(daten, dict) else None
@@ -650,7 +682,7 @@ def cmd_bauen(a: argparse.Namespace) -> int:
 
 def _rolle_entfernen(lauf: str, rolle: str) -> None:
     netz = _netz(lauf, rolle)
-    _docker(["rm", "-f", f"{netz}-app", f"{netz}-db"], KURZ_TIMEOUT)  # fehlende Container sind kein Fehler
+    _docker(["rm", "-f", f"{netz}-app", f"{netz}-db"], KURZ_TIMEOUT, budget=False)  # fehlende Container sind kein Fehler
 
 
 def _anfrage_container(lauf: str, rolle: str, argumente: list[str], daten: bytes, timeout: int) -> Ergebnis:
@@ -673,8 +705,10 @@ def _start_fehler(lauf: str, rolle: str, text: str) -> int:
         except DockerFehlt:
             pass                           # Daemon wirklich weg: `poc.py aufraeumen` holt es später nach
         raise
-    logs = _docker(["logs", "--tail", str(TAIL_ZEILEN), f"{_netz(lauf, rolle)}-app"], KURZ_TIMEOUT)
+    logs = _docker(["logs", "--tail", str(TAIL_ZEILEN), f"{_netz(lauf, rolle)}-app"], KURZ_TIMEOUT, budget=False)
     _rolle_entfernen(lauf, rolle)
+    if _budget_erschoepft():
+        text = f"Zeitbudget von {_BUDGET_SEKUNDEN} s erschöpft (Bash-Limit des Skills: 600 s). {text}"
     return _fehler_ende("start-fehler", "\n".join(t for t in (_tail(text), _tail(logs.text) if logs.ok else "") if t))
 
 
@@ -727,6 +761,7 @@ def _starte(lauf: str, rolle: str, p: dict) -> int:
 
 def cmd_starten(a: argparse.Namespace) -> int:
     _daemon_pruefen()
+    _frist_setzen("SECURITY_AUDIT_START_BUDGET", START_BUDGET)
     ordner = _ordner(a.lauf, anlegen=True)
     p = {"start_befehl": a.start_befehl, "port": a.port, "env": a.env or [], "dienst": a.dienst, "seed": a.seed}
     _schreibe_atomar(os.path.join(ordner, f"rolle-{a.rolle}.json"), {"lauf": a.lauf, "rolle": a.rolle, **p})
@@ -735,6 +770,7 @@ def cmd_starten(a: argparse.Namespace) -> int:
 
 def cmd_neustart(a: argparse.Namespace) -> int:
     _daemon_pruefen()
+    _frist_setzen("SECURITY_AUDIT_START_BUDGET", START_BUDGET)
     return _starte(a.lauf, a.rolle, _lade_rolle(a.lauf, a.rolle))
 
 
@@ -742,7 +778,8 @@ def cmd_ausfuehren(a: argparse.Namespace) -> int:
     r = _docker(["exec", f"{_netz(a.lauf, a.rolle)}-app", *a.kommando], EXEC_TIMEOUT, anfang=True)
     _gib_aus(r)
     if r.rc is None:
-        print("ausfuehren: Zeitüberschreitung", file=sys.stderr)
+        print("ausfuehren: Zeitüberschreitung. Der Befehl kann im Container weiterlaufen (docker exec beendet ihn nicht); "
+              f"`poc.py neustart --lauf {a.lauf} --rolle {a.rolle}` setzt die Rolle zurück", file=sys.stderr)
         return 1
     if r.rc != 0:
         print(f"ausfuehren: Befehl endete mit Exit {r.rc}", file=sys.stderr)
@@ -788,6 +825,7 @@ def _eigene_namen(lauf: str, text: str) -> list[str]:
 
 def cmd_aufraeumen(a: argparse.Namespace) -> int:
     lauf = a.lauf
+    _frist_setzen("SECURITY_AUDIT_AUFRAEUMEN_BUDGET", AUFRAEUMEN_BUDGET)
     ordner = zustand_ordner(lauf)  # bewusst ohne Besitzerprüfung: ein Symlink wird als Link entfernt
     unvollstaendig = False
     entfernt = {"container": 0, "netze": 0, "images": 0}

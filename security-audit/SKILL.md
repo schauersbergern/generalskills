@@ -27,7 +27,7 @@ Argumente: `$ARGUMENTS`.
 7. **Agent-Typ:** `Agent(subagent_type: "opus-xhigh", model: "opus", run_in_background: false, …)`. Fehlt der Typ: `general-purpose` mit `model: "opus"` und im Bericht „Effort nicht garantiert“.
 8. **Skript-Aufrufe** exakt in der Form `python3 -I ${CLAUDE_SKILL_DIR}/scripts/<skript>.py <unterbefehl> …` (ohne `cd`, ohne Anführungszeichen um den Pfad), Agent-Statistik als `python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py …`.
    - `poc.py` immer als **einzelner einfacher Befehl**: kein `&&`, `|`, `;`, `2>&1`, `$(…)`, keine Umlaute oder Nicht-ASCII-Zeichen. Argumente mit Sonderzeichen (auch Leerzeichen) in `'…'`. Request-Body nur über `--daten-datei` (Datei vorher mit Write im Ausgabeordner anlegen).
-   - `poc.py bauen`, `poc.py starten`, `poc.py neustart` und `poc.py ausfuehren` mit Bash-`timeout: 600000`.
+   - `poc.py vorbereiten`, `poc.py bauen`, `poc.py starten`, `poc.py neustart`, `poc.py ausfuehren`, `poc.py aufraeumen` und `bericht.py kontext` mit Bash-`timeout: 600000`. Jeder dieser Aufrufe hat ein eigenes Zeitbudget unter 600 s und endet mit einer Meldung (`start-fehler` mit „Zeitbudget“, Exit 1 bei `aufraeumen`), statt vom Bash-Limit abgebrochen zu werden.
    - Bash sonst nur für `bericht.py`, `agent-stats.py` und `ls`. Write nur im Ausgabeordner.
 9. **Die Netzregel ist Erkennung, keine Sandbox:** Das Eval und `bericht.py rendern` melden Verstöße im Nachhinein. Die echte Sperre ist die Rechtekonfiguration der Session. Ob `disallowed-tools` auf Subagenten durchschlägt, ist offen; dort gilt die Sperre per Briefing.
 

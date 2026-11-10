@@ -207,7 +207,8 @@ def test_briefings_abschnitte():
 # ------------------------------------------------------------------------------------ Härtung TF1-A6
 
 BASH_TIMEOUT = "timeout: 600000"
-LANGE_UNTERBEFEHLE = ("bauen", "starten", "neustart", "ausfuehren")   # laufen länger als der Bash-Standard (120 s)
+# laufen länger als der Bash-Standard (120 s); jeder hat ein eigenes Zeitbudget unter 600 s (Härtung B1)
+LANGE_UNTERBEFEHLE = ("vorbereiten", "bauen", "starten", "neustart", "ausfuehren", "aufraeumen")
 NICHT_GEPRUEFT = "nicht geprüft (Budget)"
 
 
@@ -217,6 +218,7 @@ def test_timeout_liste_nennt_alle_langen_unterbefehle_haertung_a6():
     assert zeilen, "kein Hinweis auf Bash-timeout 600000 in SKILL.md"
     for zeile in zeilen:
         assert all(f"poc.py {u}" in zeile for u in LANGE_UNTERBEFEHLE), zeile
+        assert "bericht.py kontext" in zeile, zeile
     briefing = [z for z in _lies(BRIEFINGS).splitlines() if "timeout 600000" in z]
     assert briefing and all(u in briefing[0] for u in ("neustart", "ausfuehren"))
 

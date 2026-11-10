@@ -1251,3 +1251,54 @@ def test_ausgabegrenze_gilt_nach_dem_escaping(umg, tmp_path):
     assert "gekürzt" in r.stderr
     assert r.stderr.count("\\x02") * 4 <= 64 * 1024 + 4
     assert len(r.stderr) <= 64 * 1024 + 200  # Escapes + Hinweis
+
+
+# ------------------------------------------------------------------------------------ Härtung TF1-B1 (lange Operationen)
+
+def test_gesamtbudgets_liegen_unter_dem_bash_limit_haertung_b1():
+    """Der Bash-Timeout des Skills ist 600 s; die Arbeitsphase von starten/aufraeumen endet davor, samt Aufräumen."""
+    assert poc.START_BUDGET + poc.KURZ_TIMEOUT * 2 + poc.VERSION_TIMEOUT < 600
+    assert poc.AUFRAEUMEN_BUDGET + poc.KURZ_TIMEOUT < 600
+    assert poc.BAU_TIMEOUT + 2 * poc.VERSION_TIMEOUT < 600
+
+
+def test_starten_zeitbudget_erschoepft_ist_start_fehler_mit_aufraeumen_haertung_b1(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    umg.konfig({"network create": {"sleep": 6}})
+    t0 = time.monotonic()
+    r = umg.poc("starten", "--lauf", LAUF, "--rolle", "p1", "--start-befehl", "x", "--port", "1",
+                env=umg.env(SECURITY_AUDIT_START_BUDGET="2"))
+    assert time.monotonic() - t0 < 5.5, "Aufruf muss am Budget enden, nicht am Einzel-Timeout"
+    assert r.returncode == 4 and r.stdout.splitlines()[0] == "kategorie: start-fehler"
+    assert "Zeitbudget" in r.stdout
+    aufrufe = [a["args"] for a in umg.aufrufe()]
+    assert not any(a[0] == "run" for a in aufrufe), "nach erschöpftem Budget startet nichts mehr"
+    rm = [a for a in aufrufe if a[0] == "rm" and f"security-audit-{LAUF}-p1-app" in a]
+    assert len(rm) >= 2                                 # am Anfang und im Fehlerpfad (Aufräumen ist vom Budget ausgenommen)
+
+
+def test_aufraeumen_zeitbudget_erschoepft_ist_unvollstaendig_haertung_b1(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    umg.konfig({"ps": {"sleep": 6}})
+    t0 = time.monotonic()
+    r = umg.poc("aufraeumen", "--lauf", LAUF, env=umg.env(SECURITY_AUDIT_AUFRAEUMEN_BUDGET="2"))
+    assert time.monotonic() - t0 < 5.5
+    assert r.returncode == 1 and "Timeout" in r.stderr
+    assert not os.path.exists(umg.zustand())            # lokaler Teil läuft immer
+
+
+def test_ausfuehren_zeitueberschreitung_meldet_weiterlaufenden_prozess_haertung_b1(umg):
+    umg.konfig({"exec": {"sleep": 5}})
+    r = umg.poc("ausfuehren", "--lauf", LAUF, "--rolle", "p1", "--", "sleep", "99",
+                env=umg.env(SECURITY_AUDIT_DOCKER_TIMEOUT="1"))
+    assert r.returncode == 1 and "Zeitüberschreitung" in r.stderr
+    assert "weiter" in r.stderr and "neustart" in r.stderr, r.stderr
+
+
+def test_lockfile_zu_gross_ist_lockfile_fehlt_mit_grund_haertung_b1(tmp_path, monkeypatch, capsys):
+    ordner = lock_in(tmp_path, lockdatei())
+    monkeypatch.setattr(poc, "LOCKFILE_MAX", 50)
+    assert poc.lockfile_pruefen(ordner) == "lockfile-fehlt"
+    assert "zu groß" in capsys.readouterr().err
+    monkeypatch.setattr(poc, "LOCKFILE_MAX", 10 * 1024 * 1024)
+    assert poc.lockfile_pruefen(ordner) is None

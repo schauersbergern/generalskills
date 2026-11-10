@@ -941,3 +941,42 @@ def test_repo_hinweise_sha256_repo(tmp_path):
     (repo / "a.txt").write_bytes(b"neu\n")
     hinweise = gitkopie.repo_hinweise(str(repo))
     assert len(hinweise) == 1 and "a.txt" in hinweise[0]
+
+
+# ---------------------------------------------------------------- Härtung TF1-B1 (lange Operationen)
+
+def test_blob_hash_liest_nie_mehr_als_die_groesse_haertung_b1():
+    """Eine Datei, die beim Lesen weiter wächst (hier /dev/zero), ergibt None statt einer Endlosschleife."""
+    import signal
+    fd = os.open("/dev/zero", os.O_RDONLY)
+    signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(AssertionError("Endlosschleife")))
+    signal.alarm(10)
+    try:
+        assert gitkopie._blob_hash("sha1", fd, 100) is None
+    finally:
+        signal.alarm(0)
+        os.close(fd)
+
+
+def test_blob_hash_exakte_groesse_bleibt_gueltig_haertung_b1(tmp_path):
+    import hashlib
+    datei = tmp_path / "f"
+    datei.write_bytes(b"abc" * 1000)
+    fd = os.open(datei, os.O_RDONLY)
+    try:
+        erwartet = hashlib.sha1(b"blob 3000\0" + b"abc" * 1000).hexdigest()
+        assert gitkopie._blob_hash("sha1", fd, 3000) == erwartet
+    finally:
+        os.close(fd)
+
+
+def test_hinweise_arbeitsbaum_zeitbudget_haertung_b1(tmp_path, monkeypatch):
+    repo = repo_mit(tmp_path, {"a.txt": b"a\n", "b.txt": b"b\n", "c.txt": b"c\n"})
+    assert gitkopie.repo_hinweise(str(repo)) == []
+    monkeypatch.setattr(gitkopie, "HINWEIS_BUDGET", -1)
+    hinweise = gitkopie.repo_hinweise(str(repo))
+    assert any("Zeitbudget" in h and "0 von 3" in h for h in hinweise), hinweise
+
+
+def test_batch_timeout_liegt_unter_dem_bash_limit_haertung_b1():
+    assert gitkopie.BATCH_TIMEOUT + 120 + 60 < 600       # ls-tree + Batch + Reste unter den 600 s des Skills
