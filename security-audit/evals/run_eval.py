@@ -15,6 +15,7 @@ Nur Standardbibliothek.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import fnmatch
 import json
@@ -339,6 +340,22 @@ def _gruppe_beenden(p: subprocess.Popen, warten: float = KILL_WARTEN) -> None:
         pass
 
 
+START_SIGNALE = {signal.SIGTERM, signal.SIGHUP, signal.SIGINT}
+
+
+@contextlib.contextmanager
+def _signale_gesperrt():
+    """Sperrt SIGTERM, SIGHUP und SIGINT (nur für diesen Thread), bis der Block verlassen wird; ein Signal bleibt bis dahin
+    anstehend und wird erst danach zugestellt. Schließt das Fenster zwischen `Popen` und der Zuweisung des Objekts: kommt
+    das Signal erst danach, beendet der vorhandene except/finally-Pfad die eigene Prozessgruppe. Nur Signale, die vorher
+    nicht gesperrt waren, werden wieder freigegeben."""
+    vorher = signal.pthread_sigmask(signal.SIG_BLOCK, START_SIGNALE)
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, START_SIGNALE - set(vorher))
+
+
 def _kind_starten(cmd: list[str], cwd: str, env: dict, stdout, stderr) -> subprocess.Popen:
     return subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
                             start_new_session=True)
@@ -347,9 +364,10 @@ def _kind_starten(cmd: list[str], cwd: str, env: dict, stdout, stderr) -> subpro
 def _smoke_test(basis: list[str], cwd: str, env: dict) -> tuple[bool, str]:
     """`claude -p "Antworte nur mit ok." --output-format json` mit den Optionen des Laufs, ohne Werkzeuge."""
     cmd = ["claude", "-p", SMOKE_PROMPT, "--output-format", "json", *basis, "--tools", ""]
-    p = None                                               # Start im try: ein Signal nach dem Start beendet die Gruppe
+    p = None                                               # Start im try: ein Signal nach der Zuweisung beendet die Gruppe
     try:
-        p = _kind_starten(cmd, cwd, env, subprocess.PIPE, subprocess.PIPE)
+        with _signale_gesperrt():                          # Signal erst nach der Zuweisung von `p` zustellen
+            p = _kind_starten(cmd, cwd, env, subprocess.PIPE, subprocess.PIPE)
         out, err = p.communicate(timeout=SMOKE_TIMEOUT)
     except OSError as e:
         return False, f"claude nicht startbar: {e}"
@@ -383,10 +401,11 @@ def _lauf(cmd: list[str], cwd: str, env: dict, stream_pfad: str, stderr_pfad: st
     (Fortschritt auf stderr) und beendet bei Zeitüberschreitung oder Abbruch die ganze Prozessgruppe."""
     start = time.monotonic()
     zeitueberschreitung = False
-    p = None                                               # Start im try: ein Signal nach dem Start beendet die Gruppe
+    p = None                                               # Start im try: ein Signal nach der Zuweisung beendet die Gruppe
     with open(stream_pfad, "wb") as aus, open(stderr_pfad, "wb") as fehler:
         try:
-            p = _kind_starten(cmd, cwd, env, aus, fehler)
+            with _signale_gesperrt():                      # Signal erst nach der Zuweisung von `p` zustellen
+                p = _kind_starten(cmd, cwd, env, aus, fehler)
             while True:
                 rest = timeout - (time.monotonic() - start)
                 if rest <= 0:
@@ -410,32 +429,6 @@ def _lauf(cmd: list[str], cwd: str, env: dict, stream_pfad: str, stderr_pfad: st
                 except (ProcessLookupError, PermissionError):
                     pass
     return {"rc": p.returncode, "timeout": zeitueberschreitung, "dauer_s": round(time.monotonic() - start, 1)}
-
-
-def _kinder_beenden() -> None:
-    """Letzte Sicherung: beendet alle direkten Kindprozesse dieses Prozesses samt ihrer Prozessgruppe (SIGKILL). Fängt das
-    Kind, dessen Popen-Objekt wegen eines Signals mitten im Start nie zugewiesen wurde. Verwaiste und fremde Prozesse
-    (anderer Elternprozess) bleiben unberührt."""
-    try:
-        r = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,pgid="], capture_output=True, text=True, timeout=DOCKER_TIMEOUT)
-    except (OSError, subprocess.SubprocessError) as e:
-        _log(f"Warnung: Kindprozesse nicht ermittelbar ({e}); ein hängendes claude könnte bleiben")
-        return
-    ich, meine_gruppe = os.getpid(), os.getpgrp()
-    for zeile in r.stdout.splitlines():
-        teile = zeile.split()
-        if len(teile) != 3 or not all(t.isdigit() for t in teile):
-            continue
-        pid, ppid, pgid = (int(t) for t in teile)
-        if ppid != ich:
-            continue
-        try:
-            if pgid != meine_gruppe:
-                os.killpg(pgid, signal.SIGKILL)
-            else:
-                os.kill(pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
 
 
 # ------------------------------------------------------------------------------------ Zustand vorher/nachher
@@ -618,7 +611,6 @@ def _lauf_main(a: argparse.Namespace) -> int:
         # 6. Nachher: Docker-Listen erfassen
         listen = docker_listen()
     finally:
-        _kinder_beenden()                                  # vor dem Docker-Aufräumen: nichts erzeugt danach neue Reste
         _log("Docker aufräumen (security-audit-*)")
         if not docker_aufraeumen():
             _log("Warnung: Docker-Reste mit Präfix security-audit- können bleiben")

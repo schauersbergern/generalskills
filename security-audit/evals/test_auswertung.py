@@ -1382,8 +1382,8 @@ def _lebt(pid):
 
 
 def test_signal_direkt_nach_dem_start_beendet_kind_trotzdem_haertung_a7(ev, monkeypatch, capsys):
-    """Das Signal kommt, nachdem das Kind existiert, aber bevor `_lauf` sein Popen-Objekt kennt: die Sicherung in `_main`
-    beendet alle direkten Kindprozesse samt Gruppe, bevor Docker aufgeräumt wird."""
+    """Das Signal kommt, nachdem das Kind existiert, aber bevor `_lauf` sein Popen-Objekt kennt: die Signalmaske um den
+    Start hält es an, bis `p` zugewiesen ist; dann beendet der except-Pfad von `_lauf` die eigene Prozessgruppe."""
     ev.modus("haengt")
     echtes, gestartet = run_eval._kind_starten, []
 
@@ -1396,7 +1396,8 @@ def test_signal_direkt_nach_dem_start_beendet_kind_trotzdem_haertung_a7(ev, monk
             if ev.kind.exists() and ev.kind.read_text():
                 break
             time.sleep(0.1)
-        raise run_eval.Abbruch(signal.SIGTERM)             # Handler feuert nach Popen, vor der Zuweisung
+        signal.raise_signal(signal.SIGTERM)                # echtes Signal nach Popen, vor der Zuweisung (gesperrt)
+        return p
 
     monkeypatch.setattr(run_eval, "_kind_starten", bombe)
     assert run_eval.main(["--fixture", "fixture-web", "--timeout", "120"]) == 143
@@ -1415,23 +1416,62 @@ def test_signal_direkt_nach_dem_start_beendet_kind_trotzdem_haertung_a7(ev, monk
         pytest.fail("Enkelprozess der Gruppe lebt noch")
 
 
-def test_kinder_beenden_ohne_kinder_ist_harmlos_haertung_a7():
-    run_eval._kinder_beenden()
+@pytest.fixture
+def abbruch_handler():
+    """SIGTERM-Handler wie in `main` (wirft Abbruch), nur im Hauptthread; danach der alte."""
+    alt = signal.signal(signal.SIGTERM, run_eval._signal_handler)
+    yield
+    signal.signal(signal.SIGTERM, alt)
 
 
-def test_kinder_beenden_laesst_fremde_prozesse_in_ruhe_haertung_a7():
-    """Nur direkte Kinder dieses Prozesses; ein verwaister Prozess (Eltern ist init) und ein eigenes Kind in der
-    eigenen Gruppe werden unterschieden."""
-    r = subprocess.run(["sh", "-c", "sleep 30 >/dev/null 2>&1 & echo $!"], capture_output=True, text=True)
-    fremd = int(r.stdout.strip())
-    eigen = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+def _kind_mit_signal(monkeypatch, gestartet):
+    """Ersetzt `_kind_starten`: startet ein eigenes `sleep`-Kind in eigener Sitzung und löst danach SIGTERM aus."""
+    def bombe(cmd, cwd, env, stdout, stderr):
+        p = subprocess.Popen(["sleep", "30"], stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                             start_new_session=True)
+        gestartet.append(p)
+        signal.raise_signal(signal.SIGTERM)
+        return p
+
+    monkeypatch.setattr(run_eval, "_kind_starten", bombe)
+
+
+def _eigenes_kind_beendet(gestartet):
+    (p,) = gestartet
     try:
-        run_eval._kinder_beenden()
-        assert eigen.wait(timeout=10) is not None
-        assert _lebt(fremd)
-    finally:
-        eigen.kill()
-        os.kill(fremd, signal.SIGKILL)
+        p.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        p.kill()                                           # eigenes Popen-Objekt
+        p.wait()
+        pytest.fail("eigenes Kind nach Signal im Start nicht beendet")
+    assert p.returncode is not None
+
+
+def test_signal_im_start_beendet_eigenes_kind_lauf(tmp_path, monkeypatch, abbruch_handler):
+    gestartet: list = []
+    _kind_mit_signal(monkeypatch, gestartet)
+    with pytest.raises(run_eval.Abbruch):
+        run_eval._lauf(["claude"], str(tmp_path), {}, str(tmp_path / "s"), str(tmp_path / "e"), 60)
+    _eigenes_kind_beendet(gestartet)
+
+
+def test_signal_im_start_beendet_eigenes_kind_smoke_test(tmp_path, monkeypatch, abbruch_handler):
+    gestartet: list = []
+    _kind_mit_signal(monkeypatch, gestartet)
+    with pytest.raises(run_eval.Abbruch):
+        run_eval._smoke_test([], str(tmp_path), {})
+    _eigenes_kind_beendet(gestartet)
+
+
+def test_signalmaske_wird_nach_dem_start_wieder_freigegeben():
+    vorher = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    with run_eval._signale_gesperrt():
+        assert run_eval.START_SIGNALE <= signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == vorher
+    with pytest.raises(RuntimeError):
+        with run_eval._signale_gesperrt():
+            raise RuntimeError("Start scheitert")
+    assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == vorher
 
 
 def test_start_fehler_im_lauf_bleibt_der_urspruengliche_fehler_haertung_a7(tmp_path, monkeypatch):
