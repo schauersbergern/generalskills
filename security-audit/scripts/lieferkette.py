@@ -67,7 +67,8 @@ from gitkopie import GitFehler, ZeitbudgetFehler, _t  # noqa: E402
 from poc import PocFehler  # noqa: E402
 
 SECRETS_BUDGET = 300           # Sekunden für `secrets` insgesamt; Skill-Bash-Limit: 600 s
-SECRETS_DIR_BUDGET = 120       # davon `gitleaks dir` samt Schwärzung (zuerst)
+SECRETS_DIR_BUDGET = 120       # davon `gitleaks dir` (zuerst, ab Start gerechnet)
+SECRETS_DIR_MINDEST = 60       # so viel bekommt `gitleaks dir` nach den Vorsuchen mindestens (höchstens das Gesamtbudget)
 KONFIG_SUCHE_BUDGET = 30       # Suche nach Repo-Konfiguration und `gitleaks:allow` in der Arbeitskopie
 AUSNAHMEN_SUCHE_BUDGET = 30    # Suche nach Dateien der gitleaks-Standardausnahmen in der Arbeitskopie
 TEXT_PROBE = 8192              # so viele Bytes entscheiden, ob eine Datei Text ist (kein NUL, nicht leer)
@@ -75,6 +76,7 @@ MAX_NAMEN_JE_KLASSE = 3        # Dateien je Klasse im Hinweis zu den Standardaus
 ALLOW_DATEI_MAX = 16 * 1024 * 1024
 REPORT_MAX = 256 * 1024 * 1024
 MAX_COMMITS = 20
+MAX_BEFUNDE_ROH = 200          # Einträge in `befunde_roh` (Rest als Hinweis; die in HEAD vorhandenen zuerst)
 MAX_NENNUNGEN = 10             # Dateien je Hinweis zur Repo-Konfiguration
 GITLEAKS_TOML = "[extend]\nuseDefault = true\n"
 KONFIG_NAMEN = (".gitleaks.toml", ".gitleaksignore", "osv-scanner.toml")
@@ -447,9 +449,11 @@ def schwaerzen(datei: str, treffer: list[dict], wurzel: str | None = None) -> li
         os.close(fd)
 
 
-def _schwaerze_arbeitskopie(quelle: str, bericht: list[dict]) -> tuple[int, list[str]]:
+def _schwaerze_arbeitskopie(quelle: str, bericht: list[dict], ende: float | None = None) -> tuple[int, list[str]]:
     """Alle Fundstellen des `dir`-Berichts in der Arbeitskopie schwärzen. `File` wird aufgelöst (realpath) und muss innerhalb
-    der Arbeitskopie liegen, sonst wird nichts geschrieben. Rückgabe: (Anzahl geschwärzter Fundstellen, Hinweise)."""
+    der Arbeitskopie liegen, sonst wird nichts geschrieben. Je Datei wird vorher die Frist `ende` (Wert von `time.monotonic()`)
+    geprüft: ein Ablauf ist ein SchwaerzFehler (Teile der Arbeitskopie sind dann schon geschwärzt, es gibt keinen Marker).
+    Rückgabe: (Anzahl geschwärzter Fundstellen, Hinweise)."""
     je_datei: dict[str, list[dict]] = {}
     draussen = 0
     for t in bericht:
@@ -464,7 +468,9 @@ def _schwaerze_arbeitskopie(quelle: str, bericht: list[dict]) -> tuple[int, list
         je_datei.setdefault(real, []).append(t)
     hinweise: list[str] = []
     anzahl = 0
-    for real in sorted(je_datei):
+    for nr, real in enumerate(sorted(je_datei)):
+        if ende is not None and time.monotonic() >= ende:
+            raise SchwaerzFehler(f"Zeitbudget für die Schwärzung erschöpft ({nr} von {len(je_datei)} Dateien geschwärzt)")
         hinweise += schwaerzen(real, je_datei[real], quelle)
         anzahl += len(je_datei[real])
     if draussen:
@@ -512,18 +518,23 @@ def _zeitpunkt(text: object) -> float:
     return wert.timestamp()
 
 
-def _gruppieren(bericht: list[dict]) -> list[dict]:
+def _gruppieren(bericht: list[dict], hinweise: list[str] | None = None) -> list[dict]:
     """Je (Regel, Datei) ein Befund: `commits` (voll, jüngster zuerst, höchstens 20), `zeile` aus dem jüngsten Commit.
-    Einträge ohne gültige Regel, Datei oder Commit-SHA werden verworfen; Wertfelder werden nie gelesen."""
+    Einträge ohne gültige Regel, Datei oder Commit-SHA werden verworfen (die Anzahl steht als Hinweis in `hinweise`, wenn
+    übergeben); Wertfelder werden nie gelesen."""
     gruppen: dict[tuple[str, str], list[tuple[float, int, str, int]]] = {}
+    verworfen = 0
     for i, t in enumerate(bericht):
         regel, datei, commit = t.get("RuleID"), t.get("File"), t.get("Commit")
         if not (isinstance(regel, str) and regel and isinstance(datei, str) and datei and "\0" not in datei
                 and isinstance(commit, str) and VOLLER_SHA.fullmatch(commit)):
+            verworfen += 1
             continue
         zeile = t.get("StartLine")
         zeile = zeile if isinstance(zeile, int) and not isinstance(zeile, bool) and zeile >= 1 else 1
         gruppen.setdefault((regel, datei), []).append((_zeitpunkt(t.get("Date")), i, commit, zeile))
+    if verworfen and hinweise is not None:
+        hinweise.append(f"{verworfen} Fundstellen der Historie mit ungültiger Regel, Datei oder Commit-SHA verworfen")
     befunde = []
     for (regel, datei), eintraege in gruppen.items():
         eintraege.sort(key=lambda e: (-e[0], e[1]))
@@ -564,21 +575,47 @@ def _historie(repo: str, lk: str, sha: str, ende: float, hinweise: list[str]) ->
         raise ZeitbudgetFehler("gitleaks git: Zeitbudget erschöpft")
     if r.rc != 0:
         raise GitFehler(f"gitleaks git endete mit Exit {r.rc}")
-    befunde = _gruppieren(_lese_report(bericht))
+    befunde = _gruppieren(_lese_report(bericht), hinweise)
     sha_da = True
+    abgelaufen = False                            # ab hier gilt: die gefundenen Befunde bleiben, `in_head` wird `null`
     try:
         gitkopie.git(spiegel, "cat-file", "-e", f"{sha}^{{commit}}")
-    except ZeitbudgetFehler:
-        raise
     except GitFehler as e:
         if e.returncode is None:
-            raise
-        sha_da = False
-        hinweise.append(f"Commit {sha[:12]} fehlt im Spiegel (auf keinem Ref erreichbar): in_head nicht ermittelbar")
+            abgelaufen = True
+        else:
+            sha_da = False
+            hinweise.append(f"Commit {sha[:12]} fehlt im Spiegel (auf keinem Ref erreichbar): in_head nicht ermittelbar")
+    unbekannt = 0
     for b in befunde:
-        b["in_head"] = _in_head(spiegel, sha, b["datei"]) if sha_da else None
+        b["in_head"] = None
         b["regel"] = _t(b["regel"], 100)
-    return befunde
+        if not sha_da:
+            continue
+        if not abgelaufen:
+            try:
+                b["in_head"] = _in_head(spiegel, sha, b["datei"])
+                continue
+            except GitFehler as e:                    # Zeitbudget oder Timeout (`returncode` None): nichts verlieren
+                if e.returncode is not None:
+                    raise
+                abgelaufen = True
+        unbekannt += 1
+    if unbekannt:
+        hinweise.append(f"in_head für {unbekannt} von {len(befunde)} Fundstellen nicht ermittelt (Zeitlimit)")
+    return _kappen(befunde, hinweise)
+
+
+def _kappen(befunde: list[dict], hinweise: list[str]) -> list[dict]:
+    """Höchstens `MAX_BEFUNDE_ROH` Befunde: die in HEAD vorhandenen zuerst (dann unbekannt, dann nicht mehr vorhanden), je
+    Gruppe nach Datei und Regel; die Ausgabe bleibt nach Datei und Regel sortiert. Bei Kappung steht die Gesamtzahl im Hinweis."""
+    if len(befunde) <= MAX_BEFUNDE_ROH:
+        return befunde
+    rang = {True: 0, None: 1, False: 2}
+    behalten = sorted(befunde, key=lambda b: (rang[b["in_head"]], b["datei"], b["regel"]))[:MAX_BEFUNDE_ROH]
+    behalten.sort(key=lambda b: (b["datei"], b["regel"]))
+    hinweise.append(f"{len(befunde)} Fundstellen in der Historie, nur {MAX_BEFUNDE_ROH} ausgegeben (in HEAD vorhandene zuerst)")
+    return behalten
 
 
 # ------------------------------------------------------------------------------------ secrets
@@ -609,6 +646,12 @@ def _arbeitskopie(lauf: str, quelle_arg: str) -> tuple[str, str]:
     return zustand, quelle
 
 
+def _dir_frist(start: float, teilbudget: float, jetzt: float, ende: float) -> float:
+    """Frist für `gitleaks dir`: `teilbudget` Sekunden ab Start, nach langen Vorsuchen aber mindestens `SECRETS_DIR_MINDEST`
+    Sekunden (höchstens `teilbudget`) ab jetzt, nie über das Gesamtbudget `ende`."""
+    return min(ende, max(start + teilbudget, jetzt + min(SECRETS_DIR_MINDEST, teilbudget)))
+
+
 def cmd_secrets(a: argparse.Namespace) -> int:
     repo = os.path.realpath(a.repo)
     if not os.path.isdir(repo):
@@ -623,18 +666,18 @@ def cmd_secrets(a: argparse.Namespace) -> int:
     marker = poc.schwaerz_marker(a.lauf)
     start = time.monotonic()
     ende = start + _sekunden("SECURITY_AUDIT_SECRETS_BUDGET", SECRETS_BUDGET)
-    ende_dir = min(ende, start + _sekunden("SECURITY_AUDIT_SECRETS_DIR_BUDGET", SECRETS_DIR_BUDGET))
+    teil = _sekunden("SECURITY_AUDIT_SECRETS_DIR_BUDGET", SECRETS_DIR_BUDGET)
     gitkopie.frist_setzen(ende)
     try:
         poc._entferne(marker, lk)                 # kein Marker ohne diese Schwärzung, auch nicht von einem früheren Lauf
         _aufraeumen(lk)
-        return _secrets(a, repo, quelle, lk, marker, ende, ende_dir)
+        return _secrets(a, repo, quelle, lk, marker, start, teil, ende)
     finally:
         gitkopie.frist_setzen(None)
         _aufraeumen(lk)
 
 
-def _secrets(a: argparse.Namespace, repo: str, quelle: str, lk: str, marker: str, ende: float, ende_dir: float) -> int:
+def _secrets(a: argparse.Namespace, repo: str, quelle: str, lk: str, marker: str, start: float, teil: float, ende: float) -> int:
     for ordner in ("leer", "leer-ignore"):
         os.mkdir(os.path.join(lk, ordner), 0o700)
     with open(os.path.join(lk, "gitleaks.toml"), "w", encoding="utf-8") as f:
@@ -645,7 +688,8 @@ def _secrets(a: argparse.Namespace, repo: str, quelle: str, lk: str, marker: str
         hinweise += konfig_hinweise
         hinweise += _standard_ausnahmen_hinweise(quelle)
         _ignore_entfernen(ignore, quelle)
-        anzahl, schwaerz_hinweise = _schwaerze_arbeitskopie(quelle, _gitleaks_dir(quelle, lk, ende_dir))
+        ende_dir = _dir_frist(start, teil, time.monotonic(), ende)
+        anzahl, schwaerz_hinweise = _schwaerze_arbeitskopie(quelle, _gitleaks_dir(quelle, lk, ende_dir), ende)
     except SchwaerzFehler as e:
         return _schwaerzung_gescheitert(str(e))
     hinweise += schwaerz_hinweise

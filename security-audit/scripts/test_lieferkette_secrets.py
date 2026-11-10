@@ -1178,3 +1178,154 @@ def test_spiegel_keine_treiber_ausgefuehrt_echt(umg, tmp_path):
     v = Vorbereitet(repo, os.path.join(umg.zustand(), "quelle"), shas, shas[-1])
     out = ausgabe(secrets(umg, v))
     assert out["befunde_roh"] and not list(tmp_path.glob("MARKER-*"))
+
+
+# ------------------------------------------------------------------------------------ Härtung TF2: Budgets (M-b, M-c, Schwärzungsschleife)
+
+def inproc_secrets(umg, v, monkeypatch, capsys, **env):
+    """`lieferkette.py secrets` im Testprozess (damit Monkeypatches wirken): Fake-gitleaks im PATH, Temp-Ordner der Umgebung."""
+    monkeypatch.setattr(tempfile, "tempdir", str(umg.tmp))
+    monkeypatch.setenv("PATH", f"{umg.bin}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_GL_LOG", str(umg.log_datei))
+    monkeypatch.setenv("FAKE_GL_CONFIG", str(umg.config_datei))
+    for name, wert in env.items():
+        monkeypatch.setenv(name, wert)
+    rc = lieferkette.main(["secrets", "--lauf", LAUF, "--repo", v.repo, "--quelle", v.quelle, "--sha", v.sha])
+    aus = capsys.readouterr()
+    return rc, aus
+
+
+def test_standard_ausnahmen_suche_bricht_nach_dem_budget_ab_m_b(tmp_path, monkeypatch):
+    schreibe(str(tmp_path), "a/package-lock.json", JS_ZEILE)
+    schreibe(str(tmp_path), "b/yarn.lock", JS_ZEILE)
+    monkeypatch.setattr(lieferkette, "AUSNAHMEN_SUCHE_BUDGET", -1)
+    assert lieferkette._standard_ausnahmen_hinweise(str(tmp_path)) == ["Suche nach gitleaks-Standardausnahmen abgebrochen (Zeitbudget)"]
+
+
+def test_konfig_suche_bricht_ab_findet_aber_jede_gitleaksignore_m_b(tmp_path, monkeypatch):
+    """Nach Ablauf der Frist wird nicht mehr nach `gitleaks:allow` gelesen, die Namen der Konfigurationsdateien (und jede
+    `.gitleaksignore`, die danach entfernt werden muss) werden weiter gesammelt."""
+    schreibe(str(tmp_path), "a/.gitleaksignore", "x\n")
+    schreibe(str(tmp_path), "z/tief/.gitleaksignore", "y\n")
+    schreibe(str(tmp_path), "b/osv-scanner.toml", "")
+    schreibe(str(tmp_path), "c/code.js", "// gitleaks:allow\n")
+    monkeypatch.setattr(lieferkette, "KONFIG_SUCHE_BUDGET", -1)
+    hinweise, ignore = lieferkette._repo_konfiguration(str(tmp_path))
+    assert "Suche nach gitleaks:allow abgebrochen (Zeitbudget)" in hinweise
+    assert sorted(os.path.relpath(p, tmp_path) for p in ignore) == ["a/.gitleaksignore", "z/tief/.gitleaksignore"]
+    assert any(h.startswith("osv-scanner.toml im Repo vorhanden") for h in hinweise)
+    assert not any(h.startswith("gitleaks:allow-Kommentare") for h in hinweise)
+
+
+def test_schwaerzung_ueber_viele_dateien_haelt_das_gesamtbudget(umg, monkeypatch, capsys):
+    """Die Schwärzungsschleife prüft die Frist je Datei: ein Ablauf ist Exit 4 (kein Marker), keine stille Überschreitung."""
+    n = 6
+    v = vorbereiten(umg, [dict(MINI, **{f"src/f{i}.js": JS_ZEILE for i in range(n)})])
+    umg.fake_gitleaks(dir={"report": [dir_treffer(JS_ZEILE.encode(), datei=f"src/f{i}.js") for i in range(n)]}, git={"report": []})
+    echt_schwaerzen = lieferkette.schwaerzen
+    aufrufe = []
+
+    def langsam(*args, **kwargs):
+        aufrufe.append(args[0])
+        time.sleep(0.5)
+        return echt_schwaerzen(*args, **kwargs)
+
+    monkeypatch.setattr(lieferkette, "schwaerzen", langsam)
+    rc, aus = inproc_secrets(umg, v, monkeypatch, capsys, SECURITY_AUDIT_SECRETS_BUDGET="2")
+    assert rc == 4, aus.out + aus.err
+    assert "kategorie: schwaerzung-fehlgeschlagen" in aus.out.splitlines() and "Zeitbudget" in aus.err
+    assert 0 < len(aufrufe) < n
+    assert not os.path.lexists(umg.marker()) and lieferkette_inhalt(umg) == []
+
+
+def test_gitleaks_dir_behaelt_nach_langen_vorsuchen_sein_teilbudget_m_c(umg, monkeypatch, capsys):
+    """Fressen die Vorsuchen (Konfiguration, Standardausnahmen) das Teilbudget ab Start auf, bekommt `gitleaks dir` trotzdem
+    seine Mindestzeit (hier: das ganze 1-s-Teilbudget ab dem Ende der Vorsuchen)."""
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"sleep": 0.3, "report": []}, git={"report": []})
+    echt = lieferkette._repo_konfiguration
+
+    def langsame_suche(quelle):
+        time.sleep(1.3)
+        return echt(quelle)
+
+    monkeypatch.setattr(lieferkette, "_repo_konfiguration", langsame_suche)
+    rc, aus = inproc_secrets(umg, v, monkeypatch, capsys, SECURITY_AUDIT_SECRETS_DIR_BUDGET="1")
+    assert rc == 0, aus.out + aus.err
+    assert os.path.isfile(umg.marker())
+
+
+# ------------------------------------------------------------------------------------ Härtung TF2: Historie (verworfene Funde, Budget in der Schleife, Kappung)
+
+def test_secrets_verworfene_fundstellen_sind_ein_hinweis(umg):
+    """Ein Eintrag mit unbrauchbarer Regel, Datei oder Commit-SHA verschwindet nicht still: Anzahl im Hinweis."""
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": [
+        treffer(commit=v.shas[0]), treffer(commit="nicht-hex"), treffer(commit=v.shas[0], datei=""),
+        treffer(commit=v.shas[0], regel="")]})
+    out = ausgabe(secrets(umg, v))
+    assert [x["datei"] for x in out["befunde_roh"]] == ["src/a.js"]
+    assert "3 Fundstellen der Historie mit ungültiger Regel, Datei oder Commit-SHA verworfen" in out["hinweise"]
+
+
+def test_secrets_ohne_verworfene_fundstellen_kein_hinweis(umg):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": [treffer(commit=v.shas[0])]})
+    assert not [h for h in ausgabe(secrets(umg, v))["hinweise"] if "verworfen" in h]
+
+
+def test_secrets_budget_waehrend_in_head_behaelt_die_befunde(umg, monkeypatch, capsys):
+    """Läuft das Budget während der `in_head`-Schleife ab, gehen die schon gefundenen Befunde nicht verloren: `in_head` ist
+    dann `null` (unbekannt) und ein Hinweis nennt die Anzahl."""
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": [
+        treffer(datei=f"src/f{i}.js", commit=v.shas[0]) for i in range(5)]})
+    aufrufe = []
+
+    def knapp(spiegel, sha, datei):
+        aufrufe.append(datei)
+        if len(aufrufe) > 2:
+            raise gitkopie.ZeitbudgetFehler("git cat-file: Zeitbudget erschöpft")
+        return False
+
+    monkeypatch.setattr(lieferkette, "_in_head", knapp)
+    rc, aus = inproc_secrets(umg, v, monkeypatch, capsys)
+    assert rc == 0, aus.out + aus.err
+    out = json.loads(aus.out)
+    assert [b["datei"] for b in out["befunde_roh"]] == [f"src/f{i}.js" for i in range(5)]
+    assert [b["in_head"] for b in out["befunde_roh"]] == [False, False, None, None, None]
+    assert "in_head für 3 von 5 Fundstellen nicht ermittelt (Zeitlimit)" in out["hinweise"]
+    assert os.path.isfile(umg.marker()) and lieferkette_inhalt(umg) == ["geschwaerzt"]
+
+
+def test_secrets_befunde_roh_sind_gekappt_und_bevorzugen_head(umg):
+    """Eine Historie mit sehr vielen Fundstellen sprengt weder Ausgabe noch Bericht: höchstens `MAX_BEFUNDE_ROH` Einträge, die
+    noch in HEAD liegenden zuerst, dazu ein Hinweis mit der Gesamtzahl."""
+    assert lieferkette.MAX_BEFUNDE_ROH == 200
+    v = vorbereiten(umg, [{**{f"in-head/h{i}.js": JS_ZEILE for i in range(3)}, "package.json": "{}"}])
+    gesamt = 230
+    dateien = [f"alt/a{i:03d}.js" for i in range(gesamt - 3)] + [f"in-head/h{i}.js" for i in range(3)]
+    umg.fake_gitleaks(dir={"report": []}, git={"report": [treffer(datei=d, commit=v.shas[0]) for d in dateien]})
+    out = ausgabe(secrets(umg, v))
+    assert len(out["befunde_roh"]) == 200
+    assert [b["datei"] for b in out["befunde_roh"]] == sorted(b["datei"] for b in out["befunde_roh"])     # wieder nach Datei sortiert
+    assert {b["datei"] for b in out["befunde_roh"] if b["in_head"]} == {f"in-head/h{i}.js" for i in range(3)}
+    assert f"{gesamt} Fundstellen in der Historie, nur 200 ausgegeben (in HEAD vorhandene zuerst)" in out["hinweise"]
+
+
+def test_secrets_budget_beim_commit_check_behaelt_die_befunde(umg, monkeypatch, capsys):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": [treffer(commit=v.shas[0])]})
+    echt = gitkopie.git
+
+    def git_mit_ablauf(repo, *args, **kwargs):
+        if args[:2] == ("cat-file", "-e") and args[2].endswith("^{commit}"):
+            raise gitkopie.ZeitbudgetFehler("git cat-file: Zeitbudget erschöpft")
+        return echt(repo, *args, **kwargs)
+
+    monkeypatch.setattr(gitkopie, "git", git_mit_ablauf)
+    rc, aus = inproc_secrets(umg, v, monkeypatch, capsys)
+    assert rc == 0, aus.out + aus.err
+    out = json.loads(aus.out)
+    assert [(b["datei"], b["in_head"]) for b in out["befunde_roh"]] == [("src/a.js", None)]
+    assert "in_head für 1 von 1 Fundstellen nicht ermittelt (Zeitlimit)" in out["hinweise"]
