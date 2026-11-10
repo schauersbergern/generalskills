@@ -6,7 +6,15 @@ Testdaten liegen in evals/testdaten/ (handgeschrieben, nur evil.test und fixture
 import copy
 import json
 import os
+import random
+import re
+import shutil
+import signal
+import string
+import subprocess
 import sys
+import tempfile
+import time
 import unicodedata
 
 import pytest
@@ -14,8 +22,10 @@ import pytest
 HIER = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HIER)
 import auswertung  # noqa: E402
+import run_eval  # noqa: E402
 
 TESTDATEN = os.path.join(HIER, "testdaten")
+SKILL = os.path.dirname(HIER)
 POC = "python3 /skill/scripts/poc.py"
 MUSTER = ["fixture.invalid"]
 
@@ -707,3 +717,375 @@ def test_bericht_kein_dict(erwartung, stream, kaputt):
     assert e["ok"] is False
     for d in ("TF1-D1", "TF1-D2", "TF1-D3", "TF1-D5"):
         assert e["dod"][d]["ok"] is False and "kein Bericht" in e["dod"][d]["details"]
+
+
+
+# ====================================================================================== Teil 2: run_eval.py
+
+FAKE_CLAUDE = """#!{python}
+import json, os, subprocess, sys, time
+args = sys.argv[1:]
+modus = os.environ.get("FAKE_CLAUDE_MODUS", "ok")
+smoke = "--output-format" in args and args[args.index("--output-format") + 1] == "json"
+with open(os.environ["FAKE_CLAUDE_LOG"], "a") as f:
+    f.write(json.dumps({{"args": args, "cwd": os.getcwd(), "smoke": smoke, "env": dict(os.environ)}}) + "\\n")
+if smoke:
+    if modus == "smoke_fehler":
+        sys.stderr.write("kaputt\\n")
+        sys.exit(1)
+    print(json.dumps({{"type": "result", "result": "ok", "is_error": False}}))
+    sys.exit(0)
+print(json.dumps({{"type": "system", "subtype": "init"}}), flush=True)
+if modus == "haengt":
+    kind = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+    with open(os.environ["FAKE_CLAUDE_KIND"], "w") as f:
+        f.write(str(kind.pid))
+    time.sleep(600)
+if modus in ("bericht", "docker_rest"):
+    with open(os.environ["FAKE_CLAUDE_STREAM"]) as f:
+        sys.stdout.write(f.read())
+    ordner = os.path.join(os.environ["SECURITY_AUDIT_AUSGABE"], os.path.basename(os.getcwd()))
+    os.makedirs(ordner, exist_ok=True)
+    with open(os.path.join(ordner, "x.json"), "w") as f, open(os.environ["FAKE_CLAUDE_BERICHT"]) as q:
+        f.write(q.read())
+    for name in ("x.md", "x-agent-stats.md"):
+        with open(os.path.join(ordner, name), "w") as f:
+            f.write("x\\n")
+if modus == "docker_rest":
+    with open(os.environ["FAKE_DOCKER_STATE"]) as f:
+        zustand = json.load(f)
+    zustand["container"] += ["security-audit-0a1b2c3d-p1-app", "fremder-container"]
+    zustand["netze"] += ["security-audit-0a1b2c3d-p1"]
+    zustand["images"] += [["security-audit-0a1b2c3d-app", "sha256:abc"]]
+    with open(os.environ["FAKE_DOCKER_STATE"], "w") as f:
+        json.dump(zustand, f)
+"""
+
+FAKE_DOCKER = """#!{python}
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_DOCKER_LOG"], "a") as f:
+    f.write(json.dumps(args) + "\\n")
+with open(os.environ["FAKE_DOCKER_STATE"]) as f:
+    z = json.load(f)
+def speichern():
+    with open(os.environ["FAKE_DOCKER_STATE"], "w") as f:
+        json.dump(z, f)
+if z.get("kaputt"):
+    sys.stderr.write("Cannot connect to the Docker daemon\\n")
+    sys.exit(1)
+if args[:2] == ["ps", "-a"]:
+    print("\\n".join(z["container"]))
+elif args[:2] == ["network", "ls"]:
+    print("\\n".join(z["netze"] + ["bridge", "host", "none"]))
+elif args[:1] == ["images"]:
+    print("\\n".join(f"{{r}}|{{i}}" for r, i in z["images"]))
+elif args[:2] == ["rm", "-f"]:
+    z["container"] = [c for c in z["container"] if c not in args[2:]]
+    speichern()
+elif args[:2] == ["network", "rm"]:
+    z["netze"] = [n for n in z["netze"] if n not in args[2:]]
+    speichern()
+elif args[:1] == ["rmi"]:
+    z["images"] = [e for e in z["images"] if e[1] not in args[1:] and e[0] not in args[1:]]
+    speichern()
+"""
+
+
+class EvalUmgebung:
+    """Shim-PATH mit Fake-claude und Fake-docker; HOME, Temp-Ordner und Ausgabe liegen in tmp_path."""
+
+    def __init__(self, tmp_path, monkeypatch):
+        self.tmp = tmp_path
+        shim = tmp_path / "shim"
+        shim.mkdir()
+        for name, vorlage in (("claude", FAKE_CLAUDE), ("docker", FAKE_DOCKER)):
+            f = shim / name
+            f.write_text(vorlage.format(python=sys.executable), encoding="utf-8")
+            f.chmod(0o755)
+        (tmp_path / "home").mkdir()
+        (tmp_path / "tmp").mkdir()
+        self.claude_log = tmp_path / "claude.log"
+        self.docker_log = tmp_path / "docker.log"
+        self.docker_state = tmp_path / "docker.json"
+        self.kind = tmp_path / "kind.pid"
+        self.docker_state.write_text(json.dumps({"container": [], "netze": [], "images": []}))
+        monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{os.environ['PATH']}")
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setattr(tempfile, "tempdir", os.path.realpath(tmp_path / "tmp"))
+        for k, v in (("FAKE_CLAUDE_LOG", self.claude_log), ("FAKE_DOCKER_LOG", self.docker_log),
+                     ("FAKE_DOCKER_STATE", self.docker_state), ("FAKE_CLAUDE_KIND", self.kind),
+                     ("FAKE_CLAUDE_STREAM", os.path.join(TESTDATEN, "stream_ok.jsonl")),
+                     ("FAKE_CLAUDE_BERICHT", os.path.join(TESTDATEN, "bericht_ok.json"))):
+            monkeypatch.setenv(k, str(v))
+        self.monkeypatch = monkeypatch
+
+    def modus(self, name):
+        self.monkeypatch.setenv("FAKE_CLAUDE_MODUS", name)
+
+    def aufrufe(self, smoke=None):
+        if not self.claude_log.exists():
+            return []
+        zeilen = [json.loads(z) for z in self.claude_log.read_text().splitlines() if z.strip()]
+        return [z for z in zeilen if smoke is None or z["smoke"] is smoke]
+
+    def docker(self):
+        return [json.loads(z) for z in self.docker_log.read_text().splitlines()] if self.docker_log.exists() else []
+
+    def temp_ordner(self):
+        return [n for n in os.listdir(tempfile.tempdir) if n.startswith("eval-security-audit-")]
+
+
+@pytest.fixture
+def ev(tmp_path, monkeypatch):
+    return EvalUmgebung(tmp_path, monkeypatch)
+
+
+def _aufrufzeilen():
+    """Aufrufzeilen mit `python3 …` aus SKILL.md und references/ (Zeilenanfang oder Inline-Code)."""
+    dateien = [os.path.join(SKILL, "SKILL.md")]
+    refs = os.path.join(SKILL, "references")
+    dateien += [os.path.join(refs, n) for n in sorted(os.listdir(refs)) if n.endswith(".md")]
+    zeilen = []
+    for d in dateien:
+        with open(d, encoding="utf-8") as f:
+            for z in f.read().splitlines():
+                zeilen += re.findall(r"(?:^\s*|`)(python3 [^`]+)", z)
+    return zeilen
+
+
+def test_regeln_passen_zu_skill():
+    skill, home = "/tmp/x/.claude/skills/security-audit-eval", "/Users/test"
+    regeln = run_eval.erlaubte_regeln(skill, "/tmp/x/ausgabe", home)
+    praefixe = [r[len("Bash("):-len(" *)")] for r in regeln if r.startswith("Bash(") and r.endswith(" *)")]
+    zeilen = _aufrufzeilen()
+    assert len(zeilen) >= 5
+    for z in zeilen:
+        z = z.replace("${CLAUDE_SKILL_DIR}", skill).replace("<SKILL_DIR>", skill)
+        # allgemeine Vorlage (Grundregel 8): <skript> steht für jedes der beiden Skripte
+        for form in ([z.replace("<skript>", s) for s in ("poc", "bericht")] if "<skript>" in z else [z]):
+            assert any(form.startswith(p + " ") for p in praefixe), f"keine Regel für: {form}"
+    assert f"Bash(python3 -I {skill}/scripts/poc.py *)" in regeln
+    assert f"Bash(python3 -I {skill}/scripts/bericht.py *)" in regeln
+    assert "Bash(python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py *)" in regeln
+    assert f"Bash(python3 {home}/.claude/skills/auto-feature/scripts/agent-stats.py *)" in regeln
+    assert "Bash(ls *)" in regeln
+    assert "Write(//tmp/x/ausgabe/**)" in regeln and "Edit(//tmp/x/ausgabe/**)" in regeln
+    for name in ("Read", "Glob", "Grep", "Agent", "Skill", "TodoWrite", "ToolSearch"):
+        assert name in regeln
+    # eng gefasst: kein freies Bash, kein freies Write/Edit, keine Web-Werkzeuge
+    assert not {"Bash", "Write", "Edit", "WebFetch", "WebSearch"} & set(regeln)
+
+
+def test_kind_umgebung():
+    basis = {"PATH": "/bin", "HOME": "/h", "CLAUDECODE": "1", "CLAUDE_EFFORT": "max",
+             "CLAUDE_CODE_SESSION_ID": "s", "CLAUDE_CODE_EFFORT_LEVEL": "xhigh", "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "9",
+             "SECURITY_AUDIT_AUSGABE": "/alt", "SECURITY_AUDIT_OHNE": "alt", "ANDERES": "bleibt"}
+    for _ in range(30):
+        basis["CLAUDE_CODE_" + "".join(random.choices(string.ascii_uppercase, k=8))] = "x"
+    vorher = dict(basis)
+    env = run_eval.kind_umgebung(basis, "/aus", ["a", "b"])
+    assert basis == vorher                                            # Eingabe unverändert
+    assert not [k for k in env if k.startswith("CLAUDE_CODE_") and k != "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"]
+    assert "CLAUDECODE" not in env and "CLAUDE_EFFORT" not in env
+    assert env["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] == "0"
+    assert env["SECURITY_AUDIT_AUSGABE"] == "/aus" and env["SECURITY_AUDIT_OHNE"] == "a,b"
+    assert env["PATH"] == "/bin" and env["HOME"] == "/h" and env["ANDERES"] == "bleibt"
+    assert run_eval.kind_umgebung({}, "/aus", [])["SECURITY_AUDIT_OHNE"] == ""
+
+
+def test_agents_json():
+    pfad = os.path.join(os.path.dirname(SKILL), "agents", "opus-xhigh.md")
+    with open(pfad, encoding="utf-8") as f:
+        md = f.read()
+    agenten = json.loads(run_eval.agents_json(md))
+    assert set(agenten) == {"opus-xhigh"}
+    a = agenten["opus-xhigh"]
+    assert a["model"] == "opus" and a["effort"] == "xhigh"
+    assert a["description"].startswith("Opus mit Reasoning-Effort xhigh.")
+    assert a["prompt"].startswith("Du bist ein unabhängiger Prüfer.") and "name:" not in a["prompt"].split("\n")[0]
+    assert "---" not in a["prompt"].split("\n")[0] and a["prompt"] == a["prompt"].strip()
+    with pytest.raises(ValueError):
+        run_eval.agents_json("kein Frontmatter")
+
+
+def test_temp_repo(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    echt = tmp_path / "echt"
+    echt.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(echt)
+    monkeypatch.setattr(tempfile, "tempdir", str(link))                # Temp-Ordner über Symlink: realpath nötig
+    wurzel, repo = run_eval.temp_repo_anlegen("fixture-web", SKILL, False)
+    try:
+        assert wurzel == os.path.realpath(wurzel) and repo == os.path.realpath(repo)
+        assert wurzel.startswith(str(echt) + os.sep)
+        name = os.path.basename(wurzel)
+        assert name.startswith("eval-security-audit-") and repo == os.path.join(wurzel, name)
+        skill = os.path.join(repo, ".claude", "skills", "security-audit-eval")
+        assert os.path.isfile(os.path.join(skill, "SKILL.md")) and not os.path.exists(os.path.join(skill, "evals"))
+        with open(os.path.join(skill, "SKILL.md"), encoding="utf-8") as f:
+            kopf = f.read().split("---")[1]
+        assert re.search(r"^name: security-audit-eval$", kopf, re.M) and "name: security-audit\n" not in kopf
+        dateien = [os.path.join(d, n) for d, _, ns in os.walk(skill) for n in ns]
+        assert any(p.endswith("scripts/poc.py") for p in dateien)
+        for p in dateien:
+            assert not os.path.basename(p).startswith("test_") and "__pycache__" not in p and ".pytest_cache" not in p
+        with open(os.path.join(SKILL, "SKILL.md"), encoding="utf-8") as f:
+            assert "name: security-audit\n" in f.read()                # Quelle unverändert
+        with open(os.path.join(repo, ".git", "info", "exclude"), encoding="utf-8") as f:
+            assert ".claude/" in f.read().splitlines()
+        assert os.path.isfile(os.path.join(repo, "package-lock.json"))
+        assert not os.path.exists(os.path.join(repo, "package-lock.json.tmpl"))
+        assert not os.path.exists(os.path.join(repo, "expected")) and not os.path.exists(os.path.join(repo, "evals"))
+        assert os.path.isfile(os.path.join(repo, "src", "server.js"))
+        porcelain = subprocess.run(["git", "-C", repo, "status", "--porcelain"], capture_output=True, text=True)
+        assert porcelain.returncode == 0 and porcelain.stdout == ""
+        assert subprocess.run(["git", "-C", repo, "rev-parse", "--verify", "HEAD"], capture_output=True).returncode == 0
+        # weder Pfade der Erwartung noch fixture.invalid im kopierten Skill (R2-W4)
+        with open(os.path.join(SKILL, "evals", "expected", "fixture-web.json"), encoding="utf-8") as f:
+            erw = json.load(f)
+        verboten = {d for e in erw["eintraege"] for d in e["dateien"]} | {"fixture.invalid"}
+        for p in dateien:
+            with open(p, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+            for v in verboten:
+                assert v not in text, f"{v} in {p}"
+    finally:
+        shutil.rmtree(wurzel, ignore_errors=True)
+    wurzel2, repo2 = run_eval.temp_repo_anlegen("fixture-web", SKILL, True)
+    try:
+        assert not os.path.exists(os.path.join(repo2, "package-lock.json"))
+        assert not os.path.exists(os.path.join(repo2, "package-lock.json.tmpl"))
+    finally:
+        shutil.rmtree(wurzel2, ignore_errors=True)
+
+
+def test_lauf_timeout_beendet_gruppe(ev, capsys):
+    ev.modus("haengt")
+    t0 = time.monotonic()
+    assert run_eval.main(["--fixture", "fixture-web", "--timeout", "2"]) == 1
+    assert time.monotonic() - t0 < 60
+    pid = int(ev.kind.read_text())
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        os.kill(pid, signal.SIGKILL)
+        pytest.fail("Kindprozess der Gruppe lebt noch")
+    ergebnis = json.loads(capsys.readouterr().out)
+    assert ergebnis["ok"] is False and ergebnis["lauf"]["timeout"] is True
+    assert ev.temp_ordner()                                            # bei Exit ≠ 0 bleibt das Temp-Verzeichnis
+
+
+def test_lauf_ok_und_aufruf(ev, capsys):
+    ev.modus("bericht")
+    assert run_eval.main(["--fixture", "fixture-web", "--ohne", "a,b", "--prompt-art", "text"]) == 0
+    ergebnis = json.loads(capsys.readouterr().out)
+    assert ergebnis["ok"] is True and set(ergebnis["dod"]) == {f"TF1-D{i}" for i in range(1, 8)}
+    assert all(d["ok"] for d in ergebnis["dod"].values())
+    assert ev.temp_ordner() == []                                      # nach Exit 0 ohne --behalten entfernt
+    smoke, lauf = ev.aufrufe(smoke=True), ev.aufrufe(smoke=False)
+    assert len(smoke) == 1 and len(lauf) == 1
+    a = lauf[0]["args"]
+    assert a[0] == "-p" and a[1] == "Nutze den Skill security-audit-eval auf diesem Repo."
+    assert smoke[0]["args"][:2] == ["-p", "Antworte nur mit ok."]
+
+    def wert(args, opt):
+        return args[args.index(opt) + 1]
+
+    def liste(args, opt):
+        i, ende = args.index(opt) + 1, []
+        while i < len(args) and not args[i].startswith("--"):
+            ende.append(args[i])
+            i += 1
+        return ende
+
+    for args in (smoke[0]["args"], a):                                 # gleiche Optionen im Smoke-Test und im Lauf
+        assert wert(args, "--permission-mode") == "acceptEdits"
+        assert wert(args, "--setting-sources") == "project,local" and "--strict-mcp-config" in args
+        assert json.loads(wert(args, "--agents"))["opus-xhigh"]["effort"] == "xhigh"
+        assert os.path.isabs(wert(args, "--add-dir")) and wert(args, "--add-dir").endswith("/ausgabe")
+        assert liste(args, "--disallowedTools") == ["WebFetch,WebSearch"]
+    assert wert(a, "--output-format") == "stream-json" and "--verbose" in a
+    assert wert(a, "--tools") == "Read,Glob,Grep,Write,Edit,Agent,Skill,Bash,TodoWrite,ToolSearch"
+    regeln = liste(a, "--allowedTools")
+    assert "Bash(ls *)" in regeln and any(r.startswith("Bash(python3 -I ") and r.endswith("/scripts/poc.py *)") for r in regeln)
+    assert wert(smoke[0]["args"], "--tools") == ""                     # Smoke-Test ohne Werkzeuge
+    assert "--allowedTools" not in smoke[0]["args"]
+    env = lauf[0]["env"]
+    assert env["SECURITY_AUDIT_OHNE"] == "a,b" and env["SECURITY_AUDIT_AUSGABE"] == wert(a, "--add-dir")
+    assert env["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] == "0"
+    assert os.path.basename(lauf[0]["cwd"]).startswith("eval-security-audit-")
+    assert lauf[0]["cwd"].endswith(os.path.basename(lauf[0]["cwd"]) + "/" + os.path.basename(lauf[0]["cwd"]))
+
+
+def test_lauf_slash_prompt_und_kindumgebung(ev, monkeypatch):
+    monkeypatch.setenv("CLAUDECODE", "1")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "abc")
+    monkeypatch.setenv("CLAUDE_EFFORT", "max")
+    ev.modus("bericht")
+    assert run_eval.main(["--fixture", "fixture-web"]) == 0
+    lauf = ev.aufrufe(smoke=False)[0]
+    assert lauf["args"][1] == "/security-audit-eval"
+    for k in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_EFFORT"):
+        assert k not in lauf["env"]
+
+
+def test_lauf_ohne_bericht_scheitert_und_behalten(ev, capsys):
+    ev.modus("ok")                                                     # Fake-claude schreibt weder Stream noch Bericht
+    assert run_eval.main(["--fixture", "fixture-web", "--behalten"]) == 1
+    ergebnis = json.loads(capsys.readouterr().out)
+    assert ergebnis["ok"] is False and not ergebnis["dod"]["TF1-D1"]["ok"] and not ergebnis["dod"]["TF1-D4"]["ok"]
+    (ordner,) = ev.temp_ordner()
+    assert os.path.isfile(os.path.join(tempfile.tempdir, ordner, "ergebnis.json"))
+    ev.modus("bericht")
+    assert run_eval.main(["--fixture", "fixture-web", "--behalten"]) == 0
+    assert len(ev.temp_ordner()) == 2                                  # --behalten auch nach Exit 0
+
+
+def test_docker_vorpruefung_exit_5(ev, capsys):
+    ev.docker_state.write_text(json.dumps({"container": ["security-audit-0a1b2c3d-p1-app", "andere"],
+                                           "netze": [], "images": []}))
+    assert run_eval.main(["--fixture", "fixture-web"]) == 5
+    assert "security-audit-0a1b2c3d-p1-app" in capsys.readouterr().err
+    assert ev.aufrufe() == [] and ev.temp_ordner() == []               # nichts gestartet, nichts angelegt
+    ev.docker_state.write_text(json.dumps({"kaputt": True, "container": [], "netze": [], "images": []}))
+    assert run_eval.main(["--fixture", "fixture-web"]) == 5            # nicht lesbar zählt als nicht leer
+
+
+def test_smoke_test_gescheitert_exit_6(ev, capsys):
+    ev.modus("smoke_fehler")
+    assert run_eval.main(["--fixture", "fixture-web"]) == 6
+    assert "Smoke-Test" in capsys.readouterr().err
+    assert len(ev.aufrufe()) == 1 and ev.aufrufe()[0]["smoke"] is True
+
+
+def test_docker_rest_wird_gemeldet_und_aufgeraeumt(ev, capsys):
+    ev.modus("docker_rest")
+    assert run_eval.main(["--fixture", "fixture-web"]) == 1
+    ergebnis = json.loads(capsys.readouterr().out)
+    d7 = ergebnis["dod"]["TF1-D7"]
+    assert d7["ok"] is False and any("security-audit-0a1b2c3d-p1-app" in x for x in d7["details"])
+    assert not any("fremder-container" in x for x in d7["details"])    # nur Präfix security-audit-
+    assert all(ergebnis["dod"][f"TF1-D{i}"]["ok"] for i in range(1, 7))
+    zustand = json.loads(ev.docker_state.read_text())
+    assert zustand == {"container": ["fremder-container"], "netze": [], "images": []}
+    befehle = [" ".join(c) for c in ev.docker()]
+    assert any(b.startswith("rm -f security-audit-0a1b2c3d-p1-app") and "fremder" not in b for b in befehle)
+
+
+def test_fixture_unbekannt(ev):
+    assert run_eval.main(["--fixture", "gibt-es-nicht"]) == 2
+    assert ev.aufrufe() == []
+
+
+@pytest.mark.skipif(os.environ.get("SECURITY_AUDIT_EVAL") != "1", reason="echter Eval-Lauf nur mit SECURITY_AUDIT_EVAL=1")
+def test_eval_fixture_web(capsys):
+    assert run_eval.main(["--fixture", "fixture-web"]) == 0
+    ergebnis = json.loads(capsys.readouterr().out)
+    assert set(ergebnis["dod"]) == {f"TF1-D{i}" for i in range(1, 8)}
+    assert all(d["ok"] for d in ergebnis["dod"].values()), ergebnis["dod"]
