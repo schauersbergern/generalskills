@@ -14,7 +14,7 @@ argument-hint: <Frage oder Spec-Abschnitt>
 
 Der Rat tritt nur auf Wunsch des Users zusammen. Sinnvoll ist er, wenn **alle drei** Bedingungen gelten:
 
-1. **Offen:** Die Frage ist weder im Feature-File `Entschieden` noch durch `CLAUDE.md` vorgegeben.
+1. **Offen:** Die Frage ist weder im Feature-File (`Entschieden`, falls es eins gibt) noch durch `CLAUDE.md` oder Vorgaben des Users vorgegeben.
 2. **Code oder Betrieb:** Was Kunden oder Nutzer sehen oder bemerken, entscheidet der User, nie der Rat. Dazu gehören auch Anmeldewege und Rechte, die Nutzer bemerken, sowie Kosten und Anbieterwahl.
 3. **Schwer umkehrbar:** Die Option, die du ohne Rat wählen würdest, fällt in eine dieser Klassen:
 
@@ -30,7 +30,7 @@ Der Rat tritt nur auf Wunsch des Users zusammen. Sinnvoll ist er, wenn **alle dr
 1. **Briefing** (für beide wörtlich gleich, ohne eigene Vorliebe der Hauptsession, damit es nicht verankert):
    - Frage in einem Satz
    - 2–3 Optionen, „weitere sind erlaubt“
-   - Vorgaben wörtlich aus dem Feature-File (`Entschieden`, `Default`, betroffene DoD-IDs), Pfad der Repo-`CLAUDE.md`
+   - Vorgaben wörtlich aus dem Feature-File (`Entschieden`, `Default`, betroffene DoD-IDs), sonst aus Spec oder Vorgaben des Users; Pfad der Repo-`CLAUDE.md`
    - Ist-Stand mit Pfaden und Repo-Pfad
    - Verbote: nichts ändern, keine schreibenden git-Befehle, keine Subagenten
 2. **Beide in einer Nachricht parallel starten**, jeweils `Agent(subagent_type: "sonnet-high", model: "sonnet")`, Briefing plus Rolle:
@@ -44,8 +44,8 @@ Der Rat tritt nur auf Wunsch des Users zusammen. Sinnvoll ist er, wenn **alle dr
    **Knackpunkt:** <die Annahme, an der die Empfehlung scheitert, und wie man sie prüft>
    **Nutzersichtbar:** <Folgen, die Kunden oder Nutzer bemerken, oder „keine“>
    ```
-4. **Entscheiden:** Die Hauptsession prüft die Belege der Voten gegen den Code (`superpowers:receiving-code-review`) und entscheidet. Bei Dissens begründet sie, welcher Knackpunkt schwerer wiegt. Übernommene Maßnahmen zur Umkehrbarkeit und Knackpunkte werden Anforderungen der Spec. Ein Punkt unter „Nutzersichtbar“, den das Feature-File nicht deckt, wird nicht entschieden, sondern als Default mit `offen:` geführt.
-5. **Dokumentieren** unter „Entscheidungen/Annahmen“:
+4. **Entscheiden:** Die Hauptsession prüft die Belege der Voten gegen den Code (`superpowers:receiving-code-review`) und entscheidet. Bei Dissens begründet sie, welcher Knackpunkt schwerer wiegt. Übernommene Maßnahmen zur Umkehrbarkeit und Knackpunkte werden Anforderungen der Spec bzw. des Entscheidungsdokuments des Aufrufers. Ein Punkt unter „Nutzersichtbar“, den Feature-File und Vorgaben des Users nicht decken, wird nicht entschieden. Gibt es ein Entscheidungsdokument (z. B. die Spec), steht er dort als Default mit `offen: <Frage>` und geht als offene Frage an den User. Ohne Entscheidungsdokument geht er nur als offene Frage an den User. Das Feature-File selbst wird nicht geändert.
+5. **Dokumentieren** in der Spec bzw. dem Entscheidungsdokument des Aufrufers, Abschnitt „Entscheidungen/Annahmen“ falls vorhanden, sonst im Bericht an den User:
    ```
    - **<Frage>** (Architektur-Rat, Klasse <…>): gewählt <Option>, weil <…>.
      - Pragmatiker: <Empfehlung> – Knackpunkt <…>
