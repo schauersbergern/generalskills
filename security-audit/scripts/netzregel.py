@@ -18,13 +18,14 @@ from urllib.parse import unquote
 
 ERLAUBTE_HOSTS = frozenset({"app", "db", "localhost", "127.0.0.1", "::1", "0.0.0.0"})
 
-# URL: Schema, `:`, ein oder mehr `/`/`\` (curl liest auch `http:/evil.test`), oder ohne erkennbares Schema jedes
-# `://` (`${H}://evil.test`). Die Authority (Text bis `/ ? #` oder Whitespace) wird in zwei Lesarten gelesen: eng
+# URL: `http(s)`/`ws(s)`/`ftp(s)`, `:`, ein oder mehr `/`/`\` (curl liest auch `http:/evil.test`); jedes andere
+# Schema oder gar keines (`${H}://evil.test`) mit zwei oder mehr `/`/`\`. Schema-Länge begrenzt (linear). Die Authority (Text bis `/ ? #` oder Whitespace) wird in zwei Lesarten gelesen: eng
 # (bis zum ersten Shell-Sonderzeichen) und erweitert, damit `http://app&@evil.test/` nicht als `app` gilt.
-_URL = re.compile(r"(?:(?P<schema>[A-Za-z][A-Za-z0-9+.\-]*):(?P<s1>[/\\]+)|:(?P<s2>[/\\]{2,}))(?P<auth>[^\s/?#]*)")
+_URL = re.compile(r"(?:(?P<schema>(?i:https?|wss?|ftps?)):(?P<s1>[/\\]+)"
+                  r"|(?P<schema2>[A-Za-z][A-Za-z0-9+.\-]{0,31})?:(?P<s2>[/\\]{2,}))(?P<auth>[^\s/?#]*)")
 _URL_ENG = re.compile(r"[^'\"<>()`|;&]*")
 _NACHLAUF = "'\"),;"
-_HOST_HEADER = re.compile(r"(?i)(?<![A-Za-z0-9.])(?:[A-Za-z0-9]+-)*host[ \t]*:[ \t]*([^\s'\"]+)")
+_HOST_HEADER = re.compile(r"(?i)(?<![A-Za-z0-9.])host[ \t]*:[ \t]*([^\s'\"]+)")
 _PROXY_OPTIONEN = frozenset({"-x", "--proxy", "--preproxy", "--proxy1.0", "--socks4", "--socks4a",
                              "--socks5", "--socks5-hostname"})
 
@@ -72,23 +73,39 @@ def _teile(wert: str, maxsplit: int = -1) -> list[str]:
     return teile
 
 
+def _ohne_whitespace(text: str) -> str:
+    """Text ohne die Whitespace-Zeichen, die URL-Parser (urllib) innerhalb einer URL überlesen oder die die
+    Authority sonst nur im Rohtext trennen (Tab, `\\x0b`, `\\x0c`, `\\x1c`-`\\x1f`, NBSP, U+2000 …). ASCII-Leerzeichen
+    und Zeilenumbrüche bleiben, sie trennen wirklich."""
+    return "".join(c for c in text if c in " \n\r" or not c.isspace())
+
+
+def _varianten(text: str) -> list[str]:
+    """Lesarten des Texts: roh, einmal URL-dekodiert, je auch ohne Anführungszeichen und ohne Whitespace-Zeichen."""
+    basen = [text, unquote(text)]
+    varianten = list(basen)
+    for v in basen:
+        ohne_ws = _ohne_whitespace(v)
+        varianten += [ohne_ws, v.replace("'", "").replace('"', ""), ohne_ws.replace("'", "").replace('"', "")]
+    return list(dict.fromkeys(varianten))
+
+
 def _urls(text: str) -> list[tuple[str, list[str]]]:
     """Alle URL-Stellen (Rohtext, einmal dekodiert, jeweils auch ohne Anführungszeichen) mit ihren Hosts. Bei
     leerer Authority (`http:///evil.test/`, `http:////evil.test`) ist der Pfadanfang der Host (curl verbindet
-    dorthin); nur `file` mit leerem Host (`file:///pfad`, `file:/pfad`) ist lokal und zählt nicht. Die Authority
+    dorthin); nur `file` mit leerem Host (`file:///pfad`) ist lokal und zählt nicht. Die Authority
     wird eng und erweitert gelesen, Backslash zusätzlich als Trenner (`http://app\\@evil.test`); jede Lesart
     zählt. Mehrfach-`@`: Host ist der Teil nach dem letzten `@` (wie curl, WHATWG und urllib). Die Hostliste
     kann leer sein (`http://` ohne Ziel); die Stelle selbst ist dann trotzdem eine URL."""
     treffer: list[tuple[str, list[str]]] = []
     gesehen: set[str] = set()
-    varianten = [text, unquote(text)]
-    varianten += [v.replace("'", "").replace('"', "") for v in varianten]
-    for variante in varianten:
+    for variante in _varianten(text):
         for m in _URL.finditer(variante):
             auth = m.group("auth")
             slashes = m.group("s1") or m.group("s2")
-            if (m.group("schema") or "").lower() == "file" and (len(slashes) == 1 or len(slashes) >= 3):
-                continue                                # file:///pfad, file:/pfad: leere Authority, lokal
+            schema = m.group("schema") or m.group("schema2") or ""
+            if schema.lower() == "file" and len(slashes) >= 3:
+                continue                                # file:///pfad: leere Authority, lokal
             schluessel = "://" + auth.replace("'", "").replace('"', "").rstrip(_NACHLAUF)
             if schluessel in gesehen:
                 continue
@@ -137,17 +154,25 @@ def _option_hosts(text: str) -> list[str]:
     return [h for h in hosts if h]
 
 
-def hosts_extrahieren(text: str) -> list[str]:
-    """Alle Hosts im Text (klein, ohne Port, IPv6 ohne Klammern), ohne Duplikate in Fundreihenfolge."""
+def _zusatz_hosts(text: str) -> list[str]:
+    """Hosts aus `Host:`-Headern (roh, dekodiert, ohne exotisches Whitespace) und aus `--resolve`,
+    `--connect-to`, `-x`/`--proxy`."""
     hosts: list[str] = []
-    for _, h in _urls(text):
-        hosts.extend(h)
-    for variante in (text, unquote(text)):
+    for variante in _varianten(text)[:2] + [_ohne_whitespace(v) for v in _varianten(text)[:2]]:
         for m in _HOST_HEADER.finditer(variante):
             h = _host_aus_authority(m.group(1))
             if h:
                 hosts.append(h)
     hosts.extend(_option_hosts(text))
+    return hosts
+
+
+def hosts_extrahieren(text: str) -> list[str]:
+    """Alle Hosts im Text (klein, ohne Port, IPv6 ohne Klammern), ohne Duplikate in Fundreihenfolge."""
+    hosts: list[str] = []
+    for _, h in _urls(text):
+        hosts.extend(h)
+    hosts.extend(_zusatz_hosts(text))
     return list(dict.fromkeys(hosts))
 
 
@@ -161,23 +186,28 @@ def verstoesse_poc(text: str) -> list[str]:
 # Zeichen, die außerhalb von '…' Shell-Syntax einführen können (Operatoren, Substitutionen, Kommentare, Escapes,
 # doppelte Anführungszeichen, History, Globs). Ein Befehl, der sie ungequotet enthält, ist kein einfacher Befehl.
 _UNSICHER = frozenset(";&|<>$`(){}#\\\"!*")
-_POC_ANFANG = re.compile(r"python3 (?:-I )?[^\s']*/scripts/poc\.py(?: |\Z)")
+# Pfad absolut (`/…`) oder `~/…`, nie mit `-` beginnend (sonst `-W/x/scripts/poc.py` als Python-Option).
+_POC_ANFANG = re.compile(r"python3 (?:-I )?~?/(?:[^\s']*/)?scripts/poc\.py(?: |\Z)")
+_NETZWERKWERKZEUG = re.compile(
+    r"(?:\A|[;&|(`\n])[ \t]*(?:(?:sudo|env|xargs|command|exec|nohup|time)(?:[ \t]+(?:-[^\s;&|()`]*|\w+=[^\s;&|()`]*))*[ \t]+)*(?:[^\s;&|()`]*/)?"
+    r"(?:curl|wget|nc|ncat|netcat|telnet|ssh|scp|socat|ftp|http|httpie)(?![A-Za-z0-9_.\-/])")
+_DEV_NETZ = re.compile(r"/dev/(?:tcp|udp)/")
 
 
-def _steuerzeichen(ch: str) -> bool:
-    return ch != "\t" and (ord(ch) < 0x20 or ord(ch) == 0x7F)
+def _nicht_druckbar(ch: str) -> bool:
+    return not 0x20 <= ord(ch) <= 0x7E
 
 
 def ist_poc_aufruf(befehl: str) -> bool:
     """Ganz-Befehl-Regel: True nur, wenn der *ganze* Befehl ein einfacher Befehl ist, der mit
     `python3 [-I] <pfad>/scripts/poc.py` beginnt und außerhalb von `'…'` keines der Zeichen
-    `; & | < > $ ` ( ) { } # \\ " ! *` enthält. Zeilenumbrüche und andere Steuerzeichen sind nie erlaubt, offene
-    `'` ebenso nicht. In `'…'` ist alles außer `'` Text (bash kennt dort keine Escapes)."""
+    `; & | < > $ ` ( ) { } # \\ " ! *` enthält. Der Pfad beginnt mit `/` oder `~/`. Jedes Zeichen außerhalb von
+    druckbarem ASCII (Zeilenumbruch, Tab, Unicode-Whitespace, Umlaute …) ist nie erlaubt, offenes `'` ebenso nicht. In `'…'` ist alles außer `'` Text (bash kennt dort keine Escapes)."""
     if not _POC_ANFANG.match(befehl):
         return False
     in_einfach = False
     for ch in befehl:
-        if _steuerzeichen(ch):
+        if _nicht_druckbar(ch):
             return False
         if ch == "'":
             in_einfach = not in_einfach
@@ -198,13 +228,19 @@ def _urls_im_befehl(befehl: str) -> list[str]:
 
 def verstoesse_bash(befehl: str, verbotene_muster: list[str]) -> list[str]:
     """Verstöße eines Bash-Befehls gegen die Netzregel (leere Liste = in Ordnung). poc.py-Aufruf (ganzer
-    Befehl, siehe `ist_poc_aufruf`): nur erlaubte Hosts. Jeder andere Befehl: jede URL ist ein Verstoß."""
+    Befehl, siehe `ist_poc_aufruf`): nur erlaubte Hosts. Jeder andere Befehl: jede URL ist ein Verstoß, dazu
+    nicht erlaubte Hosts aus `Host:`/`--resolve`/`--connect-to`/`-x`, und (nur wenn sonst nichts auffiel) ein
+    Netzwerkwerkzeug in Befehlsposition oder `/dev/tcp|udp/`."""
     verstoesse: list[str] = []
     if ist_poc_aufruf(befehl):
         verstoesse.extend(f"poc.py-Aufruf mit nicht erlaubtem Host: {_kurz(h)}" for h in verstoesse_poc(befehl))
     else:
         verstoesse.extend(f"URL in Befehl ohne einfachen poc.py-Aufruf: {_kurz(url)}"
                           for url in _urls_im_befehl(befehl))
+        verstoesse.extend(f"Nicht erlaubter Host in Befehl ohne einfachen poc.py-Aufruf: {_kurz(h)}"
+                          for h in dict.fromkeys(_zusatz_hosts(befehl)) if h not in ERLAUBTE_HOSTS)
+        if not verstoesse and (_NETZWERKWERKZEUG.search(befehl) or _DEV_NETZ.search(befehl)):
+            verstoesse.append("Netzwerkwerkzeug außerhalb poc.py")
     dekodiert = unquote(befehl)
     for muster in verbotene_muster:
         if muster and (muster in befehl or muster in dekodiert):
