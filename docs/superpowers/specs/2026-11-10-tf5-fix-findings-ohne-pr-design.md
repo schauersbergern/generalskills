@@ -49,7 +49,7 @@
 
 Zusätzlich (Workflow, Vertrag zwischen zwei Skills — kein Prosatest, analog `test_skill_text.py`):
 - `security-audit/scripts/test_skill_text.py`: Das Erkennungsmuster steht in `fix-findings/SKILL.md` direkt nach dem Kommentar `<!-- audit-kopfzeile -->` in einem Codezaun mit genau einer Zeile (Regex); der Test liest sie und prüft per `re.fullmatch(muster, zeile.strip())` (Kopfzeile aus `bericht.markdown(json.load(<Beispiel-JSON aus test_skill_text.py>))`): Kopfzeile aus `bericht.markdown` passt; dieselbe Zeile mit Einrückung passt nach Trimmen; `PR #12 · Code · Runde 1/3 · geprüft auf abc1234` passt nicht; Eingabe mit Begleittext und Codezaun davor enthält eine passende Zeile.
-- `security-audit/scripts/test_bericht.py`: `bericht.py repo [pfad]` gibt genau `_repo_name` aus, ohne Dateien anzulegen (Ausgabeordner unverändert, keine `.reserviert`-Datei).
+- `security-audit/scripts/test_bericht.py`: `bericht.py repo [--repo P]` gibt genau `_repo_name` aus, ohne Dateien anzulegen (Ausgabeordner unverändert, keine `.reserviert`-Datei).
 
 ## Entscheidungen/Annahmen
 
