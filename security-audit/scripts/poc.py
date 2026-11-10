@@ -55,6 +55,7 @@ EXEC_TIMEOUT = 120
 DB_WARTEN = 60
 START_BUDGET = 440               # Gesamtzeit der Arbeitsphase von starten/neustart (Skill-Bash-Limit: 600 s, Aufräumen folgt)
 AUFRAEUMEN_BUDGET = 440          # Gesamtzeit der Docker-Aufrufe von aufraeumen
+VORBEREITEN_BUDGET = 480         # Gesamtzeit von vorbereiten: Entfernen der alten Kopie, git-Aufrufe, Kopieren (Skill-Bash-Limit: 600 s)
 LOCKFILE_MAX = 64 * 1024 * 1024  # größere package-lock.json gelten als unlesbar
 TAIL_ZEILEN = 40
 ZEILE_MAX = 300
@@ -224,6 +225,11 @@ def _frist_setzen(umgebungsvariable: str, standard: int) -> None:
         sekunden = standard
     _BUDGET_SEKUNDEN = sekunden if sekunden > 0 else standard
     _ENDE = time.monotonic() + _BUDGET_SEKUNDEN
+
+
+def _ohne_frist() -> None:
+    global _ENDE
+    _ENDE = None
 
 
 def _budget_erschoepft() -> bool:
@@ -690,8 +696,18 @@ def cmd_vorbereiten(a: argparse.Namespace) -> int:
     ordner = _ordner(a.lauf, anlegen=True)
     quelle = os.path.join(ordner, "quelle")
     marker = os.path.join(ordner, "quelle.fertig")
+    _frist_setzen("SECURITY_AUDIT_VORBEREITEN_BUDGET", VORBEREITEN_BUDGET)
+    gitkopie.frist_setzen(_ENDE)       # die Frist gilt für alle git-Aufrufe und das Kopieren; sie läuft ab dem Entfernen
+    try:
+        return _vorbereiten(a, repo, ordner, quelle, marker)
+    finally:
+        gitkopie.frist_setzen(None)
+        _ohne_frist()
+
+
+def _vorbereiten(a: argparse.Namespace, repo: str, ordner: str, quelle: str, marker: str) -> int:
     _entferne(marker, ordner)          # erst der Marker, dann die Kopie: ein Absturz dazwischen hinterlässt keine „fertige“ Kopie
-    _entferne(quelle, ordner)
+    _entferne(quelle, ordner)          # lokale Dateioperation: wird nicht unterbrochen, zählt aber gegen das Budget
     sha = a.sha or "HEAD"
     try:
         meldungen = gitkopie.arbeitskopie(repo, quelle, sha)
@@ -710,6 +726,10 @@ def cmd_vorbereiten(a: argparse.Namespace) -> int:
         return 4
     try:
         kopiert = gitkopie.git(repo, "rev-parse", "--verify", f"{sha}^{{commit}}").stdout.decode().strip()
+    except gitkopie.ZeitbudgetFehler as e:         # keine „fertige“ Kopie ohne geklärten Commit nach Ablauf des Budgets
+        print("kategorie: git-fehler")
+        print(f"git-Fehler: {e}", file=sys.stderr)
+        return 4
     except gitkopie.GitFehler:
         kopiert = sha
     _schreibe_atomar(marker, {"fertig": True, "sha": kopiert})

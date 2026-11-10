@@ -15,19 +15,21 @@ import os
 import re
 import sys
 import tempfile
+import time
 import unicodedata
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gitkopie  # noqa: E402
 import netzregel  # noqa: E402
-from gitkopie import GitFehler, _t, git  # noqa: E402
+from gitkopie import GitFehler, ZeitbudgetFehler, _t, git  # noqa: E402
 
 STUFEN = ("P1", "P2", "P3")
 STATUS = ("bestätigt", "unbestätigt", "verworfen", "verdacht")
 IN_LISTE = ("bestätigt", "unbestätigt")
 EINZEILIG = ("titel", "szenario", "erwartet", "klasse")
 MAX_JSON_BYTES = 16 * 1024 * 1024
+KONTEXT_BUDGET = 300      # Sekunden für `kontext` insgesamt (SECURITY_AUDIT_KONTEXT_TIMEOUT überschreibt es); Bash-Limit des Skills: 600 s
 _ID = re.compile(r"S-[1-9][0-9]{0,8}")
 _KATEGORIE = re.compile(r"A(0[1-9]|10)")
 _ZEILE_IM_PFAD = re.compile(r"(:[0-9]+(:[0-9]+)?|#L[0-9]+(C[0-9]+)?(-L?[0-9]+(C[0-9]+)?)?)\Z")
@@ -83,6 +85,8 @@ def _teilpfad(wurzel: str, teilpfad: str, sha: str = "HEAD") -> str:
     ziel = [unicodedata.normalize("NFC", k) for k in komps]
     try:
         baum = git(wurzel, "ls-tree", "-r", "-z", "--name-only", "--full-tree", sha, timeout=120).stdout
+    except ZeitbudgetFehler as e:
+        raise KontextFehler(_zeitbudget_meldung(e)) from e
     except GitFehler as e:
         raise KontextFehler(f"Dateiliste des Commits nicht lesbar: {_t(e)}") from e
     for roh in baum.split(b"\0"):
@@ -92,6 +96,11 @@ def _teilpfad(wurzel: str, teilpfad: str, sha: str = "HEAD") -> str:
         if [unicodedata.normalize("NFC", k) for k in echt[:len(ziel)]] == ziel:
             return "/".join(echt[:len(ziel)])
     raise KontextFehler(f"Teilpfad nicht im Repo (HEAD): {_t(teilpfad)}")
+
+
+def _zeitbudget_meldung(e: Exception) -> str:
+    return (f"Zeitbudget von bericht.py kontext erschöpft ({_t(e)}). Größere Repos: SECURITY_AUDIT_KONTEXT_TIMEOUT "
+            f"(Sekunden, Standard {KONTEXT_BUDGET}) erhöhen; Bash-Limit des Skills sind 600 s.")
 
 
 def _slug(teilpfad: str) -> str:
@@ -104,12 +113,24 @@ def kontext(repo: str, teilpfad: str | None, jetzt: datetime | None = None) -> d
     try:
         wurzel = os.fsdecode(git(repo, "rev-parse", "--show-toplevel").stdout).rstrip("\n")
         sha = git(wurzel, "rev-parse", "--verify", "HEAD^{commit}").stdout.decode().strip()
+    except ZeitbudgetFehler as e:
+        raise KontextFehler(_zeitbudget_meldung(e)) from e
     except GitFehler as e:
         raise KontextFehler(f"Kein git-Repository mit HEAD unter {_t(repo)}: {_t(e)}") from e
     name = _repo_name(wurzel)
     datum = jetzt.strftime("%Y-%m-%d")
     echt = _teilpfad(wurzel, teilpfad, sha) if teilpfad is not None else None
     slug = _slug(echt) if echt is not None else None
+    # git-Teil vor der Reservierung: scheitert er (auch am Zeitbudget), bleibt keine `.reserviert`-Datei zurück
+    try:
+        konfig = [_t(p) for p in gitkopie.repo_konfiguration(wurzel, sha)]
+    except ZeitbudgetFehler as e:
+        raise KontextFehler(_zeitbudget_meldung(e)) from e
+    except GitFehler as e:
+        raise KontextFehler(f"Konfiguration in HEAD nicht lesbar: {_t(e)}") from e
+    hinweise = gitkopie.repo_hinweise(wurzel, sha)      # git-Fehler werden dort zu Hinweisen; Zeitbudget unten geprüft
+    if gitkopie.frist_erschoepft():
+        raise KontextFehler(_zeitbudget_meldung(ZeitbudgetFehler("Prüfung des Repos nicht beendet")))
 
     basis = os.environ.get("SECURITY_AUDIT_AUSGABE")
     ordner = os.path.join(basis, name) if basis else os.path.join(os.path.expanduser("~"), ".claude", "security-reviews", name)
@@ -146,14 +167,10 @@ def kontext(repo: str, teilpfad: str | None, jetzt: datetime | None = None) -> d
     else:
         stats = os.path.join(os.path.expanduser("~"), ".claude", "agent-stats", name, f"{datum}-security-audit.md")
 
-    try:
-        konfig = [_t(p) for p in gitkopie.repo_konfiguration(wurzel, sha)]
-    except GitFehler as e:
-        raise KontextFehler(f"Konfiguration in HEAD nicht lesbar: {_t(e)}") from e
     return {
         "repo": name, "wurzel": wurzel, "sha": sha, "sha7": sha[:7], "datum": datum,
         "teilpfad": echt, "teilpfad_slug": slug, "ausgabe_ordner": ordner, "basisname": basisname,
-        "hinweise": gitkopie.repo_hinweise(wurzel, sha), "repo_konfiguration": konfig,
+        "hinweise": hinweise, "repo_konfiguration": konfig,
         "agent_stats_datei": stats,
     }
 
@@ -475,6 +492,20 @@ def _argv_mit_werten(argv: list[str]) -> list[str]:
     return aus
 
 
+def _kontext_budget() -> float:
+    """Gesamtbudget von `kontext`: SECURITY_AUDIT_KONTEXT_TIMEOUT (Sekunden, > 0) oder 300 s; ein ungültiger Wert ist ein Fehler."""
+    roh = os.environ.get("SECURITY_AUDIT_KONTEXT_TIMEOUT")
+    if roh is None or roh == "":
+        return KONTEXT_BUDGET
+    try:
+        sekunden = float(roh)
+    except ValueError:
+        sekunden = 0.0
+    if not sekunden > 0 or sekunden != sekunden or sekunden == float("inf"):
+        raise KontextFehler(f"SECURITY_AUDIT_KONTEXT_TIMEOUT={_t(roh)} ungültig (erwartet: Sekunden > 0)")
+    return sekunden
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="bericht.py")
     sub = ap.add_subparsers(dest="befehl", required=True)
@@ -487,10 +518,13 @@ def main(argv: list[str]) -> int:
     if args.befehl == "rendern":
         return _rendern(args.json)
     try:
+        gitkopie.frist_setzen(time.monotonic() + _kontext_budget())
         ergebnis = kontext(args.repo, args.teilpfad)
     except KontextFehler as e:
         print(str(e), file=sys.stderr)
         return 3
+    finally:
+        gitkopie.frist_setzen(None)
     print(json.dumps(ergebnis, ensure_ascii=True, indent=2))
     return 0
 

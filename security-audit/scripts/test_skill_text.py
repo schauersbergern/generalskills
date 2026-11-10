@@ -23,6 +23,7 @@ ERWARTUNG = os.path.join(SKILL_DIR, "evals", "expected", "fixture-web.json")
 
 sys.path.insert(0, HIER)
 import bericht  # noqa: E402
+import poc  # noqa: E402
 
 PRAEFIX_SKILL = ("python3 -I ${CLAUDE_SKILL_DIR}/scripts/", "python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py")
 PRAEFIX_REFERENZ = ("python3 -I <SKILL_DIR>/scripts/",)
@@ -207,7 +208,7 @@ def test_briefings_abschnitte():
 # ------------------------------------------------------------------------------------ Härtung TF1-A6
 
 BASH_TIMEOUT = "timeout: 600000"
-# laufen länger als der Bash-Standard (120 s); jeder hat ein eigenes Zeitbudget unter 600 s (Härtung B1)
+# laufen länger als der Bash-Standard (120 s); jeder hat ein eigenes Zeitbudget (Härtung B1, I3)
 LANGE_UNTERBEFEHLE = ("vorbereiten", "bauen", "starten", "neustart", "ausfuehren", "aufraeumen")
 NICHT_GEPRUEFT = "nicht geprüft (Budget)"
 
@@ -221,6 +222,21 @@ def test_timeout_liste_nennt_alle_langen_unterbefehle_haertung_a6():
         assert "bericht.py kontext" in zeile, zeile
     briefing = [z for z in _lies(BRIEFINGS).splitlines() if "timeout 600000" in z]
     assert briefing and all(u in briefing[0] for u in ("neustart", "ausfuehren"))
+
+
+def test_zeitbudgets_in_skill_md_entsprechen_den_skripten_haertung_i3():
+    """Die Zeitbudget-Zusage in SKILL.md nennt je Befehl den Wert, den das Skript wirklich verwendet, und die Umgebungsvariable."""
+    zeile = next(z for z in _lies(SKILL_MD).splitlines() if BASH_TIMEOUT in z)
+    erwartet = {"bericht.py kontext": bericht.KONTEXT_BUDGET, "poc.py vorbereiten": poc.VORBEREITEN_BUDGET,
+                "poc.py starten": poc.START_BUDGET, "poc.py neustart": poc.START_BUDGET,
+                "poc.py aufraeumen": poc.AUFRAEUMEN_BUDGET, "poc.py bauen": poc.BAU_TIMEOUT,
+                "poc.py ausfuehren": poc.EXEC_TIMEOUT}
+    zusage = zeile[zeile.index("Jeder dieser Aufrufe"):]
+    for befehl, sekunden in erwartet.items():
+        assert re.search(rf"`{re.escape(befehl)}`[^`]*?{sekunden} s", zusage), (befehl, sekunden)
+    assert "SECURITY_AUDIT_KONTEXT_TIMEOUT" in zusage and "SECURITY_AUDIT_KONTEXT_TIMEOUT" in _lies(os.path.join(HIER, "bericht.py"))
+    assert "nur für `kontext` und `vorbereiten` zugesichert" in zusage          # keine pauschale Zusage unter 600 s
+    assert "unter 600 s" not in zusage
 
 
 def test_budget_vermerk_in_skill_und_format_haertung_a6():
@@ -286,6 +302,8 @@ def test_skill_md_nennt_teilpfad_pruefung_und_reservierung_haertung_b7():
     text = _lies(SKILL_MD)
     assert ".reserviert" in _lies(BERICHT_FORMAT)
     assert "Ausgabeordner" in text and "im geprüften Repo" in text           # Exit 3 auch dafür
+    exit3 = next(z for z in text.splitlines() if z.startswith("- Exit 3"))   # die Abbruchzeile von `kontext`, nicht irgendeine Stelle
+    assert "Ausgabeordner im geprüften Repo" in exit3 and "stderr dem User melden" in exit3
     assert "rendern" in next(z for z in text.splitlines() if "Befunde außerhalb von `teilpfad`" in z)
 
 

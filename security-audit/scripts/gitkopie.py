@@ -46,6 +46,30 @@ class GitFehler(Exception):
         self.stderr = stderr
 
 
+class ZeitbudgetFehler(GitFehler):
+    """Das Gesamtbudget des laufenden Befehls (`frist_setzen`) ist aufgebraucht; es wird kein weiterer git-Aufruf gestartet."""
+
+
+_ENDE: float | None = None          # monotone Frist des laufenden Befehls (bericht.py kontext, poc.py vorbereiten)
+
+
+def frist_setzen(ende: float | None) -> None:
+    """Gesamtfrist (Wert von `time.monotonic()`) für alle folgenden git-Aufrufe dieses Prozesses; `None` hebt sie auf.
+    `git` kürzt seinen Timeout auf die Restzeit und startet danach nichts mehr (ZeitbudgetFehler), `_Batch` kürzt den
+    Zeitgeber des cat-file-Prozesses."""
+    global _ENDE
+    _ENDE = ende
+
+
+def frist_rest() -> float | None:
+    return None if _ENDE is None else _ENDE - time.monotonic()
+
+
+def frist_erschoepft() -> bool:
+    rest = frist_rest()
+    return rest is not None and rest <= 0
+
+
 # ------------------------------------------------------------------------------------ git-Aufruf
 
 def _umgebung() -> dict[str, str]:
@@ -61,12 +85,28 @@ def _befehl(repo: str, args: tuple[str, ...]) -> list[str]:
 
 def git(repo: str, *args: str, eingabe: bytes | None = None,
         timeout: int = 60) -> subprocess.CompletedProcess[bytes]:
-    """git im Repo ausführen; wirft GitFehler bei Exit ≠ 0, Timeout oder fehlendem git."""
+    """git im Repo ausführen; wirft GitFehler bei Exit ≠ 0, Timeout oder fehlendem git, ZeitbudgetFehler (eine GitFehler),
+    wenn das Gesamtbudget (`frist_setzen`) aufgebraucht ist oder den Timeout gekürzt und erreicht hat."""
+    rest = frist_rest()
+    if rest is not None:
+        if rest <= 0:
+            raise ZeitbudgetFehler(f"git {' '.join(args)}: Zeitbudget erschöpft, nicht gestartet")
+        if rest < timeout:
+            try:
+                return _git_ausfuehren(repo, args, eingabe, rest)
+            except GitFehler as e:
+                if "Timeout nach" in str(e) and e.returncode is None:
+                    raise ZeitbudgetFehler(f"git {' '.join(args)}: Zeitbudget erschöpft") from e
+                raise
+    return _git_ausfuehren(repo, args, eingabe, timeout)
+
+
+def _git_ausfuehren(repo: str, args: tuple[str, ...], eingabe: bytes | None, timeout: float) -> subprocess.CompletedProcess[bytes]:
     try:
         r = subprocess.run(_befehl(repo, args), input=eingabe, capture_output=True, timeout=timeout,
                            env=_umgebung(), stdin=None if eingabe is not None else subprocess.DEVNULL)
     except subprocess.TimeoutExpired as e:
-        raise GitFehler(f"git {' '.join(args)}: Timeout nach {timeout} s") from e
+        raise GitFehler(f"git {' '.join(args)}: Timeout nach {timeout:g} s") from e
     except OSError as e:
         raise GitFehler(f"git nicht startbar: {e}") from e
     if r.returncode != 0:
@@ -80,17 +120,31 @@ class _Batch:
     """Ein `git cat-file --batch`-Prozess; liest Blobs per SHA im Gleichschritt (Anfrage, Antwort)."""
 
     def __init__(self, repo: str):
+        rest = frist_rest()
+        if rest is not None and rest <= 0:
+            raise ZeitbudgetFehler("git cat-file --batch: Zeitbudget erschöpft, nicht gestartet")
         try:
             self.proc = subprocess.Popen(_befehl(repo, ("cat-file", "--batch")), stdin=subprocess.PIPE,
                                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=_umgebung())
         except OSError as e:
             raise GitFehler(f"git nicht startbar: {e}") from e
-        self.timer = threading.Timer(BATCH_TIMEOUT, self.proc.kill)
+        self.timer = threading.Timer(BATCH_TIMEOUT if rest is None else min(BATCH_TIMEOUT, rest), self.proc.kill)
         self.timer.daemon = True
         self.timer.start()
 
     def lies(self, sha: str) -> bytes | None:
-        """Inhalt des Blobs oder None, wenn das Objekt fehlt (z. B. Partial Clone ohne Lazy Fetch)."""
+        """Inhalt des Blobs oder None, wenn das Objekt fehlt (z. B. Partial Clone ohne Lazy Fetch). Ein Abbruch nach Ablauf
+        der Gesamtfrist (der Zeitgeber hat git beendet) ist ein ZeitbudgetFehler."""
+        try:
+            return self._lies(sha)
+        except ZeitbudgetFehler:
+            raise
+        except GitFehler as e:
+            if frist_erschoepft():
+                raise ZeitbudgetFehler(f"git cat-file --batch: Zeitbudget erschöpft ({e})") from e
+            raise
+
+    def _lies(self, sha: str) -> bytes | None:
         try:
             self.proc.stdin.write(sha.encode() + b"\n")
             self.proc.stdin.flush()
@@ -360,6 +414,9 @@ def arbeitskopie(repo: str, ziel: str, rev: str = "HEAD") -> list[str]:
 
     with _Batch(repo) as batch:
         for e in baum:
+            if frist_erschoepft():
+                meldungen.append("Arbeitskopie unvollständig: Zeitbudget erschöpft; alle weiteren Dateien fehlen")
+                break
             pfad = e.pfad
             p = _t(pfad)
             grund = _pfad_problem(pfad)
@@ -555,6 +612,8 @@ def repo_hinweise(repo: str, rev: str = "HEAD") -> list[str]:
     ordner_ok: dict[str, bool] = {}
     kandidaten = [(pfad, ms) for pfad, ms in sorted(index.items()) if ms[0] in DATEI_MODI]
     ende = time.monotonic() + HINWEIS_BUDGET
+    if _ENDE is not None:
+        ende = min(ende, _ENDE)
     for geprueft, (pfad, (modus, sha)) in enumerate(kandidaten):
         if time.monotonic() > ende:
             hinweise.append(f"Prüfung auf Änderungen im Arbeitsbaum abgebrochen (Zeitbudget {HINWEIS_BUDGET} s): "

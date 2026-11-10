@@ -9,6 +9,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 import unicodedata
 
 import pytest
@@ -20,6 +21,13 @@ SYMLINK = "120000"
 DATEI = "100644"
 AUSFUEHRBAR = "100755"
 LFS = b"version https://git-lfs.github.com/spec/v1\noid sha256:" + b"ab" * 32 + b"\nsize 12345\n"
+
+
+@pytest.fixture(autouse=True)
+def ohne_frist():
+    gitkopie.frist_setzen(None)
+    yield
+    gitkopie.frist_setzen(None)
 
 
 @pytest.fixture(autouse=True)
@@ -1048,3 +1056,47 @@ def test_fehlende_objekte_werden_gemeldet_haertung_b5(tmp_path):
     hinweise = gitkopie.repo_hinweise(str(repo))
     fehlt = [h for h in hinweise if "Objekt" in h and "fehlen" in h]
     assert len(fehlt) == 1 and "2" in fehlt[0] and "a.txt" in fehlt[0], hinweise
+
+
+# ---------------------------------------------------------------- Härtung TF1-I3 (Gesamtfrist)
+
+def test_frist_erschoepft_startet_kein_git_haertung_i3(tmp_path, monkeypatch):
+    repo = repo_mit(tmp_path, {"a.txt": b"a\n"})
+    log = shim_git(tmp_path, monkeypatch)
+    gitkopie.frist_setzen(time.monotonic() - 1)
+    with pytest.raises(gitkopie.ZeitbudgetFehler, match="Zeitbudget"):
+        gitkopie.git(str(repo), "rev-parse", "HEAD")
+    with pytest.raises(gitkopie.ZeitbudgetFehler):
+        gitkopie._Batch(str(repo))
+    with pytest.raises(gitkopie.GitFehler):                  # ist ein GitFehler: bestehende Fehlerpfade greifen
+        gitkopie.git(str(repo), "rev-parse", "HEAD")
+    assert not log.exists(), "nach Ablauf der Frist darf kein git-Prozess starten"
+    gitkopie.frist_setzen(None)
+    assert gitkopie.git(str(repo), "rev-parse", "HEAD").stdout.strip()      # ohne Frist läuft es wieder
+
+
+def test_frist_kuerzt_den_timeout_und_meldet_zeitbudget_haertung_i3(tmp_path, monkeypatch):
+    gesehen = {}
+
+    def falsches_run(cmd, **kw):
+        gesehen["timeout"] = kw["timeout"]
+        raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+
+    monkeypatch.setattr(gitkopie.subprocess, "run", falsches_run)
+    gitkopie.frist_setzen(time.monotonic() + 5)
+    with pytest.raises(gitkopie.ZeitbudgetFehler):
+        gitkopie.git(str(tmp_path), "status", timeout=60)
+    assert 0 < gesehen["timeout"] <= 5
+    gitkopie.frist_setzen(None)
+    with pytest.raises(gitkopie.GitFehler) as e:             # ohne Frist: gewöhnlicher Timeout, kein Zeitbudget
+        gitkopie.git(str(tmp_path), "status", timeout=60)
+    assert not isinstance(e.value, gitkopie.ZeitbudgetFehler) and gesehen["timeout"] == 60
+
+
+def test_arbeitskopie_bricht_bei_erschoepfter_frist_ab_haertung_i3(tmp_path, monkeypatch):
+    repo = repo_mit(tmp_path, {"a.txt": b"a\n", "b.txt": b"b\n"})
+    monkeypatch.setattr(gitkopie, "frist_erschoepft", lambda: True)
+    ziel = tmp_path / "ziel"
+    meldungen = gitkopie.arbeitskopie(str(repo), str(ziel))
+    assert any("Arbeitskopie unvollständig" in m and "Zeitbudget" in m for m in meldungen), meldungen
+    assert not (ziel / "a.txt").exists() and not (ziel / "b.txt").exists()

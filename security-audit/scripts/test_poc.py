@@ -1263,6 +1263,28 @@ def test_gesamtbudgets_liegen_unter_dem_bash_limit_haertung_b1():
     assert poc.START_BUDGET + poc.KURZ_TIMEOUT * 2 + poc.VERSION_TIMEOUT < 600
     assert poc.AUFRAEUMEN_BUDGET + poc.KURZ_TIMEOUT < 600
     assert poc.BAU_TIMEOUT + 2 * poc.VERSION_TIMEOUT < 600
+    assert poc.VORBEREITEN_BUDGET < 540                  # Härtung I3: vorbereiten, inkl. Entfernen der alten Kopie
+
+
+def test_erschoepftes_budget_startet_keinen_docker_prozess_haertung_b1(umg, monkeypatch):
+    """Bei Budget 0 (Frist verstrichen) wird kein docker-Prozess gestartet; ohne die Prüfung liefe ein Start mit
+    negativem Timeout, der sofort beendet würde und nur als Prozessstart beobachtbar wäre."""
+    for k, v in umg.env().items():
+        monkeypatch.setenv(k, v)
+    echtes_popen = poc.subprocess.Popen
+
+    def kein_start(*a, **kw):
+        raise AssertionError(f"docker gestartet trotz erschöpftem Budget: {a[0]}")
+
+    monkeypatch.setattr(poc, "_ENDE", time.monotonic() - 1)
+    monkeypatch.setattr(poc.subprocess, "Popen", kein_start)
+    r = poc._docker(["ps"], 10)
+    assert r.rc is None and not r.ok and r.out == b"" and r.err == b""
+    monkeypatch.setattr(poc.subprocess, "Popen", echtes_popen)
+    assert umg.aufrufe() == []
+    monkeypatch.setattr(poc, "_ENDE", time.monotonic() + 60)                      # Gegenprobe: mit Restzeit läuft docker
+    r = poc._docker(["ps"], 10)
+    assert r.rc == 0 and [a["args"] for a in umg.aufrufe()] == [["ps"]]
 
 
 def test_starten_zeitbudget_erschoepft_ist_start_fehler_mit_aufraeumen_haertung_b1(umg, tmp_path):
@@ -1561,3 +1583,46 @@ def test_puffer_ohne_fehler_ohne_marke_haertung_b5():
     with os.fdopen(r, "rb") as strom:
         puffer = poc._Puffer(strom, 100, False)
         assert puffer.ergebnis(time.monotonic() + 5) == (b"abc", False) and puffer.lesefehler is False
+
+
+# ------------------------------------------------------------------------------------ Härtung TF1-I3 (Budget vorbereiten)
+
+def _langsames_git(umg, pause):
+    """`git` vor dem echten im PATH der Umgebung: wartet `pause` Sekunden je Aufruf."""
+    import shutil
+    echt = shutil.which("git")
+    shim = umg.bin / "git"
+    shim.write_text(f'#!/bin/sh\nsleep {pause}\nexec {echt} "$@"\n')
+    shim.chmod(0o755)
+
+
+def test_vorbereiten_gesamtbudget_ueberschritten_ist_exit_4_ohne_fertig_marker_haertung_i3(umg, tmp_path):
+    """Jeder git-Aufruf (0,7 s) liegt weit unter seiner Einzelgrenze; die Summe sprengt das Budget von 2 s."""
+    repo = repo_mit(tmp_path, MINI, name="kunde-i3")
+    assert umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo).returncode == 0
+    marker = os.path.join(umg.zustand(), "quelle.fertig")
+    assert os.path.isfile(marker)
+    _langsames_git(umg, 0.7)
+    t0 = time.monotonic()
+    r = umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo, env=umg.env(SECURITY_AUDIT_VORBEREITEN_BUDGET="2"))
+    assert time.monotonic() - t0 < 20
+    assert r.returncode == 4 and "Zeitbudget" in r.stderr and "Traceback" not in r.stderr, (r.stdout, r.stderr)
+    assert r.stdout.splitlines()[0] in ("kategorie: git-fehler", "kategorie: arbeitskopie-unvollstaendig")
+    assert not os.path.exists(marker), "nach Abbruch gilt keine Kopie als fertig"
+    assert umg.poc("bauen", "--lauf", LAUF).returncode != 0              # bauen verlangt den Marker
+
+
+def test_vorbereiten_einzelner_haengender_git_aufruf_endet_mit_dem_budget_haertung_i3(umg, tmp_path):
+    repo = repo_mit(tmp_path, MINI, name="kunde-i3b")
+    _langsames_git(umg, 30)
+    t0 = time.monotonic()
+    r = umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo, env=umg.env(SECURITY_AUDIT_VORBEREITEN_BUDGET="1"))
+    assert time.monotonic() - t0 < 15
+    assert r.returncode == 4 and "Zeitbudget" in r.stderr
+
+
+def test_vorbereiten_mit_ausreichendem_budget_laeuft_normal_haertung_i3(umg, tmp_path):
+    repo = repo_mit(tmp_path, MINI, name="kunde-i3c")
+    r = umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo, env=umg.env(SECURITY_AUDIT_VORBEREITEN_BUDGET="120"))
+    assert r.returncode == 0, r.stderr
+    assert os.path.isfile(os.path.join(umg.zustand(), "quelle.fertig"))

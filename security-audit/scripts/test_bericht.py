@@ -7,8 +7,10 @@ import copy
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime
 
 import pytest
@@ -970,3 +972,62 @@ def test_rendern_mit_unlesbarer_reservierung_warnt_statt_zu_pruefen_haertung_b4(
         f.write("kein json")
     p = lauf("rendern", _json_zu_kontext(k, sha="c" * 40))
     assert p.returncode == 0 and "Reservierung" in p.stderr and "nicht geprüft" in p.stderr
+
+
+# ------------------------------------------------------------------------------------ Härtung TF1-I3 (Gesamtbudget kontext)
+
+def _langsames_git(tmp_path, monkeypatch, pause):
+    """`git` im PATH, das vor jedem Aufruf `pause` Sekunden wartet und dann das echte git ausführt."""
+    echt = shutil.which("git")
+    ordner = tmp_path / "langsames-git"
+    ordner.mkdir()
+    shim = ordner / "git"
+    shim.write_text(f'#!/bin/sh\nsleep {pause}\nexec {echt} "$@"\n')
+    shim.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{ordner}{os.pathsep}{os.environ['PATH']}")
+
+
+def test_kontext_standardbudget_ist_300_sekunden_haertung_i3(monkeypatch):
+    monkeypatch.delenv("SECURITY_AUDIT_KONTEXT_TIMEOUT", raising=False)
+    assert bericht.KONTEXT_BUDGET == 300 and bericht._kontext_budget() == 300
+    monkeypatch.setenv("SECURITY_AUDIT_KONTEXT_TIMEOUT", "12.5")
+    assert bericht._kontext_budget() == 12.5
+
+
+@pytest.mark.parametrize("wert", ["abc", "0", "-5", "nan", "inf"])
+def test_kontext_ungueltiges_budget_ist_exit_3_ohne_stillen_standard_haertung_i3(tmp_path, monkeypatch, wert):
+    r = neues_repo(tmp_path / "kunde-portal")
+    monkeypatch.setenv("SECURITY_AUDIT_KONTEXT_TIMEOUT", wert)
+    p = lauf("kontext", "--repo", str(r))
+    assert p.returncode == 3 and "SECURITY_AUDIT_KONTEXT_TIMEOUT" in p.stderr and p.stdout == ""
+
+
+def test_kontext_gesamtbudget_ueberschritten_ist_exit_3_mit_meldung_haertung_i3(tmp_path, monkeypatch):
+    """Jeder einzelne git-Aufruf (0,7 s) bliebe unter seinem Timeout; die Summe sprengt das Gesamtbudget von 2 s."""
+    r = neues_repo(tmp_path / "kunde-portal")
+    _langsames_git(tmp_path, monkeypatch, 0.7)
+    monkeypatch.setenv("SECURITY_AUDIT_KONTEXT_TIMEOUT", "2")
+    t0 = time.monotonic()
+    p = lauf("kontext", "--repo", str(r))
+    assert time.monotonic() - t0 < 20
+    assert p.returncode == 3 and "Zeitbudget" in p.stderr and "Traceback" not in p.stderr and p.stdout == ""
+    ziel = os.path.join(os.environ["SECURITY_AUDIT_AUSGABE"], "kunde-portal")
+    assert not os.path.isdir(ziel) or not os.listdir(ziel), "abgebrochenes kontext darf keinen Namen reserviert lassen"
+
+
+def test_kontext_budget_kuerzt_den_einzelaufruf_haertung_i3(tmp_path, monkeypatch):
+    """Ein einziger hängender git-Aufruf (30 s, Einzelgrenze 60 s) endet mit dem Gesamtbudget, nicht erst mit seiner Grenze."""
+    r = neues_repo(tmp_path / "kunde-portal")
+    _langsames_git(tmp_path, monkeypatch, 30)
+    monkeypatch.setenv("SECURITY_AUDIT_KONTEXT_TIMEOUT", "1")
+    t0 = time.monotonic()
+    p = lauf("kontext", "--repo", str(r))
+    assert time.monotonic() - t0 < 15
+    assert p.returncode == 3 and "Zeitbudget" in p.stderr
+
+
+def test_kontext_mit_ausreichendem_budget_laeuft_normal_haertung_i3(tmp_path, monkeypatch):
+    r = neues_repo(tmp_path / "kunde-portal")
+    monkeypatch.setenv("SECURITY_AUDIT_KONTEXT_TIMEOUT", "120")
+    p = lauf("kontext", "--repo", str(r))
+    assert p.returncode == 0, p.stderr
