@@ -254,3 +254,45 @@ def test_10_aufraeumen(stack):
         assert r.returncode == 0, r.stdout + r.stderr
     assert praefix_reste(stack.lauf) == []
     assert not os.path.exists(os.path.join(os.path.realpath(stack.tmp), f"security-audit-{stack.lauf}"))
+
+
+MS_LOCK = {"name": "dep", "version": "1.0.0", "lockfileVersion": 3, "requires": True, "packages": {
+    "": {"name": "dep", "version": "1.0.0", "dependencies": {"ms": "2.1.3"}},
+    "node_modules/ms": {"version": "2.1.3", "resolved": "https://registry.npmjs.org/ms/-/ms-2.1.3.tgz",
+                        "integrity": "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA=="}}}
+
+
+def test_11_kunden_dockerignore_und_node_modules(tmp_path_factory):
+    """T3-I1: Eine Kunden-`.dockerignore` (`*`) darf Dockerfile/Lockfile nicht aussperren, getrackte
+    `node_modules` kommen nicht ins Image, die Abhängigkeiten stammen aus `npm ci`."""
+    tmp = tmp_path_factory.mktemp("zustand-ignore")
+    repo = tmp_path_factory.mktemp("kunde-ignore") / "dep"
+    (repo / "src").mkdir(parents=True)
+    (repo / "node_modules" / "marker").mkdir(parents=True)
+    (repo / "node_modules" / "marker" / "index.js").write_text("// getrackt, darf nicht im Image landen\n")
+    (repo / ".dockerignore").write_text("*\n!src\n")
+    (repo / "src" / "server.js").write_text(SERVER_JS)
+    (repo / "package.json").write_text(json.dumps({"name": "dep", "version": "1.0.0", "dependencies": {"ms": "2.1.3"}}))
+    (repo / "package-lock.json").write_text(json.dumps(MS_LOCK))
+    git_env = {"PATH": os.environ["PATH"], "HOME": str(repo), "GIT_CONFIG_NOSYSTEM": "1"}
+    for args in (["init", "-q"], ["add", "-A", "-f"], ["-c", "user.name=t", "-c", "user.email=t@t",
+                                                        "-c", "commit.gpgsign=false", "commit", "-q", "-m", "c"]):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, env=git_env, capture_output=True)
+    s = Stack(secrets.token_hex(4), tmp, str(repo))
+    try:
+        assert s.poc("vorbereiten", "--lauf", s.lauf, "--repo", s.repo).returncode == 0
+        quelle = os.path.join(os.path.realpath(tmp), f"security-audit-{s.lauf}", "quelle")
+        assert os.path.isdir(os.path.join(quelle, "node_modules", "marker"))  # Kopie hat sie, der Kontext nicht
+        r = s.poc("bauen", "--lauf", s.lauf, "--node", "22")
+        assert r.returncode == 0, r.stdout + r.stderr
+        r = s.poc("starten", "--lauf", s.lauf, "--rolle", "p1", "--start-befehl", "node src/server.js", "--port", "3000")
+        assert r.returncode == 0, r.stdout + r.stderr
+        r = s.poc("ausfuehren", "--lauf", s.lauf, "--rolle", "p1", "--", "ls", "node_modules")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert r.stdout.split() == ["ms"], r.stdout
+        r = s.poc("ausfuehren", "--lauf", s.lauf, "--rolle", "p1", "--", "ls", "-a", ".")
+        # Die Kunden-`.dockerignore` (`*`) war nicht wirksam: sonst fehlten package.json und Lockfile im Kontext.
+        assert "src" in r.stdout.split() and "package-lock.json" in r.stdout.split()
+    finally:
+        s.poc("aufraeumen", "--lauf", s.lauf, timeout=300)
+    assert praefix_reste(s.lauf) == []
