@@ -21,6 +21,7 @@ import re
 import signal
 import stat
 import subprocess
+import tempfile
 import threading
 import time
 import unicodedata
@@ -91,10 +92,14 @@ def werkzeug_umgebung() -> dict[str, str]:
     return env
 
 
+AUSGABE_MAX = 16 * 1024 * 1024   # Bytes je Strom (stdout, stderr), die `werkzeug_ausfuehren` höchstens in den Speicher liest
+
+
 class Lauf(NamedTuple):
     rc: int | None      # None = Zeitüberschreitung (die eigene Prozessgruppe wurde beendet)
     out: bytes
     err: bytes
+    abgeschnitten: bool = False      # stdout oder stderr war länger als `ausgabe_max`; `out`/`err` enthalten nur den Anfang
 
 
 def _gruppe_beenden(proc: subprocess.Popen) -> tuple[bytes, bytes]:
@@ -114,21 +119,36 @@ def _gruppe_beenden(proc: subprocess.Popen) -> tuple[bytes, bytes]:
     return proc.communicate()
 
 
-def werkzeug_ausfuehren(args: list[str], timeout: float, cwd: str, env: dict[str, str] | None = None) -> Lauf:
+def _anfang_lesen(datei, grenze: int) -> tuple[bytes, bool]:
+    """Die ersten `grenze` Bytes einer Ausgabedatei und ob sie länger war."""
+    groesse = datei.seek(0, os.SEEK_END)
+    datei.seek(0)
+    return datei.read(grenze), groesse > grenze
+
+
+def werkzeug_ausfuehren(args: list[str], timeout: float, cwd: str, env: dict[str, str] | None = None,
+                        ausgabe_max: int = AUSGABE_MAX) -> Lauf:
     """Werkzeug (gitleaks, osv-scanner, `git clone`) als eigene Sitzung starten (`start_new_session=True`), mit `timeout`
     Sekunden. Bei Zeitüberschreitung wird nur diese selbst gestartete Gruppe beendet (`rc` ist dann None). Ohne `env` gilt
-    `werkzeug_umgebung()`; stdin ist /dev/null. Wirft GitFehler, wenn das Programm nicht startbar ist."""
-    try:
-        proc = subprocess.Popen(args, cwd=cwd, env=env if env is not None else werkzeug_umgebung(), stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
-    except OSError as e:
-        raise GitFehler(f"{os.path.basename(args[0])} nicht startbar: {e}") from e
-    try:
-        out, err = proc.communicate(timeout=max(timeout, 0.01))
-    except subprocess.TimeoutExpired:
-        out, err = _gruppe_beenden(proc)
-        return Lauf(None, out, err)
-    return Lauf(proc.returncode, out, err)
+    `werkzeug_umgebung()`; stdin ist /dev/null. stdout und stderr gehen in unbenannte Temp-Dateien (nie eine Pipe: auch ein
+    ausgebrochener Enkel kann nichts offen halten) und werden danach höchstens bis `ausgabe_max` Bytes je Strom gelesen
+    (`abgeschnitten`). Wirft GitFehler, wenn das Programm nicht startbar ist."""
+    with tempfile.TemporaryFile() as aus, tempfile.TemporaryFile() as fehler:
+        try:
+            proc = subprocess.Popen(args, cwd=cwd, env=env if env is not None else werkzeug_umgebung(),
+                                    stdin=subprocess.DEVNULL, stdout=aus, stderr=fehler, start_new_session=True)
+        except OSError as e:
+            raise GitFehler(f"{os.path.basename(args[0])} nicht startbar: {e}") from e
+        rc: int | None
+        try:
+            proc.communicate(timeout=max(timeout, 0.01))
+            rc = proc.returncode
+        except subprocess.TimeoutExpired:
+            _gruppe_beenden(proc)
+            rc = None
+        out, k1 = _anfang_lesen(aus, ausgabe_max)
+        err, k2 = _anfang_lesen(fehler, ausgabe_max)
+    return Lauf(rc, out, err, k1 or k2)
 
 
 def _befehl(repo: str, args: tuple[str, ...]) -> list[str]:

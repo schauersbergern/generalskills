@@ -12,6 +12,7 @@ selbst gestartet hat; die Tests enthalten keine Kill-Logik.
 import http.server
 import io
 import json
+import re
 import os
 import threading
 import shutil
@@ -1009,3 +1010,305 @@ def test_zweites_abhaengigkeiten_auf_demselben_lauf_verweigert_ohne_etwas_zu_loe
     finally:
         os.close(fd)
 
+
+# ------------------------------------------------------------------------------------ Härtung TF2: Zeilenermittlung (N-1)
+
+def _gross_yarn(n):
+    kopf = "# yarn lockfile v1\n\n"
+    return kopf + "".join(f'pkg{i}@^1.0.0:\n  version "1.0.{i}"\n  resolved "https://x/{i}"\n\n' for i in range(n))
+
+
+def _gross_npm(n):
+    pk = {"": {"name": "x"}}
+    pk.update({f"node_modules/pkg{i}": {"version": f"1.0.{i}"} for i in range(n)})
+    return json.dumps({"lockfileVersion": 3, "packages": pk}, indent=2) + "\n"
+
+
+def _gross_pnpm(n):
+    return "lockfileVersion: '9.0'\n\npackages:\n\n" + "".join(
+        f"  pkg{i}@1.0.{i}:\n    resolution: {{integrity: x}}\n\n" for i in range(n)) + "snapshots:\n"
+
+
+@pytest.mark.parametrize("name, bauen", [("yarn.lock", _gross_yarn), ("package-lock.json", _gross_npm),
+                                         ("pnpm-lock.yaml", _gross_pnpm)])
+def test_zeilenermittlung_ist_nicht_quadratisch(name, bauen):
+    """6000 verwundbare Pakete in einem Lockfile: die Zeilenermittlung nutzt einen Index je Lockfile (vorher O(Pakete x Zeilen):
+    etwa 14 s und mehr)."""
+    n = 6000
+    text = bauen(n)
+    daten = osv_ausgabe(*((f"pkg{i}", f"1.0.{i}", [vuln(f"pkg{i}", bereiche=(("0", "9.0.0"),))]) for i in range(n)))
+    start = time.monotonic()
+    eintraege = lieferkette._lockfile_eintraege("x/" + name, name, text.encode(), daten)
+    assert time.monotonic() - start < 4
+    zeilen = text.splitlines()
+    assert len(eintraege) == n
+    for e in (eintraege[0], eintraege[n // 2], eintraege[-1]):
+        assert e["paket"] in zeilen[e["zeile"] - 1]
+
+
+def test_zeilenermittlung_budget_in_der_schleife():
+    """Ist die Frist abgelaufen, bekommen die übrigen Pakete `zeile` 1 und ein Hinweis nennt die Anzahl."""
+    text = _gross_yarn(50)
+    daten = osv_ausgabe(*((f"pkg{i}", f"1.0.{i}", [vuln(f"pkg{i}")]) for i in range(50)))
+    hinweise = []
+    eintraege = lieferkette._lockfile_eintraege("yarn.lock", "yarn.lock", text.encode(), daten, time.monotonic() - 1, hinweise)
+    assert len(eintraege) == 50 and all(e["zeile"] == 1 for e in eintraege)
+    assert hinweise == ["Zeilenermittlung abgebrochen (Zeitbudget): 50 Pakete in yarn.lock ohne Zeile"]
+
+
+# Bezugsstand: die Einzelsuche vor der Einführung des Index (Stand 8c9c621), unverändert übernommen. Der Index muss dieselbe
+# Zeile liefern.
+def _alt_erster_mit_version(zeilen: list[str], koepfe: list[int], version: re.Pattern[str]) -> int:
+    """Von mehreren Eintragsköpfen desselben Pakets der erste, dessen Eintrag (bis zur nächsten Leerzeile, höchstens sechs
+    Zeilen) die installierte Version nennt; sonst der erste Kopf."""
+    for i in koepfe:
+        for z in zeilen[i + 1:i + 7]:
+            if not z.strip():
+                break
+            if version.search(z):
+                return i
+    return koepfe[0]
+
+
+def _alt_kopf_yarn(zeilen: list[str], name: str, version: str) -> int | None:
+    """yarn.lock: Zeile des Eintragskopfs (Spalte 0, endet auf `:`), dessen durch `, ` getrennte Spezifikationen (auch in
+    Anführungszeichen) mit `<name>@` beginnen."""
+    koepfe = [i for i, z in enumerate(zeilen)
+              if z and not z[0].isspace() and z[0] != "#" and z.rstrip().endswith(":")
+              and any(s.strip().strip("\"'").startswith(name + "@") for s in z.rstrip()[:-1].split(", "))]
+    if not koepfe:
+        return None
+    ver = re.escape(version)
+    return _alt_erster_mit_version(zeilen, koepfe, re.compile(r"^\s+version:?\s+[\"']?" + ver + r"[\"']?\s*$"))
+
+
+def _alt_kopf_pnpm(zeilen: list[str], name: str, version: str) -> int | None:
+    """pnpm-lock.yaml: Zeile des Kopfs `/name@ver:`, `name@ver:`, `'/name@ver':` (auch `name@ver(peer)` und `/name/ver`) im
+    Abschnitt `packages:`; fehlt die Version, der erste Kopf des Namens."""
+    start, ende = 0, len(zeilen)
+    for i, z in enumerate(zeilen):
+        if z.rstrip() == "packages:":
+            start = i + 1
+            ende = next((k for k in range(start, len(zeilen)) if zeilen[k] and not zeilen[k][0].isspace() and zeilen[k][0] != "#"),
+                        len(zeilen))
+            break
+    n, v = re.escape(name), re.escape(version)
+    for muster in (re.compile(r"^\s+[\"']?/?" + n + r"[@/]" + v + r"(?:[(_\"':\s]|$)"),
+                   re.compile(r"^\s+[\"']?/?" + n + r"[@/]\S")):
+        for i in range(start, ende):
+            if muster.search(zeilen[i]) and zeilen[i].rstrip().endswith((":", "':", '":')):
+                return i
+    return None
+
+
+def _alt_kopf_npm_v1(zeilen: list[str], name: str, version: str) -> int | None:
+    """npm lockfileVersion 1: Zeile des Schlüssels `"<name>": {` unter `dependencies` (nicht `"<name>": "^1.0"` unter
+    `requires`)."""
+    muster = re.compile(r"^\s*" + re.escape(json.dumps(name, ensure_ascii=False)) + r"\s*:\s*\{")
+    koepfe = [i for i, z in enumerate(zeilen) if muster.match(z)]
+    if not koepfe:
+        return None
+    return _alt_erster_mit_version(zeilen, koepfe, re.compile(r'"version"\s*:\s*"' + re.escape(version) + '"'))
+
+
+def _alt_zeile(zeilen: list[str], name: str, version: str, index: lieferkette._NpmIndex, lockfile: str = "") -> int:
+    """Zeile des Pakets im Lockfile: npm Zeile des Schlüssels `"node_modules/<name>"` der installierten Version (ab Version 2),
+    sonst der Eintragskopf je Format (yarn, pnpm, npm v1), sonst die erste Zeile mit dem Paketnamen (Namensgrenze schließt `.`
+    ein), Fallback 1."""
+    schl = index.schluessel.get((name, version))
+    if schl is not None:
+        ziel = json.dumps(schl) + ":"
+        for i, z in enumerate(zeilen, 1):
+            if z.lstrip().startswith(ziel):
+                return i
+    kopf = None
+    if lockfile == "yarn.lock":
+        kopf = _alt_kopf_yarn(zeilen, name, version)
+    elif lockfile == "pnpm-lock.yaml":
+        kopf = _alt_kopf_pnpm(zeilen, name, version)
+    elif lockfile in lieferkette.NPM_LOCKFILES:
+        kopf = _alt_kopf_npm_v1(zeilen, name, version)
+    if kopf is not None:
+        return kopf + 1
+    muster = re.compile(r"(?<![\w@./-])" + re.escape(name) + r"(?![\w.-])")
+    for i, z in enumerate(zeilen, 1):
+        if muster.search(z):
+            return i
+    return 1
+
+
+BEISPIELE = [
+    ("yarn.lock", '# yarn lockfile v1\n\n"@a/b@^1.0.0", "@a/b@~1.1.0":\n  version "1.1.2"\n\nfoo@^1:\n  version "1.0.0"\n', "@a/b", "1.1.2"),
+    ("yarn.lock", '__metadata:\n  version: 6\n\n"lodash@npm:^4.17.20, lodash@npm:^4.17.21":\n  version: 4.17.21\n', "lodash", "4.17.21"),
+    ("yarn.lock", 'lodash@^3:\n  version "3.0.0"\n\nlodash@^4:\n  version "4.0.1"\n\nlodash@^4.1:\n  version "4.0.1"\n', "lodash", "4.0.1"),
+    ("yarn.lock", 'lodash@^3:\n  version "3.0.0"\n\nlodash@^4:\n  version "4.0.1"\n', "lodash", "9.9.9"),
+    ("pnpm-lock.yaml", "lockfileVersion: 5.4\n\nimporters:\n  .:\n    lodash: 4.17.10\n\npackages:\n\n  /lodash/4.17.10:\n    dev: false\n", "lodash", "4.17.10"),
+    ("pnpm-lock.yaml", "packages:\n  'lodash@4.17.5(x@1)':\n    resolution: {}\n  lodash@4.17.6:\n    resolution: {}\n", "lodash", "4.17.6"),
+    ("pnpm-lock.yaml", "packages:\n  'lodash@4.17.5(x@1)':\n    resolution: {}\n  lodash@4.17.6:\n    resolution: {}\n", "lodash", "4.17.5"),
+    ("pnpm-lock.yaml", "packages:\n  /@a/b@1.0.0_c@2:\n    resolution: {}\n  /@a/b/2.0.0:\n    x: 1\n", "@a/b", "2.0.0"),
+    ("pnpm-lock.yaml", "packages:\n  /@a/b@1.0.0_c@2:\n    resolution: {}\n", "@a/b", "7.0.0"),
+    ("pnpm-lock.yaml", "packages:\n  lodash.merge@4.6.0:\n    x: 1\n  lodash@4.0.0-beta:\n    x: 1\n", "lodash", "4.0.0"),
+    ("package-lock.json", '{\n  "lockfileVersion": 1,\n  "requires": true,\n  "dependencies": {\n    "lodash": {\n      "version": "4.17.5"\n    }\n  }\n}\n', "lodash", "4.17.5"),
+    ("package-lock.json", '{\n "dependencies": {\n  "lodash": {\n   "version": "3.0.0",\n   "dependencies": {\n    "lodash": {\n     "version": "4.0.0"\n    }\n   }\n  }\n }\n}\n', "lodash", "4.0.0"),
+    ("package-lock.json", '{\n "lockfileVersion": 3,\n "packages": {\n  "node_modules/a/node_modules/lodash": {"version": "4.17.20"},\n  "node_modules/lodash": {"version": "4.17.21"}\n }\n}\n', "lodash", "4.17.20"),
+    ("yarn.lock", "irgendwas mit lodash@4 in der Mitte\n", "lodash", "4.0.0"),
+    ("yarn.lock", "x.lodash und lodash.merge und -lodash und lodash\n", "lodash", "4.0.0"),
+    ("yarn.lock", "foo @scope/pkg@1 bar\n@scope/pkg/x\n", "@scope/pkg", "1.0.0"),
+    ("yarn.lock", "a~b und a~b2\n", "a~b", "1.0.0"),
+    ("yarn.lock", "leer\n", "lodash", "4.0.0"),
+]
+
+
+@pytest.mark.parametrize("name, text, paket, version", BEISPIELE)
+def test_zeilenermittlung_index_gleich_einzelsuche(name, text, paket, version):
+    index = lieferkette._npm_index(text) if name in lieferkette.NPM_LOCKFILES else lieferkette._NpmIndex({}, {})
+    zeilen = text.splitlines()
+    erwartet = _alt_zeile(zeilen, paket, version, index, name)
+    daten = osv_ausgabe((paket, version, [vuln(paket)]))
+    [e] = lieferkette._lockfile_eintraege(name, name, text.encode(), daten)
+    assert e["zeile"] == erwartet == lieferkette._zeile(zeilen, paket, version, index, name)
+
+
+def test_zeilenermittlung_index_gleich_einzelsuche_zufallsdateien():
+    """Zufällig zusammengesetzte Lockfile-Zeilen aus Bausteinen der drei Formate (Köpfe, Versionen, Rauschen) und mehrere
+    gefragte Pakete: der Index liefert je Paket dieselbe Zeile wie die Einzelsuche."""
+    import random
+    rng = random.Random(20261110)
+    namen = ["lodash", "lodash.merge", "@a/b", "a", "minimist", "x-y"]
+    versionen = ["1.0.0", "2.0.0-beta", "4.17.21"]
+    bausteine = [
+        "{n}@^{v}:", '"{n}@^{v}", "{n}@~{v}":', '  version "{v}"', "  version: {v}", "  /{n}@{v}:", "  '/{n}@{v}':", "  {n}@{v}(p@1):",
+        "  /{n}/{v}_q@2:", '    "{n}": {{', '      "version": "{v}"', '  "node_modules/{n}": {{', "text {n} text", "{n}.merge {n}-x", "", "",
+        "packages:", "importers:", "  .:", "# {n}@{v}:", "{n}@{v}", "foo/{n}@1", "x{n}@1:", '    "{n}": "^{v}"',
+    ]
+    for runde in range(200):
+        zeilen = [rng.choice(bausteine).format(n=rng.choice(namen), v=rng.choice(versionen)) for _ in range(rng.randint(1, 40))]
+        text = "\n".join(zeilen) + "\n"
+        for name in ("yarn.lock", "pnpm-lock.yaml", "package-lock.json"):
+            index = lieferkette._npm_index(text) if name in lieferkette.NPM_LOCKFILES else lieferkette._NpmIndex({}, {})
+            paare = [(rng.choice(namen), rng.choice(versionen)) for _ in range(4)]
+            zi = lieferkette._ZeilenIndex(text.splitlines(), index, name, paare)
+            for n, v in paare:
+                assert zi.zeile(n, v) == _alt_zeile(text.splitlines(), n, v, index, name), (runde, name, n, v, text)
+
+
+# ------------------------------------------------------------------------------------ Härtung TF2: behoben_in (M-4)
+
+def test_behoben_in_ausserhalb_aller_bereiche_nennt_die_kleinste_fix_version_darueber_m_4():
+    """Liegt die installierte Version in keinem Bereich (Lücke zwischen zwei Versionslinien), ist `behoben_in` die kleinste
+    Fix-Version oberhalb der installierten über alle Bereiche, also möglicherweise die einer anderen Versionslinie; das ist
+    dokumentiert (Docstring, `references/pruefpunkte-web.md`)."""
+    luecke = vuln("lib", "A", bereiche=(("0", "3.10.1"), ("4.0.0", "4.17.21")))
+    assert lieferkette.behoben_in([luecke], "lib", "3.11.0") == "4.17.21"
+    assert "Versionslinie" in lieferkette.behoben_in.__doc__ and "keinem Bereich" in lieferkette.behoben_in.__doc__
+
+
+# ------------------------------------------------------------------------------------ Härtung TF2: KEV (M-5, Tropfen)
+
+class _Server(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+
+
+def _umleitungs_server(anfragen):
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            anfragen.append(self.path)
+            if self.path == "/kev":
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{self.server.server_port}/zwei")
+                self.end_headers()
+            else:
+                daten = json.dumps(KEV_KATALOG).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(daten)))
+                self.end_headers()
+                self.wfile.write(daten)
+
+        def log_message(self, *a):
+            pass
+    server = _Server(("127.0.0.1", 0), H)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def test_kev_download_folgt_keiner_weiterleitung_auf_http_m_5(monkeypatch):
+    """Jeder Weiterleitungsschritt muss https sein, nicht erst die Endadresse: die zweite Adresse wird nie angefragt."""
+    anfragen = []
+    server = _umleitungs_server(anfragen)
+    try:
+        monkeypatch.setattr(urllib.request, "urlopen", ECHTES_URLOPEN)
+        monkeypatch.setenv("no_proxy", "*")
+        monkeypatch.setattr(lieferkette, "KEV_URL", f"http://127.0.0.1:{server.server_port}/kev")
+        with pytest.raises(lieferkette.KevFehler, match="Weiterleitung"):
+            lieferkette._kev_herunterladen(5)
+    finally:
+        server.shutdown()
+        server.server_close()
+        urllib.request.install_opener(None)
+    assert anfragen == ["/kev"]
+
+
+def test_kev_umleitungs_handler_laesst_https_zu_und_lehnt_http_ab():
+    h = lieferkette._NurHttpsUmleitung()
+    req = urllib.request.Request("https://www.cisa.gov/a")
+    neu = h.redirect_request(req, io.BytesIO(), 302, "Found", {}, "https://www.cisa.gov/b")
+    assert neu is not None and neu.full_url == "https://www.cisa.gov/b"
+    for ziel in ("http://www.cisa.gov/b", "ftp://x/b", "file:///etc/passwd"):
+        with pytest.raises(lieferkette.KevFehler):
+            h.redirect_request(req, io.BytesIO(), 302, "Found", {}, ziel)
+
+
+class _Tropfen:
+    """Antwort, die nur tröpfelt: `read(n)` blockiert wie ein Socket-Lesen von n Bytes (bis zu 3 s), `read1` liefert je Aufruf
+    nach 0,2 s ein Byte. Ein Gesamtlimit lässt sich nur mit `read1` durchsetzen."""
+    status = 200
+
+    def geturl(self):
+        return KEV_URL
+
+    def read(self, n=-1):
+        time.sleep(3)
+        return b"x" * 10
+
+    def read1(self, n=-1):
+        time.sleep(0.2)
+        return b"x"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_kev_download_gesamtfrist_haelt_auch_bei_tropfender_antwort(monkeypatch):
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _Tropfen())
+    start = time.monotonic()
+    with pytest.raises(lieferkette.KevFehler, match="Zeit"):
+        lieferkette._kev_herunterladen(0.6)
+    assert time.monotonic() - start < 1.8
+
+
+# ------------------------------------------------------------------------------------ Härtung TF2: osv-scanner-Ausgabe
+
+def test_osv_exit_1_ohne_auswertbare_pakete_ist_ein_hinweis(umg):
+    """Exit 1 heißt „Treffer“. Liefert die Ausgabe keine auswertbaren Pakete (anderes Format, andere Version), darf das nicht als
+    „keine Lücken“ durchgehen."""
+    umg.schreibe("package-lock.json", npm_lock(("node_modules/lodash", "4.17.20", False)))
+    umg.schreibe("b/package-lock.json", npm_lock(("node_modules/lodash", "4.17.20", False)))
+    umg.fake_osv({"rc": 1, "stdout": {"neues": "format"}}, {"rc": 1, "stdout": {"results": []}})
+    out = ausgabe(umg.abh())
+    assert out["pakete"] == []
+    assert "osv-scanner meldete Treffer (Exit 1), die Ausgabe enthält aber keine auswertbaren Pakete: Lockfile nicht ausgewertet: b/package-lock.json" in out["hinweise"]
+    assert "osv-scanner meldete Treffer (Exit 1), die Ausgabe enthält aber keine auswertbaren Pakete: Lockfile nicht ausgewertet: package-lock.json" in out["hinweise"]
+
+
+def test_osv_ausgabe_ueber_dem_limit_wird_nicht_ausgewertet(umg, monkeypatch, capsys):
+    _in_process_umgebung(umg, monkeypatch)
+    monkeypatch.setattr(lieferkette, "OSV_AUSGABE_MAX", 1000)
+    umg.schreibe("package-lock.json", npm_lock(("node_modules/lodash", "4.17.20", False)))
+    umg.fake_osv({"rc": 1, "roh": "x" * 5000})
+    assert lieferkette.main(["abhaengigkeiten", "--lauf", LAUF, "--quelle", umg.quelle()]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["pakete"] == []
+    assert any("Ausgabe zu groß" in h and "package-lock.json" in h for h in out["hinweise"])

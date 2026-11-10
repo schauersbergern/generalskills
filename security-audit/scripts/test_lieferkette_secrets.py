@@ -1438,3 +1438,23 @@ def test_sperre_gehoert_zum_zustandsordner_des_laufs(umg):
     with lieferkette._sperre(umg.lieferkette_ordner()):                         # nach dem Loslassen wieder frei
         pass
 
+
+# ------------------------------------------------------------------------------------ Härtung TF2: Ausgabegrenze der Werkzeuge (M-6)
+
+def test_werkzeug_ausfuehren_kappt_die_ausgabe_je_strom(tmp_path):
+    """Die Ausgabe eines Werkzeugs landet nicht unbegrenzt im Speicher: höchstens `ausgabe_max` Bytes je Strom, `abgeschnitten`
+    zeigt es an; der Exit-Code bleibt erhalten."""
+    code = "import sys; sys.stdout.write('o' * 5000); sys.stderr.write('e' * 300); sys.exit(1)"
+    r = gitkopie.werkzeug_ausfuehren([sys.executable, "-c", code], 10, str(tmp_path), ausgabe_max=1000)
+    assert r.rc == 1 and r.out == b"o" * 1000 and r.err == b"e" * 300 and r.abgeschnitten is True
+    r = gitkopie.werkzeug_ausfuehren([sys.executable, "-c", code], 10, str(tmp_path), ausgabe_max=5000)
+    assert len(r.out) == 5000 and r.abgeschnitten is False
+    assert gitkopie.AUSGABE_MAX >= 1 << 20
+
+
+def test_werkzeug_ausfuehren_timeout_mit_ausgabegrenze(tmp_path):
+    start = time.monotonic()
+    code = "import sys, time; sys.stdout.write('x' * 100); sys.stdout.flush(); time.sleep(60)"
+    r = gitkopie.werkzeug_ausfuehren([sys.executable, "-c", code], 1, str(tmp_path), ausgabe_max=50)
+    assert r.rc is None and r.out == b"x" * 50 and r.abgeschnitten is True
+    assert time.monotonic() - start < 20
