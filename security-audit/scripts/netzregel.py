@@ -18,10 +18,10 @@ from urllib.parse import unquote
 
 ERLAUBTE_HOSTS = frozenset({"app", "db", "localhost", "127.0.0.1", "::1", "0.0.0.0"})
 
-# URL: Netzschema (`http(s)`, `ws(s)`, `ftp(s)`, `telnet`, `gopher`, `ldap` …; curl liest sie alle), `:`, ein oder mehr `/`/`\` (curl liest auch `http:/evil.test`); jedes andere
+# URL: Netzschema (`http(s)`, `ws(s)`, `ftp(s)`, `telnet`, `gopher(s)`, `ldap(s)`, `rtmp*` …: alle Netzschemata von `curl --version`), `:`, ein oder mehr `/`/`\` (curl liest auch `http:/evil.test`); jedes andere
 # Schema oder gar keines (`${H}://evil.test`) mit zwei oder mehr `/`/`\`. Schema-Länge begrenzt (linear). Die Authority (Text bis `/ ? #` oder Whitespace) wird in zwei Lesarten gelesen: eng
 # (bis zum ersten Shell-Sonderzeichen) und erweitert, damit `http://app&@evil.test/` nicht als `app` gilt.
-_URL = re.compile(r"(?:(?P<schema>(?i:https?|wss?|ftps?|telnet|gopher|dict|ldaps?|imaps?|smtps?|pop3s?|tftp|mqtt|rtsp|smbs?|sftp|scp)):(?P<s1>[/\\]+)"
+_URL = re.compile(r"(?:(?P<schema>(?i:https?|wss?|ftps?|telnet|gophers?|dict|ldaps?|imaps?|smtps?|pop3s?|tftp|mqtt|rtmp(?:e|s|t|te|ts)?|rtsp|smbs?|sftp|scp)):(?P<s1>[/\\]+)"
                   r"|(?P<schema2>[A-Za-z][A-Za-z0-9+.\-]{0,31})?:(?P<s2>[/\\]{2,}))(?P<auth>[^\s/?#]*)")
 _URL_ENG = re.compile(r"[^'\"<>()`|;&]*")
 _NACHLAUF = "'\"),;"
@@ -189,7 +189,8 @@ def verstoesse_poc(text: str) -> list[str]:
 _UNSICHER = frozenset(";&|<>$`(){}#\\\"!*")
 # Pfad absolut (`/…`) oder `~/…`, nie mit `-` beginnend (sonst `-W/x/scripts/poc.py` als Python-Option).
 _POC_ANFANG = re.compile(r"python3 (?:-I )?~?/(?:[^\s']*/)?scripts/poc\.py(?: |\Z)")
-# Befehlsposition: Segmente zwischen `; & | ( ) ` \\n`, `$(` und `{` (als Wort); vorangestellt sein dürfen
+# Befehlsposition: Segmente (`_segmente`, nur an ungequoteten Operatoren; `_BEFEHLSTRENNER` ist die naive Rückfalltrennung bei
+# offenen Quotes); vorangestellt sein dürfen
 # Präfixwörter samt Optionen, Zahlen und `VAR=wert`. Wörter werden ohne `\\ ' "` und ohne Pfad verglichen.
 _BEFEHLSTRENNER = re.compile(r"[;&|()`\n]|\{(?=\s|\Z)")
 _WERKZEUGE = frozenset({"curl", "wget", "nc", "ncat", "netcat", "telnet", "ssh", "scp", "socat", "ftp", "http",
@@ -229,19 +230,157 @@ def _wort(wort: str) -> str:
     return wort.replace("\\", "").replace("'", "").replace('"', "").rsplit("/", 1)[-1]
 
 
+class _Rahmen:
+    """Ein Befehlskontext des Scanners: Wurzel, `$( … )` oder Backticks. Sammelt Wörter und Segmente."""
+    __slots__ = ("schliesst", "tiefe", "woerter", "wort")
+
+    def __init__(self, schliesst: str | None):
+        self.schliesst, self.tiefe, self.woerter, self.wort = schliesst, 0, [], []
+
+
+_DQ = "dq"          # Marke auf dem Stapel: innerhalb von "…" (Text gehört zum Rahmen darunter)
+
+
+def _segmente(befehl: str) -> list[list[str]] | None:
+    """Befehlssegmente (je Segment die Wörter, Anführungszeichen bleiben im Wort stehen) mit Trennung nur an
+    *ungequoteten* Operatoren (`; & |`, Zeilenumbruch, `(`, `)`, `{ `, Backticks, `$(`). In `'…'`, `$'…'` und `"…"` ist
+    alles Text, ausgenommen `$(…)` und Backticks in `"…"`: sie starten ein eigenes Segment (bash führt sie aus). `\\`
+    schützt das nächste Zeichen. Iterativ (linear, keine Rekursionstiefe). None bei offenem Anführungszeichen oder
+    offener Substitution: der Aufrufer trennt dann naiv (konservativ)."""
+    ergebnis: list[list[str]] = []
+    stapel: list = [_Rahmen(None)]
+    n = len(befehl)
+    i = 0
+
+    def wort_ende(r: _Rahmen) -> None:
+        if r.wort:
+            r.woerter.append("".join(r.wort))
+            r.wort = []
+
+    def segment_ende(r: _Rahmen) -> None:
+        wort_ende(r)
+        if r.woerter:
+            ergebnis.append(r.woerter)
+            r.woerter = []
+
+    while i < n:
+        c = befehl[i]
+        oben = stapel[-1]
+        if oben is _DQ:
+            r = stapel[-2]
+            if c == "\\":
+                r.wort.append(befehl[i:i + 2])
+                i += 2
+            elif c == '"':
+                r.wort.append(c)
+                stapel.pop()
+                i += 1
+            elif c == "$" and befehl.startswith("(", i + 1):
+                stapel.append(_Rahmen(")"))
+                i += 2
+            elif c == "`":
+                stapel.append(_Rahmen("`"))
+                i += 1
+            else:
+                r.wort.append(c)
+                i += 1
+            continue
+        r = oben
+        if c == "\\":
+            r.wort.append(befehl[i:i + 2])
+            i += 2
+        elif c == "'":
+            j = befehl.find("'", i + 1)
+            if j == -1:
+                return None
+            r.wort.append(befehl[i:j + 1])
+            i = j + 1
+        elif c == "$" and befehl.startswith("'", i + 1):          # $'…': Backslash maskiert auch das Anführungszeichen
+            j = i + 2
+            while j < n and befehl[j] != "'":
+                j += 2 if befehl[j] == "\\" else 1
+            if j >= n:
+                return None
+            r.wort.append(befehl[i:j + 1])
+            i = j + 1
+        elif c == "$" and befehl.startswith("(", i + 1):
+            stapel.append(_Rahmen(")"))
+            i += 2
+        elif c == '"':
+            r.wort.append(c)
+            stapel.append(_DQ)
+            i += 1
+        elif c == "`":
+            if r.schliesst == "`":
+                segment_ende(r)
+                stapel.pop()
+            else:
+                stapel.append(_Rahmen("`"))
+            i += 1
+        elif c in ";&|\n":
+            segment_ende(r)
+            i += 1
+        elif c == "(":
+            segment_ende(r)
+            if r.schliesst == ")":
+                r.tiefe += 1
+            i += 1
+        elif c == ")":
+            segment_ende(r)
+            if r.schliesst == ")":
+                if r.tiefe == 0:
+                    stapel.pop()
+                else:
+                    r.tiefe -= 1
+            i += 1
+        elif c == "{" and (i + 1 >= n or befehl[i + 1].isspace()):
+            segment_ende(r)
+            i += 1
+        elif c.isspace():
+            wort_ende(r)
+            i += 1
+        else:
+            r.wort.append(c)
+            i += 1
+    if len(stapel) != 1:
+        return None
+    segment_ende(stapel[0])
+    return ergebnis
+
+
+def _ohne_quotes(wort: str) -> str:
+    return wort.replace("\\", "").replace("'", "").replace('"', "")
+
+
+def _nur_nachschlagen(woerter: list[str], i: int) -> bool:
+    """`command -v curl` / `command -V curl` (auch `-pv`) schlägt nur nach und startet nichts."""
+    for roh in woerter[i + 1:]:
+        opt = _ohne_quotes(roh)
+        if not (opt.startswith("-") and len(opt) > 1 and set(opt[1:]) <= set("pvV")):
+            return False
+        if "v" in opt or "V" in opt:
+            return True
+    return False
+
+
 def _hat_netzwerkwerkzeug(befehl: str) -> bool:
     """Netzwerkwerkzeug in Befehlsposition, auch hinter Präfixen (`FOO=1`, `sudo -u x`, `timeout 5`, `nice -n 3` …).
-    Jedes Wort der Präfixkette wird zuerst als Werkzeug geprüft, bevor es als Option-Argument übersprungen wird."""
-    for segment in _BEFEHLSTRENNER.split(befehl):
-        woerter = segment.split()
+    Jedes Wort der Präfixkette wird zuerst als Werkzeug geprüft, bevor es als Option-Argument übersprungen wird.
+    Segmente trennen nur an ungequoteten Operatoren (`_segmente`); `grep -E "curl|wget" src/` ist kein Verstoß."""
+    segmente = _segmente(befehl)
+    if segmente is None:                                 # offene Quotes: naiv trennen, im Zweifel ein Verstoß
+        segmente = [s.split() for s in _BEFEHLSTRENNER.split(befehl)]
+    for woerter in segmente:
         i, kette = 0, False
         while i < len(woerter):
             roh, w = woerter[i], _wort(woerter[i])
             if w in _WERKZEUGE:
                 return True
+            if w == "command" and _nur_nachschlagen(woerter, i):
+                break
             if w in _PRAEFIXE:
                 kette = True
-            elif _ZUWEISUNG.match(roh):
+            elif _ZUWEISUNG.match(_ohne_quotes(roh)):
                 kette = True
             elif kette and (roh.startswith("-") or _ZAHL.match(w)):
                 if roh in _OPTIONEN_MIT_ARGUMENT and i + 1 < len(woerter) and _wort(woerter[i + 1]) not in _WERKZEUGE:
