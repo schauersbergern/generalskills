@@ -35,7 +35,6 @@ PRAEFIX = "security-audit-"
 TEMP_PRAEFIX = "eval-security-audit-"
 SKILL_NAME = "security-audit-eval"
 TOOLS = "Read,Glob,Grep,Write,Edit,Agent,Skill,Bash,TodoWrite,ToolSearch"
-OHNE_RECHTE = ("Read", "Glob", "Grep", "Agent", "Skill", "TodoWrite", "ToolSearch")
 SMOKE_PROMPT = "Antworte nur mit ok."
 PROMPTS = {"slash": f"/{SKILL_NAME}", "text": f"Nutze den Skill {SKILL_NAME} auf diesem Repo."}
 SMOKE_TIMEOUT = 300
@@ -51,49 +50,103 @@ def _log(text: str) -> None:
 
 # ------------------------------------------------------------------------------------ Rechte, Umgebung, Agent
 
-def erlaubte_regeln(skill_ordner: str, ausgabe: str, home: str) -> list[str]:
-    """`--allowedTools`-Regeln: Lesewerkzeuge, Agent, Skill, Todo; Write/Edit nur im Ausgabeordner (`//` = absoluter
-    Pfad ab Wurzel); Bash nur für `poc.py`, `bericht.py` (kopierter Skill), `agent-stats.py` (mit `~` und mit
-    absolutem `home`) und `ls`."""
-    aus = "/" + ausgabe                                  # "//<absoluter Pfad ohne führenden />"
+def erlaubte_regeln(skill_ordner: str, ausgabe: str, home: str, repo: str | None = None,
+                    tmp: str | None = None) -> list[str]:
+    """`--allowedTools`-Regeln (jeweils die engste Form, die der Skill-Text vorschreibt):
+    - Read nur auf das Repo (`repo`, Standard: Repo über dem Skill-Ordner), den Ausgabeordner und die Arbeitskopien
+      von `poc.py vorbereiten` (`<tmp>/security-audit-*`, `tmp` = realpath des Temp-Ordners); `Glob`/`Grep` ohne
+      Pfadregel (die CLI hat dafür keine dokumentierte Pfadsyntax; Offener Punkt im Bericht).
+    - Write/Edit nur im Ausgabeordner (`//` = absoluter Pfad ab Wurzel).
+    - Bash: `poc.py` (kopierter Skill), `bericht.py kontext`, `bericht.py rendern <ausgabe>/*`, `agent-stats.py add
+      <ausgabe>/*` (mit `~` und mit absolutem `home`) und `ls`. Die `*`-Muster treffen auch `..`-Pfade (Restrisiko)."""
+    absolut = lambda pfad: "/" + pfad                    # "//<absoluter Pfad ohne führenden />"
+    if repo is None:
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(skill_ordner.rstrip("/"))))
+    if tmp is None:
+        tmp = os.path.realpath(tempfile.gettempdir())
     stats = "~/.claude/skills/auto-feature/scripts/agent-stats.py"
     stats_abs = f"{home.rstrip('/')}/.claude/skills/auto-feature/scripts/agent-stats.py"
+    bericht = f"python3 -I {skill_ordner}/scripts/bericht.py"
     return [
-        *OHNE_RECHTE,
-        f"Write({aus}/**)",
-        f"Edit({aus}/**)",
+        f"Read({absolut(repo.rstrip('/'))}/**)",
+        f"Read({absolut(ausgabe)}/**)",
+        f"Read({absolut(tmp.rstrip('/'))}/{PRAEFIX}*/**)",
+        "Glob", "Grep", "Agent", "Skill", "TodoWrite", "ToolSearch",
+        f"Write({absolut(ausgabe)}/**)",
+        f"Edit({absolut(ausgabe)}/**)",
         f"Bash(python3 -I {skill_ordner}/scripts/poc.py *)",
-        f"Bash(python3 -I {skill_ordner}/scripts/bericht.py *)",
-        f"Bash(python3 {stats} *)",
-        f"Bash(python3 {stats_abs} *)",
+        f"Bash({bericht} kontext)",
+        f"Bash({bericht} kontext *)",
+        f"Bash({bericht} rendern {ausgabe}/*)",
+        f"Bash(python3 {stats} add {ausgabe}/*)",
+        f"Bash(python3 {stats_abs} add {ausgabe}/*)",
+        "Bash(ls)",
         "Bash(ls *)",
     ]
 
 
-def kind_umgebung(basis: dict, ausgabe: str, ohne: list[str]) -> dict:
+def kind_umgebung(basis: dict, ausgabe: str, ohne: list[str], cwd: str | None = None) -> dict:
     """Umgebung des Kindprozesses: Kopie von `basis` ohne `CLAUDECODE`, `CLAUDE_EFFORT` und alle `CLAUDE_CODE_*`;
-    gesetzt werden `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0`, `SECURITY_AUDIT_AUSGABE`, `SECURITY_AUDIT_OHNE`."""
+    gesetzt werden `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0`, `SECURITY_AUDIT_AUSGABE`, `SECURITY_AUDIT_OHNE`. Mit
+    `cwd`: `PWD=<cwd>` und kein `OLDPWD` (sonst zeigt `PWD` auf das Verzeichnis des Aufrufers)."""
     env = {k: v for k, v in basis.items()
            if k not in ("CLAUDECODE", "CLAUDE_EFFORT") and not k.startswith("CLAUDE_CODE_")}
     env["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] = "0"
     env["SECURITY_AUDIT_AUSGABE"] = ausgabe
     env["SECURITY_AUDIT_OHNE"] = ",".join(ohne)
+    if cwd is not None:
+        env["PWD"] = cwd
+        env.pop("OLDPWD", None)
     return env
 
 
+def _blockskalar(art: str, zeilen: list[str]) -> str:
+    """Inhalt eines YAML-Blockskalars (`>` gefaltet, `|` wörtlich; Zusätze wie `-`/`+` ignoriert) aus den eingerückten
+    Folgezeilen: Einrückung entfernt, gefaltet werden einfache Zeilenumbrüche zu Leerzeichen, Leerzeilen bleiben
+    Absatzwechsel."""
+    einzug = min((len(z) - len(z.lstrip(" \t")) for z in zeilen if z.strip()), default=0)
+    inhalt = [z[einzug:].rstrip() for z in zeilen]
+    while inhalt and not inhalt[-1]:
+        inhalt.pop()
+    if art.startswith("|"):
+        return "\n".join(inhalt)
+    text = ""
+    for i, z in enumerate(inhalt):
+        if i == 0:
+            text = z
+        elif not z:
+            text += "\n"
+        elif text.endswith("\n") or not text:
+            text += z
+        else:
+            text += " " + z
+    return text.replace("\n\n", "\n")
+
+
 def _frontmatter(text: str) -> tuple[dict[str, str], str, str]:
-    """(Schlüssel → Wert der einfachen `key: value`-Zeilen, Frontmatter-Rohtext, Rest). ValueError ohne Frontmatter."""
+    """(Schlüssel → Wert der `key: value`-Zeilen samt Blockskalaren, Frontmatter-Rohtext, Rest). ValueError ohne
+    Frontmatter."""
     m = re.match(r"\A---[ \t]*\n(.*?)\n---[ \t]*(?:\n|\Z)(.*)\Z", text, re.S)
     if not m:
         raise ValueError("kein Frontmatter")
     felder = {}
-    for zeile in m.group(1).split("\n"):
-        k, sep, v = zeile.partition(":")
-        if sep and re.fullmatch(r"[A-Za-z][\w-]*", k):
-            v = v.strip()
-            if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
-                v = v[1:-1]
-            felder[k] = v
+    zeilen = m.group(1).split("\n")
+    i = 0
+    while i < len(zeilen):
+        k, sep, v = zeilen[i].partition(":")
+        i += 1
+        if not (sep and re.fullmatch(r"[A-Za-z][\w-]*", k)):
+            continue
+        v = v.strip()
+        if re.fullmatch(r"[>|][+-]?\d*", v):
+            folge = []
+            while i < len(zeilen) and (not zeilen[i].strip() or zeilen[i][0] in " \t"):
+                folge.append(zeilen[i])
+                i += 1
+            v = _blockskalar(v, folge)
+        elif len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        felder[k] = v
     return felder, m.group(1), m.group(2)
 
 
@@ -167,7 +220,7 @@ def temp_repo_anlegen(fixture: str, skill_quelle: str, ohne_lockfile: bool) -> t
         git(repo, "-c", "init.defaultBranch=main", "init", "-q")
         with open(os.path.join(repo, ".git", "info", "exclude"), "a", encoding="utf-8") as f:
             f.write("\n.claude/\n")
-        git(repo, "add", "-A")
+        git(repo, "-c", "core.excludesFile=/dev/null", "add", "-A")      # kein globales Exclude (z. B. .env*)
         git(repo, "-c", "user.name=eval", "-c", "user.email=eval@localhost", "-c", "commit.gpgsign=false",
             "commit", "-q", "-m", f"Test-App {fixture}")
     except BaseException:
@@ -198,15 +251,15 @@ def _eigene(zeilen: list[str]) -> list[str]:
 
 
 def _images() -> list[tuple[str, str]] | None:
-    """(Repository, ID) der Images `security-audit-*`; None, wenn nicht lesbar."""
-    rc, out = _docker(["images", "--filter", f"reference={PRAEFIX}*", "--format", "{{.Repository}}|{{.ID}}"])
+    """(Repository, Tag) der Images `security-audit-*`; None, wenn nicht lesbar."""
+    rc, out = _docker(["images", "--filter", f"reference={PRAEFIX}*", "--format", "{{.Repository}}|{{.Tag}}"])
     if rc != 0:
         return None
     paare = []
     for z in out.splitlines():
-        repo, _, i = z.strip().partition("|")
-        if repo.startswith(PRAEFIX) and (repo, i) not in paare:
-            paare.append((repo, i))
+        repo, _, tag = z.strip().partition("|")
+        if repo.startswith(PRAEFIX) and (repo, tag) not in paare:
+            paare.append((repo, tag))
     return paare
 
 
@@ -232,10 +285,11 @@ def docker_aufraeumen() -> bool:
     ok = True
     schritte = (
         ("Container", lambda: _eigene(_docker(["ps", "-a", "--format", "{{.Names}}"])[1].splitlines()),
-         lambda n: ["rm", "-f", *n]),
+         lambda n: ["rm", "-f", "-v", *n]),
         ("Netze", lambda: _eigene(_docker(["network", "ls", "--format", "{{.Name}}"])[1].splitlines()),
          lambda n: ["network", "rm", *n]),
-        ("Images", lambda: sorted({i for _, i in (_images() or []) if i}), lambda n: ["rmi", "-f", *n]),
+        ("Images", lambda: [f"{r}:{t}" for r, t in (_images() or []) if t and t != "<none>"],
+         lambda n: ["rmi", "-f", *n]),
     )
     for art, lesen, loeschen in schritte:
         namen = lesen()
@@ -388,7 +442,41 @@ def _argumente(argv: list[str]) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+class Abbruch(KeyboardInterrupt):
+    """Von SIGTERM/SIGHUP ausgelöst; `signum` bestimmt den Exit-Code (128 + signum)."""
+
+    def __init__(self, signum: int):
+        super().__init__(signum)
+        self.signum = signum
+
+
+def _signal_handler(signum, _frame):
+    raise Abbruch(signum)
+
+
 def main(argv: list[str]) -> int:
+    """Wie `_main`, aber SIGTERM und SIGHUP lösen eine Ausnahme aus: die Prozessgruppe von claude wird beendet und
+    Docker aufgeräumt (finally in `_main`), der Exit-Code ist 128 + Signal (SIGINT/Ctrl-C: 130)."""
+    alt = {}
+    try:
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            alt[sig] = signal.signal(sig, _signal_handler)
+    except ValueError:                                   # nicht im Hauptthread (z. B. Testläufer): ohne Handler
+        pass
+    try:
+        return _main(argv)
+    except Abbruch as e:
+        _log(f"Signal {e.signum}: abgebrochen, Prozessgruppe beendet, Docker aufgeräumt")
+        return 128 + e.signum
+    except KeyboardInterrupt:
+        _log("Abbruch durch Strg-C: Prozessgruppe beendet, Docker aufgeräumt")
+        return 130
+    finally:
+        for sig, h in alt.items():
+            signal.signal(sig, h)
+
+
+def _main(argv: list[str]) -> int:
     try:
         a = _argumente(argv)
     except SystemExit as e:
@@ -431,11 +519,12 @@ def main(argv: list[str]) -> int:
 
     # 3. und 5. Optionen, Umgebung
     home = os.path.expanduser("~")
-    env = kind_umgebung(os.environ, ausgabe, ohne)
+    repo = os.path.realpath(repo)
+    env = kind_umgebung(os.environ, ausgabe, ohne, cwd=repo)
     gemeinsam = ["--permission-mode", "acceptEdits", "--setting-sources", "project,local", "--strict-mcp-config",
                  "--agents", agenten, "--add-dir", ausgabe, "--disallowedTools", "WebFetch,WebSearch"]
     cmd = ["claude", "-p", PROMPTS[a.prompt_art], "--output-format", "stream-json", "--verbose", *gemeinsam,
-           "--tools", TOOLS, "--allowedTools", *erlaubte_regeln(skill, ausgabe, home)]
+           "--tools", TOOLS, "--allowedTools", *erlaubte_regeln(skill, ausgabe, home, repo, os.path.realpath(tempfile.gettempdir()))]
 
     reviews_vorher, stats_vorher = _home_zustand()
     lauf: dict = {"rc": None, "timeout": False, "dauer_s": 0.0}

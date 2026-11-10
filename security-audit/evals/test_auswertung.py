@@ -736,7 +736,17 @@ if smoke:
     print(json.dumps({{"type": "result", "result": "ok", "is_error": False}}))
     sys.exit(0)
 print(json.dumps({{"type": "system", "subtype": "init"}}), flush=True)
+def docker_rest():
+    with open(os.environ["FAKE_DOCKER_STATE"]) as f:
+        zustand = json.load(f)
+    zustand["container"] += ["security-audit-0a1b2c3d-p1-app", "fremder-container"]
+    zustand["netze"] += ["security-audit-0a1b2c3d-p1"]
+    zustand["images"] += [["security-audit-0a1b2c3d-app", "latest"]]
+    with open(os.environ["FAKE_DOCKER_STATE"], "w") as f:
+        json.dump(zustand, f)
 if modus == "haengt":
+    if os.environ.get("FAKE_CLAUDE_DOCKER_REST"):
+        docker_rest()
     kind = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
     with open(os.environ["FAKE_CLAUDE_KIND"], "w") as f:
         f.write(str(kind.pid))
@@ -752,13 +762,14 @@ if modus in ("bericht", "docker_rest"):
         with open(os.path.join(ordner, name), "w") as f:
             f.write("x\\n")
 if modus == "docker_rest":
-    with open(os.environ["FAKE_DOCKER_STATE"]) as f:
-        zustand = json.load(f)
-    zustand["container"] += ["security-audit-0a1b2c3d-p1-app", "fremder-container"]
-    zustand["netze"] += ["security-audit-0a1b2c3d-p1"]
-    zustand["images"] += [["security-audit-0a1b2c3d-app", "sha256:abc"]]
-    with open(os.environ["FAKE_DOCKER_STATE"], "w") as f:
-        json.dump(zustand, f)
+    docker_rest()
+home = os.path.expanduser("~")
+for rel in filter(None, os.environ.get("FAKE_CLAUDE_HOME_DATEIEN", "").split(",")):
+    pfad = os.path.join(home, ".claude", rel)
+    os.makedirs(os.path.dirname(pfad), exist_ok=True)
+    with open(pfad, "w") as f:
+        f.write("x\\n")
+sys.exit(int(os.environ.get("FAKE_CLAUDE_RC", "0")))
 """
 
 FAKE_DOCKER = """#!{python}
@@ -779,15 +790,15 @@ if args[:2] == ["ps", "-a"]:
 elif args[:2] == ["network", "ls"]:
     print("\\n".join(z["netze"] + ["bridge", "host", "none"]))
 elif args[:1] == ["images"]:
-    print("\\n".join(f"{{r}}|{{i}}" for r, i in z["images"]))
-elif args[:2] == ["rm", "-f"]:
-    z["container"] = [c for c in z["container"] if c not in args[2:]]
+    print("\\n".join(f"{{r}}|{{t}}" for r, t in z["images"]))
+elif args[:3] == ["rm", "-f", "-v"]:
+    z["container"] = [c for c in z["container"] if c not in args[3:]]
     speichern()
 elif args[:2] == ["network", "rm"]:
     z["netze"] = [n for n in z["netze"] if n not in args[2:]]
     speichern()
 elif args[:1] == ["rmi"]:
-    z["images"] = [e for e in z["images"] if e[1] not in args[1:] and e[0] not in args[1:]]
+    z["images"] = [e for e in z["images"] if f"{{e[0]}}:{{e[1]}}" not in args[1:]]    # nur Repository:Tag entfernt
     speichern()
 """
 
@@ -854,27 +865,60 @@ def _aufrufzeilen():
     return zeilen
 
 
+def _regel_passt(regel: str, zeile: str) -> bool:
+    """Bash-Regel `Bash(<muster>)` gegen eine Zeile: `*` steht für beliebigen Text (auch `/`)."""
+    muster = regel[len("Bash("):-1]
+    return re.fullmatch(".*".join(re.escape(t) for t in muster.split("*")), zeile, re.S) is not None
+
+
 def test_regeln_passen_zu_skill():
-    skill, home = "/tmp/x/.claude/skills/security-audit-eval", "/Users/test"
-    regeln = run_eval.erlaubte_regeln(skill, "/tmp/x/ausgabe", home)
-    praefixe = [r[len("Bash("):-len(" *)")] for r in regeln if r.startswith("Bash(") and r.endswith(" *)")]
+    skill, home, aus = "/tmp/x/.claude/skills/security-audit-eval", "/Users/test", "/tmp/x/ausgabe"
+    regeln = run_eval.erlaubte_regeln(skill, aus, home)
+    bash = [r for r in regeln if r.startswith("Bash(")]
     zeilen = _aufrufzeilen()
+    gesehen = {"poc": 0, "kontext": 0, "rendern": 0, "add": 0}
     assert len(zeilen) >= 5
     for z in zeilen:
         z = z.replace("${CLAUDE_SKILL_DIR}", skill).replace("<SKILL_DIR>", skill)
-        # allgemeine Vorlage (Grundregel 8): <skript> steht für jedes der beiden Skripte
-        for form in ([z.replace("<skript>", s) for s in ("poc", "bericht")] if "<skript>" in z else [z]):
-            assert any(form.startswith(p + " ") for p in praefixe), f"keine Regel für: {form}"
+        z = z.replace("<ausgabe_ordner>/<basisname>.json", f"{aus}/repo/x.json").replace("<agent_stats_datei>", f"{aus}/x-agent-stats.md")
+        if "<skript>" in z or z.rstrip().endswith(".py …"):              # allgemeine Vorlagen in Grundregel 8
+            continue
+        assert any(_regel_passt(r, z) for r in bash), f"keine Regel für: {z}"
+        for schluessel, marke in (("poc", "/poc.py "), ("kontext", "bericht.py kontext"), ("rendern", "bericht.py rendern "),
+                                  ("add", "agent-stats.py add ")):
+            gesehen[schluessel] += marke in z
+    assert all(gesehen.values()), gesehen                                # jede Form kommt im Skill-Text vor
     assert f"Bash(python3 -I {skill}/scripts/poc.py *)" in regeln
-    assert f"Bash(python3 -I {skill}/scripts/bericht.py *)" in regeln
-    assert "Bash(python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py *)" in regeln
-    assert f"Bash(python3 {home}/.claude/skills/auto-feature/scripts/agent-stats.py *)" in regeln
-    assert "Bash(ls *)" in regeln
-    assert "Write(//tmp/x/ausgabe/**)" in regeln and "Edit(//tmp/x/ausgabe/**)" in regeln
-    for name in ("Read", "Glob", "Grep", "Agent", "Skill", "TodoWrite", "ToolSearch"):
+    assert f"Bash(python3 -I {skill}/scripts/bericht.py kontext)" in regeln
+    assert f"Bash(python3 -I {skill}/scripts/bericht.py kontext *)" in regeln
+    assert f"Bash(python3 -I {skill}/scripts/bericht.py rendern {aus}/*)" in regeln
+    assert f"Bash(python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py add {aus}/*)" in regeln
+    assert f"Bash(python3 {home}/.claude/skills/auto-feature/scripts/agent-stats.py add {aus}/*)" in regeln
+    assert "Bash(ls *)" in regeln and "Bash(ls)" in regeln
+    # I1: bericht.py und agent-stats.py nur in den Formen des Skills, nichts anderes (kein `rendern` oder `add` nach außen)
+    for gefaehrlich in (f"python3 -I {skill}/scripts/bericht.py rendern /etc/x.json",
+                        f"python3 -I {skill}/scripts/bericht.py rendern {aus}x/y.json",
+                        f"python3 -I {skill}/scripts/bericht.py schreiben {aus}/a",
+                        f"python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py add /Users/test/.zshrc --x",
+                        f"python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py init",
+                        f"python3 {home}/.claude/skills/auto-feature/scripts/agent-stats.py add /etc/x"):
+        assert not any(_regel_passt(r, gefaehrlich) for r in bash), gefaehrlich
+    assert f"Write(//tmp/x/ausgabe/**)" in regeln and "Edit(//tmp/x/ausgabe/**)" in regeln
+    for name in ("Glob", "Grep", "Agent", "Skill", "TodoWrite", "ToolSearch"):
         assert name in regeln
+    # M-1: Read nur auf Repo, Ausgabeordner und Arbeitskopien (poc.py vorbereiten) im Temp-Ordner; kein freies Read
+    assert "Read" not in regeln
+    assert "Read(//tmp/x/**)" in regeln and f"Read(//tmp/x/ausgabe/**)" in regeln
+    assert f"Read(//{os.path.realpath(tempfile.gettempdir()).lstrip('/')}/security-audit-*/**)" in regeln
+    regeln2 = run_eval.erlaubte_regeln(skill, aus, home, repo="/r/repo", tmp="/t")
+    assert "Read(//r/repo/**)" in regeln2 and "Read(//t/security-audit-*/**)" in regeln2
     # eng gefasst: kein freies Bash, kein freies Write/Edit, keine Web-Werkzeuge
     assert not {"Bash", "Write", "Edit", "WebFetch", "WebSearch"} & set(regeln)
+
+
+def test_eigene_filtert_praefix():
+    assert run_eval._eigene(["mein-security-audit-x", "security-audit-ab12cd34-p1-app", "/security-audit-y",
+                             "security-audit-ab12cd34-p1-app", "", "  "]) == ["security-audit-ab12cd34-p1-app", "security-audit-y"]
 
 
 def test_kind_umgebung():
@@ -892,6 +936,9 @@ def test_kind_umgebung():
     assert env["SECURITY_AUDIT_AUSGABE"] == "/aus" and env["SECURITY_AUDIT_OHNE"] == "a,b"
     assert env["PATH"] == "/bin" and env["HOME"] == "/h" and env["ANDERES"] == "bleibt"
     assert run_eval.kind_umgebung({}, "/aus", [])["SECURITY_AUDIT_OHNE"] == ""
+    env = run_eval.kind_umgebung({"PWD": "/alt", "OLDPWD": "/davor"}, "/aus", [], cwd="/repo")    # M-3
+    assert env["PWD"] == "/repo" and "OLDPWD" not in env
+    assert run_eval.kind_umgebung({"PWD": "/alt"}, "/aus", [])["PWD"] == "/alt"
 
 
 def test_agents_json():
@@ -907,6 +954,38 @@ def test_agents_json():
     assert "---" not in a["prompt"].split("\n")[0] and a["prompt"] == a["prompt"].strip()
     with pytest.raises(ValueError):
         run_eval.agents_json("kein Frontmatter")
+
+
+def test_agents_json_blockskalar():
+    md = ("---\nname: x\ndescription: >\n  Erste Zeile\n  zweite Zeile.\n\n  Absatz.\nmodel: opus\n"
+          "effort: xhigh\n---\n\nPrompt-Text.\n")
+    a = json.loads(run_eval.agents_json(md))["opus-xhigh"]
+    assert a["description"] == "Erste Zeile zweite Zeile.\nAbsatz." and a["model"] == "opus" and a["effort"] == "xhigh"
+    assert a["prompt"] == "Prompt-Text."
+    md = "---\ndescription: |-\n  Zeile A\n  Zeile B\neffort: high\n---\nx"
+    a = json.loads(run_eval.agents_json(md))["opus-xhigh"]
+    assert a["description"] == "Zeile A\nZeile B" and a["effort"] == "high" and a["model"] == "opus"
+
+
+def test_temp_repo_globales_exclude(tmp_path, monkeypatch):
+    """M-5: Ein globales Exclude `.env*` darf `.env.production` und `.env.example` nicht aus dem Commit halten."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "excludes").write_text(".env*\n")
+    (home / ".gitconfig").write_text(f"[core]\n\texcludesFile = {home / 'excludes'}\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "xdg"))
+    monkeypatch.setattr(tempfile, "tempdir", os.path.realpath(tmp_path))
+    wurzel, repo = run_eval.temp_repo_anlegen("fixture-web", SKILL, False)
+    try:
+        r = subprocess.run(["git", "-C", repo, "ls-tree", "-r", "--name-only", "HEAD"], capture_output=True, text=True)
+        dateien = r.stdout.split()
+        assert ".env.production" in dateien and ".env.example" in dateien
+        assert not [d for d in dateien if d.startswith(".claude/")]
+        st = subprocess.run(["git", "-C", repo, "status", "--porcelain"], capture_output=True, text=True)
+        assert st.stdout == ""
+    finally:
+        shutil.rmtree(wurzel, ignore_errors=True)
 
 
 def test_temp_repo(tmp_path, monkeypatch):
@@ -981,7 +1060,8 @@ def test_lauf_timeout_beendet_gruppe(ev, capsys):
     assert ev.temp_ordner()                                            # bei Exit ≠ 0 bleibt das Temp-Verzeichnis
 
 
-def test_lauf_ok_und_aufruf(ev, capsys):
+def test_lauf_ok_und_aufruf(ev, capsys, monkeypatch):
+    monkeypatch.setenv("OLDPWD", "/davor")
     ev.modus("bericht")
     assert run_eval.main(["--fixture", "fixture-web", "--ohne", "a,b", "--prompt-art", "text"]) == 0
     ergebnis = json.loads(capsys.readouterr().out)
@@ -1020,6 +1100,10 @@ def test_lauf_ok_und_aufruf(ev, capsys):
     assert env["SECURITY_AUDIT_OHNE"] == "a,b" and env["SECURITY_AUDIT_AUSGABE"] == wert(a, "--add-dir")
     assert env["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] == "0"
     assert os.path.basename(lauf[0]["cwd"]).startswith("eval-security-audit-")
+    assert env["PWD"] == lauf[0]["cwd"] and "OLDPWD" not in env and "OLDPWD" not in smoke[0]["env"]     # M-3
+    assert smoke[0]["env"]["PWD"] == lauf[0]["cwd"]
+    assert "Read" not in regeln and f"Read(//{lauf[0]['cwd'].lstrip('/')}/**)" in regeln                # M-1
+    assert f"Read(//{os.path.realpath(tempfile.gettempdir()).lstrip('/')}/security-audit-*/**)" in regeln
     assert lauf[0]["cwd"].endswith(os.path.basename(lauf[0]["cwd"]) + "/" + os.path.basename(lauf[0]["cwd"]))
 
 
@@ -1075,12 +1159,93 @@ def test_docker_rest_wird_gemeldet_und_aufgeraeumt(ev, capsys):
     zustand = json.loads(ev.docker_state.read_text())
     assert zustand == {"container": ["fremder-container"], "netze": [], "images": []}
     befehle = [" ".join(c) for c in ev.docker()]
-    assert any(b.startswith("rm -f security-audit-0a1b2c3d-p1-app") and "fremder" not in b for b in befehle)
+    assert any(b.startswith("rm -f -v security-audit-0a1b2c3d-p1-app") and "fremder" not in b for b in befehle)
+    assert "rmi -f security-audit-0a1b2c3d-app:latest" in befehle
 
 
 def test_fixture_unbekannt(ev):
     assert run_eval.main(["--fixture", "gibt-es-nicht"]) == 2
     assert ev.aufrufe() == []
+
+
+def test_claude_exit_ungleich_0_ist_exit_1_trotz_gruener_dod(ev, capsys, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_RC", "1")
+    ev.modus("bericht")
+    assert run_eval.main(["--fixture", "fixture-web"]) == 1
+    ergebnis = json.loads(capsys.readouterr().out)
+    assert all(d["ok"] for d in ergebnis["dod"].values())                # DoD grün, aber lauf_ok nicht
+    assert ergebnis["ok"] is False and ergebnis["lauf"]["ok"] is False and ergebnis["lauf"]["rc"] == 1
+    assert ev.temp_ordner()
+
+
+def test_neue_reviews_nur_differenz(ev, capsys, monkeypatch, tmp_path):
+    alt = tmp_path / "home" / ".claude" / "security-reviews" / "alt.md"
+    alt.parent.mkdir(parents=True)
+    alt.write_text("vorher da")
+    ev.modus("bericht")
+    assert run_eval.main(["--fixture", "fixture-web"]) == 0              # vorhandene Datei zählt nicht
+    capsys.readouterr()
+    monkeypatch.setenv("FAKE_CLAUDE_HOME_DATEIEN", "security-reviews/x/neu.md")
+    assert run_eval.main(["--fixture", "fixture-web"]) == 1
+    d4 = json.loads(capsys.readouterr().out)["dod"]["TF1-D4"]
+    assert d4["ok"] is False and "neu.md" in " ".join(d4["details"]) and "alt.md" not in " ".join(d4["details"])
+
+
+def test_neue_stats_nur_eval_ordner(ev, capsys, monkeypatch):
+    ev.modus("bericht")
+    monkeypatch.setenv("FAKE_CLAUDE_HOME_DATEIEN", "agent-stats/fremd/x.md")
+    assert run_eval.main(["--fixture", "fixture-web"]) == 0              # fremder Ordner zählt nicht
+    capsys.readouterr()
+    monkeypatch.setenv("FAKE_CLAUDE_HOME_DATEIEN", "agent-stats/eval-security-audit-zzz/x.md")
+    assert run_eval.main(["--fixture", "fixture-web"]) == 1
+    d4 = json.loads(capsys.readouterr().out)["dod"]["TF1-D4"]
+    assert d4["ok"] is False and "eval-security-audit-zzz" in " ".join(d4["details"])
+
+
+def test_bericht_kein_dict_in_lauf(ev, capsys, monkeypatch, tmp_path):
+    kaputt = tmp_path / "liste.json"
+    kaputt.write_text("[]")
+    monkeypatch.setenv("FAKE_CLAUDE_BERICHT", str(kaputt))
+    ev.modus("bericht")
+    assert run_eval.main(["--fixture", "fixture-web"]) == 1
+    d1 = json.loads(capsys.readouterr().out)["dod"]["TF1-D1"]
+    assert d1["ok"] is False and "kein Bericht" in d1["details"]
+
+
+@pytest.mark.parametrize("sig,code", [(signal.SIGTERM, 143), (signal.SIGHUP, 129)])
+def test_signal_beendet_gruppe_und_raeumt_auf(ev, tmp_path, monkeypatch, sig, code):
+    """I2: SIGTERM/SIGHUP an run_eval → Kindgruppe beendet, Docker aufgeräumt, Exit 128+Signal."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODUS", "haengt")
+    monkeypatch.setenv("FAKE_CLAUDE_DOCKER_REST", "1")
+    monkeypatch.setenv("TMPDIR", os.path.realpath(tmp_path / "tmp"))
+    p = subprocess.Popen([sys.executable, os.path.join(HIER, "run_eval.py"), "--fixture", "fixture-web", "--timeout", "120"],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        for _ in range(300):
+            if ev.kind.exists() and ev.kind.read_text() and \
+                    "fremder-container" in ev.docker_state.read_text():
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail("Fake-claude kam nicht in den Wartezustand")
+        kind = int(ev.kind.read_text())
+        p.send_signal(sig)
+        p.wait(timeout=60)
+    finally:
+        if p.poll() is None:
+            p.kill()
+    assert p.returncode == code
+    for _ in range(50):
+        try:
+            os.kill(kind, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        os.kill(kind, signal.SIGKILL)
+        pytest.fail("Kindprozess der Gruppe lebt noch")
+    assert json.loads(ev.docker_state.read_text()) == {"container": ["fremder-container"], "netze": [], "images": []}
+    assert any(c[:3] == ["rm", "-f", "-v"] for c in ev.docker())
 
 
 @pytest.mark.skipif(os.environ.get("SECURITY_AUDIT_EVAL") != "1", reason="echter Eval-Lauf nur mit SECURITY_AUDIT_EVAL=1")
