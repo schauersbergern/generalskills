@@ -971,3 +971,15 @@ def test_abhaengigkeiten_echt(tmp_path):
     assert lieferkette.semver_vergleich(pakete[0]["behoben_in"], "1.2.5") > 0
     assert isinstance(pakete[0]["zeile"], int) and pakete[0]["zeile"] > 1
     assert not os.path.exists(os.path.join(umg.lk(), "abh"))
+
+
+# ------------------------------------------------------------------------------------ Re-Review Task 2 (N-2, N-3)
+
+@pytest.mark.parametrize("a, b", [("1.0.0-01", "1.0.0-1"), ("1.0.0-0", "1.0.0-00")])
+def test_semver_vergleich_vorabversion_fuehrende_nullen_antisymmetrisch(a, b):
+    assert lieferkette.semver_vergleich(a, b) == -lieferkette.semver_vergleich(b, a)
+
+
+def test_kev_ids_tiefe_verschachtelung_ist_kevfehler():
+    with pytest.raises(lieferkette.KevFehler):
+        lieferkette._kev_ids(b"[" * 200000)

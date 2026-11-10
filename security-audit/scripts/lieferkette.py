@@ -697,6 +697,8 @@ def semver_vergleich(a: str, b: str) -> int:
         if x == y:
             continue
         if x.isdigit() and y.isdigit():
+            if _zahl(x) == _zahl(y):                 # führende Nullen (ungültiges Semver): gleich, nicht beide Richtungen 1
+                continue
             return -1 if _zahl(x) < _zahl(y) else 1
         if x.isdigit() != y.isdigit():
             return -1 if x.isdigit() else 1          # Zahlen vor Text
@@ -940,7 +942,7 @@ class KevFehler(Exception):
 def _kev_ids(roh: bytes) -> frozenset[str]:
     try:
         daten = json.loads(roh)
-    except ValueError as e:
+    except (ValueError, RecursionError) as e:
         raise KevFehler("kein gültiges JSON") from e
     eintraege = daten.get("vulnerabilities") if isinstance(daten, dict) else None
     if not isinstance(eintraege, list):
