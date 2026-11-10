@@ -1295,6 +1295,7 @@ def test_secrets_budget_waehrend_in_head_behaelt_die_befunde(umg, monkeypatch, c
     assert [b["datei"] for b in out["befunde_roh"]] == [f"src/f{i}.js" for i in range(5)]
     assert [b["in_head"] for b in out["befunde_roh"]] == [False, False, None, None, None]
     assert "in_head für 3 von 5 Fundstellen nicht ermittelt (Zeitlimit)" in out["hinweise"]
+    assert len(aufrufe) == 3                                                         # nach dem Ablauf kein weiterer git-Aufruf
     assert os.path.isfile(umg.marker()) and lieferkette_inhalt(umg) == ["geschwaerzt"]
 
 
@@ -1364,7 +1365,7 @@ def test_vorbereiten_waehrend_der_schwaerzung_setzt_keinen_marker(umg, monkeypat
     """Wird die Arbeitskopie während `secrets` neu erstellt (`poc.py vorbereiten`), gilt der Bericht von `gitleaks dir` nicht
     mehr für sie: Exit 4, kein Marker (sonst stünde er auf einer ungeschwärzten Kopie)."""
     v = vorbereiten(umg, [MINI])
-    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    umg.fake_gitleaks(dir={"report": [dir_treffer(JS_ZEILE.encode())]}, git={"report": []})
     echt = lieferkette._gitleaks_dir
 
     def dir_und_dazwischen_vorbereiten(quelle, lk, ende):
@@ -1378,6 +1379,7 @@ def test_vorbereiten_waehrend_der_schwaerzung_setzt_keinen_marker(umg, monkeypat
     assert rc == 4, aus.out + aus.err
     assert "kategorie: schwaerzung-fehlgeschlagen" in aus.out.splitlines() and "neu erstellt" in aus.err
     assert not os.path.lexists(umg.marker())
+    assert lesen(os.path.join(v.quelle, "src/a.js")) == JS_ZEILE.encode()         # der Bericht der alten Kopie schreibt nicht in die neue
 
 
 def test_vorbereiten_nach_der_schwaerzung_vor_dem_marker_setzen_wird_erkannt(umg, monkeypatch, capsys):
@@ -1458,3 +1460,59 @@ def test_werkzeug_ausfuehren_timeout_mit_ausgabegrenze(tmp_path):
     r = gitkopie.werkzeug_ausfuehren([sys.executable, "-c", code], 1, str(tmp_path), ausgabe_max=50)
     assert r.rc is None and r.out == b"x" * 50 and r.abgeschnitten is True
     assert time.monotonic() - start < 20
+
+
+def test_befunde_roh_genau_am_limit_ohne_kappungshinweis(umg):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": [
+        treffer(datei=f"alt/a{i:03d}.js", commit=v.shas[0]) for i in range(lieferkette.MAX_BEFUNDE_ROH)]})
+    out = ausgabe(secrets(umg, v))
+    assert len(out["befunde_roh"]) == lieferkette.MAX_BEFUNDE_ROH
+    assert not [h for h in out["hinweise"] if "nur 200 ausgegeben" in h]
+
+
+def test_gruppieren_derselbe_commit_in_mehreren_zeilen_zaehlt_einmal():
+    a = "a" * 40
+    [b] = lieferkette._gruppieren([treffer(commit=a, zeile=3), treffer(commit=a, zeile=9, datum="2027-01-01T00:00:00Z")])
+    assert b["commits"] == [a] and b["zeile"] == 9
+
+
+def test_werkzeug_ausfuehren_abgeschnitten_auch_nur_durch_stderr(tmp_path):
+    r = gitkopie.werkzeug_ausfuehren([sys.executable, "-c", "import sys; sys.stderr.write('e' * 900)"], 10, str(tmp_path),
+                                     ausgabe_max=100)
+    assert r.out == b"" and r.err == b"e" * 100 and r.abgeschnitten is True
+
+
+def test_sperre_ist_exklusiv_auch_zwischen_zwei_haltern(umg):
+    """Zwei `_sperre` auf demselben Ordner (zwei Befehle desselben Laufs) schließen sich aus; die Sperre endet mit dem Block."""
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    ausgabe(secrets(umg, v))
+    lk = umg.lieferkette_ordner()
+    with lieferkette._sperre(lk):
+        with pytest.raises(lieferkette.PocFehler) as e:
+            with lieferkette._sperre(lk):
+                pass
+        assert e.value.code == 1
+    with lieferkette._sperre(lk):
+        pass
+
+
+def test_enthaelt_marke_findet_die_marke_ueber_die_stuecke_hinweg(tmp_path):
+    """`gitleaks:allow` genau über der 1-MiB-Stückgrenze wird gefunden (der Rest des vorigen Stücks wird mitgeführt)."""
+    for versatz in range(1, len(lieferkette.ALLOW_MARKE)):
+        datei = tmp_path / f"a{versatz}.js"
+        datei.write_bytes(b"x" * ((1 << 20) - versatz) + lieferkette.ALLOW_MARKE + b"y" * 10)
+        assert lieferkette._enthaelt_marke(str(datei), time.monotonic() + 60) is True, versatz
+    leer = tmp_path / "leer.js"
+    leer.write_bytes(b"x" * ((1 << 20) + 50))
+    assert lieferkette._enthaelt_marke(str(leer), time.monotonic() + 60) is False
+
+
+def test_lese_report_verweigert_zu_grosse_berichte(tmp_path, monkeypatch):
+    pfad = tmp_path / "bericht.json"
+    pfad.write_text("[" + ",".join(["{}"] * 50) + "]")
+    assert lieferkette._lese_report(str(pfad)) == [{}] * 50
+    monkeypatch.setattr(lieferkette, "REPORT_MAX", 20)
+    with pytest.raises(lieferkette.ReportFehler, match="zu groß"):
+        lieferkette._lese_report(str(pfad))

@@ -1154,6 +1154,7 @@ BEISPIELE = [
     ("yarn.lock", "irgendwas mit lodash@4 in der Mitte\n", "lodash", "4.0.0"),
     ("yarn.lock", "x.lodash und lodash.merge und -lodash und lodash\n", "lodash", "4.0.0"),
     ("yarn.lock", "foo @scope/pkg@1 bar\n@scope/pkg/x\n", "@scope/pkg", "1.0.0"),
+    ("yarn.lock", "x\nfoo lodash/4.0.0 bar\n", "lodash", "4.0.0"),
     ("yarn.lock", "a~b und a~b2\n", "a~b", "1.0.0"),
     ("yarn.lock", "leer\n", "lodash", "4.0.0"),
 ]
@@ -1323,3 +1324,15 @@ def test_lockfile_das_keine_regulaere_datei_ist_ein_hinweis(umg):
     out = ausgabe(umg.abh())
     assert "Lockfile keine reguläre Datei, übersprungen: sub/yarn.lock" in out["hinweise"]
     assert len(umg.aufrufe()) == 1
+
+
+def test_kev_treffer_ignoriert_gross_klein_und_leerraum():
+    kev = frozenset({"CVE-2099-0001"})
+    assert lieferkette._kev_treffer([{"id": "GHSA-x", "aliases": [" cve-2099-0001 "]}], kev) is True
+    assert lieferkette._kev_treffer([{"id": "cve-2099-0001"}], kev) is True
+    assert lieferkette._kev_treffer([{"id": "GHSA-x", "aliases": ["CVE-2099-0002"]}], kev) is False
+
+
+def test_advisory_listet_die_eigene_id_nicht_als_alias():
+    a = lieferkette._advisory({"id": "GHSA-a", "aliases": ["GHSA-a", "CVE-1"], "summary": "s", "details": "d"})
+    assert a["aliase"] == ["CVE-1"]

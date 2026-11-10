@@ -1876,3 +1876,14 @@ def test_poc_verweist_nur_auf_vorhandene_unterbefehle_von_lieferkette():
     assert "`lieferkette.py secrets`" in quelle
     lieferkette = open(os.path.join(SKILL, "scripts", "lieferkette.py"), encoding="utf-8").read()
     assert 'sub.add_parser("secrets"' in lieferkette
+
+
+def test_bauen_marker_und_fertig_marker_ohne_kennung_gelten_nicht_als_gleich(umg, tmp_path):
+    """`None == None` darf nie als „gleiche Kopie“ zählen: ohne Kennung im Fertig-Marker gilt auch ein Marker mit `kopie: null` nicht."""
+    vorbereitet(umg, tmp_path)
+    umg.fake_gitleaks()
+    with open(os.path.join(umg.zustand(), "quelle.fertig"), "w") as f:
+        f.write('{"fertig": true}')
+    umg.marker_setzen(kopie=None)
+    r = umg.poc("bauen", "--lauf", LAUF, env=umg.env(SECURITY_AUDIT_OHNE=""))
+    assert r.returncode == 4 and r.stdout.splitlines()[0] == "kategorie: nicht-geschwaerzt"
