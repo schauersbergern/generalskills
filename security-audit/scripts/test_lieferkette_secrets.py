@@ -601,6 +601,9 @@ def test_repo_konfig_hinweise(umg):
     assert ".gitleaks.toml" in text and ".gitleaksignore" in text and "web/osv-scanner.toml" in text
     assert "gitleaks:allow" in text and "src/b.js" in text
     assert all("ignoriert" in h for h in out["hinweise"] if ("Standardausnahmen" not in h) and (".toml" in h or "allow" in h))
+    for name in (".gitleaks.toml", ".gitleaksignore", "osv-scanner.toml"):
+        assert any(h.startswith(f"{name} im Repo vorhanden, beim Audit ignoriert") for h in out["hinweise"]), name
+    assert any(h.startswith("gitleaks:allow-Kommentare im Repo vorhanden, beim Audit ignoriert") for h in out["hinweise"])
     assert any(h.startswith("gitleaks-Standardausnahmen nicht geprüft:") and ".gitleaks.toml" in h for h in out["hinweise"])
     assert os.path.exists(os.path.join(v.quelle, ".gitleaks.toml")) and os.path.exists(os.path.join(v.quelle, "web/osv-scanner.toml"))
     assert not os.path.exists(os.path.join(v.quelle, ".gitleaksignore"))        # erkannt, bevor sie gelöscht wurde
@@ -953,7 +956,8 @@ def test_standard_ausnahme_pfadklassen_unit():
 
 NICHT_AUSGENOMMEN = ("x.js", "src/a.js", "vendor/a.js", "vendor/other/a.go", "x.min.js", "x.lock", "Cargo.lock", "pnpm-lock.yml",
                      "xnode_modules/a.js", "node_modules.js", "Gitleaks.toml", "x.ico", "x.dll", "x.webp", "gradlew.sh",
-                     "my-package-lock.json", "Pipfile.lock.bak", "x.docm", "x.tgz", "x.png.js", "x.exe.txt")
+                     "my-package-lock.json", "Pipfile.lock.bak", "x.docm", "x.tgz", "x.png.js", "x.exe.txt",
+                     "vendor/cache/a.rb", "vendor/assets/a.js", "vendor/plugins/a.rb", "vendor/composer/a.php", "xdeno.lock")
 
 
 @echt

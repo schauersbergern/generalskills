@@ -74,9 +74,11 @@ STANDARD_AUSNAHMEN = (
     _klasse("node_modules, bower_components", r"(?:^|/)(?:node_modules|bower_components)/",
             "node_modules/x/a.js", "web/node_modules/p/b.js", "bower_components/a/b.js", gross_klein=True),
     _klasse("Paketsperrdateien", r"(?:^|/)(?:package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|Pipfile\.lock"
-            r"|poetry\.lock|gradle\.lockfile)$",
+            r"|poetry\.lock|gradle\.lockfile|deno\.lock)$",
             "package-lock.json", "web/package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "Pipfile.lock",
-            "poetry.lock", "gradle.lockfile", gross_klein=True),
+            "poetry.lock", "gradle.lockfile", "deno.lock", "sub/Deno.lock", gross_klein=True),
+    _klasse("Ruby-vendor", r"(?:^|/)vendor/(?:bundle|ruby)/", "vendor/bundle/a.rb", "vendor/ruby/3.3/a.rb", "a/vendor/bundle/b.rb",
+            "Vendor/Bundle/c.rb", gross_klein=True),
     _klasse("Go-Moduldateien", r"go\.(?:mod|sum|work(?:\.sum)?)$", "go.mod", "a/b/go.sum", "go.work", "go.work.sum", "xgo.sum",
             gross_klein=True),
     _klasse("Go-vendor", r"(?:^|/)vendor/(?:modules\.txt$|(?:github\.com|golang\.org/x|google\.golang\.org|gopkg\.in|istio\.io"
