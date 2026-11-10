@@ -303,6 +303,20 @@ def test_schema_datei_ungueltig(datei):
     assert any("datei" in f for f in bericht.pruefe_schema(d))
 
 
+@pytest.mark.parametrize("datei", ["src/a.js:42", "src/a.js:42:7", "src/a.js#L42", "src/a.js#L42-L50", "src/a.js#L42C3"])
+def test_schema_datei_mit_zeilenangabe_ist_fehler(datei):
+    d = beispiel()
+    d["befunde"][0]["datei"] = datei
+    fehler = [f for f in bericht.pruefe_schema(d) if "datei" in f]
+    assert fehler and "gehört in `zeile`" in fehler[0]
+
+
+def test_schema_datei_mit_doppelpunkt_im_namen_erlaubt():
+    d = beispiel()
+    d["befunde"][0]["datei"] = "src/a:b.js"
+    assert bericht.pruefe_schema(d) == []
+
+
 def test_schema_datei_null_mit_zeile_ist_fehler():
     d = beispiel()
     d["befunde"][0].update(datei=None, zeile=3)

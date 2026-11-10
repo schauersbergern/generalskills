@@ -29,6 +29,7 @@ EINZEILIG = ("titel", "szenario", "erwartet", "klasse")
 MAX_JSON_BYTES = 16 * 1024 * 1024
 _ID = re.compile(r"S-[1-9][0-9]{0,8}")
 _KATEGORIE = re.compile(r"A(0[1-9]|10)")
+_ZEILE_IM_PFAD = re.compile(r"(:[0-9]+(:[0-9]+)?|#L[0-9]+(C[0-9]+)?(-L?[0-9]+(C[0-9]+)?)?)\Z")
 _CODE_PFAD = re.compile(r"(.+):([1-9][0-9]*)", re.DOTALL)
 
 
@@ -190,6 +191,8 @@ def _befund_fehler(b: dict, label: str) -> list[str]:
     for feld in ("datei",):
         if feld in b and b[feld] is not None and (msg := _pfad_fehler(b[feld])):
             fehler("datei", msg)
+        elif feld in b and isinstance(b[feld], str) and _ZEILE_IM_PFAD.search(b[feld]):
+            fehler("datei", "enthält eine Zeilenangabe: Zeile gehört in `zeile`, `datei` ist nur der Pfad")
     if "zeile" in b:
         z = b["zeile"]
         if z is not None and not (type(z) is int and z >= 1):
