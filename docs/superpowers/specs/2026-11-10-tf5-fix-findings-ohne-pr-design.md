@@ -22,16 +22,20 @@
 
 ## Verhalten (neuer Abschnitt in `fix-findings/SKILL.md`, Ablauf 1)
 
-1. **Erkennung:** Erste nichtleere Zeile der Liste hat die Form `Repo <repo> · Security-Audit · geprüft auf <sha>` (Mittelpunkt U+00B7, `<sha>` 7–64 Hex). Dann gilt der Audit-Eingang; sonst der bisherige PR-Weg.
-2. **Repo-Abgleich:** `<repo>` wird wie in `security-audit` gebildet: Basename der `origin`-URL ohne `.git`; ohne `origin` der Ordnername des Haupt-Worktrees (Elternordner von `git rev-parse --path-format=absolute --git-common-dir`); nur `[A-Za-z0-9._-]`. Weicht er ab → Abbruch mit genau dieser Meldung: „Die Befundliste stammt aus Repo `<repo>`, dieses Repo ist `<eigenes>`. Nichts geändert.“
-3. **SHA-Prüfung:** `git cat-file -e <sha>^{commit}`; fehlt er (auch nach `git fetch`) → Abbruch „Geprüfter Stand `<sha>` ist hier nicht vorhanden. Nichts geändert.“
-4. **Branch:** `security-audit-<YYYY-MM-DD>` vom geprüften SHA (`git switch -c <name> <sha>` bzw. eigener Worktree, falls ein anderer Thread im Verzeichnis arbeitet). Existiert der Name lokal oder auf `origin`, Suffix `-2`, `-3` … Der SHA steht nicht im Namen (`-f…` löst den Force-Push-Wächter aus, `auto-feature/SKILL.md:178`).
-5. **Befundprüfung, Fixes, Tests:** wie bisher (Ablauf 2–5). Commit-Bezug `(Audit S-<n>)`. Die Regel „Zweiter Fund“ entfällt (eine Runde).
-6. **Ganze Suite:** Gibt es kein `.github/workflows/`, gilt das Repo als „ohne CI“ → ganze Suite genau einmal vor dem Push.
-7. **Push:** `git push -u origin <branch>` ohne Nachfrage. Danach Link zum Erstellen des PRs ausgeben: `https://github.com/<owner>/<name>/compare/<default-branch>...<branch>?expand=1` (aus `gh repo view --json nameWithOwner,defaultBranchRef`; ohne `gh` die Remote-URL umrechnen; geht beides nicht, den Befehl `gh pr create --head <branch>` nennen). **Kein `gh pr create`.**
-8. **Befehlswörter** „mergen“/„deployen“ mit Audit-Liste: nicht ausführen, unter der Tabelle „Kein PR vorhanden: Merge und Deploy entscheidest du nach dem PR.“
-9. **Statistik/Tabelle:** Datei `~/.claude/agent-stats/<repo>/<YYYY-MM-DD>-audit-<sha7>-fix.md`, Kopf `# Agent-Statistik · Security-Audit <sha7> Fix`, Spalte TF = `audit`; Abschlusstabelle beginnt mit `Security-Audit <sha7> · Branch <name> · Head <neuer-sha>`; der PR-Link steht unter der Tabelle.
-10. **Antwort an:** Kommt die Liste per Nachricht (selten beim Audit), gilt die bestehende Regel.
+1. **Erkennung:** Irgendeine Zeile der Eingabe, die nach Trimmen von Leerraum voll dem Muster `^Repo [A-Za-z0-9._-]+ · Security-Audit · geprüft auf [0-9a-f]{7,64}$` entspricht (Mittelpunkt U+00B7), schaltet den Audit-Eingang ein. Begleittext, Befehlswörter und Codezaun-Zeilen (```` ``` ````) davor oder danach sind erlaubt. Eine `PR #<n> · …`-Kopfzeile passt nie auf das Muster; findet sich keine Audit-Zeile, gilt der bisherige PR-Weg unverändert.
+2. **Befunde:** Nur Zeilen `S-<n> [P1|P2|P3] …` (mit ihren eingerückten Folgezeilen) sind Befunde. `Verdacht (nicht belegt): …` und `Verworfen: … — …` werden nicht gefixt; Verdachtsfälle stehen höchstens als Hinweis unter der Tabelle. Befunde mit `(repo-weit)` statt `datei:zeile` sind zulässig; die Stelle sucht der Fixer selbst.
+3. **Repo-Abgleich:** `<repo>` liefert `python3 -I <security-audit>/scripts/bericht.py repo` (neuer Unterbefehl ohne Seiteneffekte, gleiche Funktion `_repo_name` wie `kontext`; `<security-audit>` = `~/.claude/skills/security-audit`, fehlt der Skill, Abbruch mit Hinweis). Weicht er ab → Abbruch mit genau dieser Meldung: „Die Befundliste stammt aus Repo `<repo>`, dieses Repo ist `<eigenes>`. Nichts geändert.“
+4. **SHA-Prüfung:** `git fetch origin` (nur lesend), dann `git cat-file -e <sha>^{commit}`; fehlt er → Abbruch „Geprüfter Stand `<sha>` ist hier nicht vorhanden. Nichts geändert.“
+5. **Basis:** Ist `<sha>` Vorfahre von `origin/<default>` (`git merge-base --is-ancestor`), ist der Default-Branch die PR-Basis; sonst der erste Remote-Branch, der `<sha>` enthält (`git branch -r --contains <sha>`, `origin/HEAD` ausgenommen). Enthält kein Remote-Branch den SHA (ungepushte Commits) → Abbruch „Geprüfter Stand `<sha>` liegt auf keinem Remote-Branch; ein Push würde ungepushte Commits veröffentlichen. Nichts geändert.“ Default-Branch: `git symbolic-ref --short refs/remotes/origin/HEAD`, sonst `gh repo view <owner/name> --json defaultBranchRef` mit dem aus `origin` abgeleiteten Repo, sonst Abbruch.
+6. **Worktree und Branch:** Immer eigener Worktree (`git worktree add -b <name> <pfad> <sha>`, Pfad unter `$TMPDIR` oder `.claude/worktrees/` falls vorhanden); das Arbeitsverzeichnis des Users wechselt nie den Branch. Name `security-audit-<YYYY-MM-DD>` (Datum des Fix-Laufs); existiert er lokal oder auf `origin` (`git ls-remote --exit-code --heads origin refs/heads/<name>`), Suffix `-2`, `-3` … Kein SHA im Namen (`-f…`, `auto-feature/SKILL.md:178`).
+7. **Abgleich mit dem aktuellen Stand:** `git log --oneline <sha>..origin/<basis> -- <Dateien der Befunde>` zeigen. Gibt es Treffer, jeden betroffenen Befund zusätzlich am Basis-Head prüfen; Urteil „erledigt (Commit …)“ ist zulässig. Die Tabelle nennt, wie viele Commits der Branch hinter der Basis liegt.
+8. **Befundprüfung, Fixes, Tests:** wie bisher (Ablauf 2–5) im eigenen Worktree. Commit-Bezug `(Audit S-<n>)`. Die Regel „Zweiter Fund“ entfällt (eine Runde).
+9. **Ganze Suite:** Fehlt `.github/workflows/` im Fix-Worktree, gilt das Repo als „ohne CI“ → ganze Suite genau einmal vor dem Push (andere CI-Systeme lösen das konservativ ebenfalls aus). Hinweis in der Verifikationszeile: Workflows mit nur `on: pull_request` laufen erst nach dem PR.
+10. **Sichtbarkeit vor dem Push:** `gh repo view <owner/name> --json visibility` (Repo aus `origin`). Bei `PUBLIC` oder unbekannt (kein `gh`, Fehler) wird nicht gepusht: Die Tabelle nennt Branch und Worktree-Pfad und den Satz „Öffentliches oder nicht prüfbares Repo: nicht gepusht, damit die Lücken nicht vor dem Deploy sichtbar werden. Pushen und PR entscheidest du.“ Bei `PRIVATE`/`INTERNAL`: `git push -u origin <branch>` ohne Nachfrage.
+11. **PR-Link (kein PR):** Der von GitHub beim Push ausgegebene Link (`remote: … /pull/new/<branch>`) wird übernommen; fehlt er, bei GitHub-`origin` `https://github.com/<owner>/<name>/compare/<basis>...<branch>?expand=1`; bei anderem Host nur „Branch gepusht: `<branch>`“. **Kein `gh pr create`.**
+12. **Befehlswörter** „mergen“/„deployen“ mit Audit-Liste: nicht ausführen, unter der Tabelle „Kein PR vorhanden: Merge und Deploy entscheidest du nach dem PR.“
+13. **Statistik/Tabelle:** Datei `~/.claude/agent-stats/<repo>/<YYYY-MM-DD>-audit-<sha7>-fix.md`, Kopf `# Agent-Statistik · Security-Audit <sha7> Fix` mit Zeilen `- Repo: <repo>` und `- Security-Audit: <sha>`, Spalte TF = `audit`; Abschlusstabelle beginnt mit `Security-Audit <sha7> · Branch <name> · Head <neuer-sha>`; Basis, Rückstand, PR-Link bzw. Nicht-gepusht-Satz stehen unter der Tabelle.
+14. **Antwort an:** Kommt die Liste per Nachricht, gilt die bestehende Regel.
 
 ## Abnahmekriterien
 
@@ -43,12 +47,22 @@
 | TF5-D4 | [Durchklick] | PR-Checkliste: Audit-Liste mit „mergen“ → Push und Hinweis, kein Merge |
 | TF5-D5 | [Durchklick] | PR-Checkliste: README-Zeile `fix-findings` nennt den Audit-Eingang |
 
-Zusätzlich (Workflow): Vertragstest in `security-audit/scripts/test_skill_text.py`: Die Kopfzeile, die `bericht.markdown` erzeugt, passt auf das in `fix-findings/SKILL.md` beschriebene Erkennungsmuster (Regex wird aus einem markierten Codeblock in fix-findings/SKILL.md gelesen); die `<repo>`-Regel in fix-findings/SKILL.md nennt dieselben Schritte wie `bericht.kontext` (Stichproben `origin`, `git-common-dir`, `[A-Za-z0-9._-]`).
+Zusätzlich (Workflow, Vertrag zwischen zwei Skills — kein Prosatest, analog `test_skill_text.py`):
+- `security-audit/scripts/test_skill_text.py`: Das Erkennungsmuster steht in `fix-findings/SKILL.md` in einem markierten Codeblock (`<!-- audit-kopfzeile -->`); der Test liest es und prüft: Kopfzeile aus `bericht.markdown` passt; dieselbe Zeile mit Einrückung passt nach Trimmen; `PR #12 · Code · Runde 1/3 · geprüft auf abc1234` passt nicht; Eingabe mit Begleittext und Codezaun davor enthält eine passende Zeile.
+- `security-audit/scripts/test_bericht.py`: `bericht.py repo [pfad]` gibt genau `_repo_name` aus, ohne Dateien anzulegen (Ausgabeordner unverändert, keine `.reserviert`-Datei).
 
 ## Entscheidungen/Annahmen
 
 1. **PR-Link statt PR** (Entschieden, User).
-2. **Erkennung über die erste nichtleere Zeile**, weil die Kopfzeile laut TF1 erste Zeile im Codeblock ist; der User kopiert den Codeblock.
-3. **Branch vom geprüften SHA** statt vom aktuellen Default-Branch: Zeilenangaben der Befunde gelten für diesen Stand; spätere Commits auf `main` merged der User über den PR.
-4. **Ohne Mutationsproben**: reine Prosa plus Vertragstest; Durchklick-DoD laut Feature-File.
-5. **Sicherheitsregel aus dem Vorfall 2026-11-10** gilt auch hier: keine Signale an fremde Prozesse, keine Mutationen an Kill-/Lösch-Logik (betrifft TF5 praktisch nicht).
+2. **Erkennung über irgendeine Zeile, die voll dem Muster entspricht**, weil Befehlswörter, Begleittext und Codezäune vor der Kopfzeile stehen dürfen (fix-findings/SKILL.md:12, bericht.py setzt den Zaun).
+3. **Branch vom geprüften SHA**, Basis = Remote-Branch, der ihn enthält; Abgleich mit dem aktuellen Stand (Schritt 7) statt stillem Fixen auf veraltetem Code.
+4. **Nie pushen bei öffentlichem oder nicht prüfbarem Repo** (Default, Workflow): ergänzt die User-Entscheidung „nur Branch pushen“ um den Schutz, Lücken nicht vor dem Deploy öffentlich zu machen; im Abschlussbericht als offene Bestätigung an den User.
+5. **Rahmen-„Nie“-Regeln des Feature-Files** (kein Kundencode auf dem Host, ausgehende Verbindungen nur Allowlist) binden den Audit-Skill, nicht `fix-findings`: `fix-findings` ist der normale Fix-Prozess des Users im eigenen Repo (TDD auf dem Host, `git fetch`/`push`, `gh`), unverändert wie auf dem PR-Weg. Im Abschlussbericht genannt.
+6. **`bericht.py repo`** als neuer Unterbefehl in TF1-Datei (gestapelter Branch), damit `fix-findings` die `<repo>`-Regel nicht nachbilden muss.
+7. **Ohne Mutationsproben**: Prosa plus Vertragstests; Durchklick-DoD laut Feature-File.
+8. **Sicherheitsregel aus dem Vorfall 2026-11-10** gilt auch hier: keine Signale an fremde Prozesse, keine Mutationen an Kill-/Lösch-Logik.
+9. **README**: neben der Tabellenzeile auch die Merge/Deploy-Regel (README „Gemeinsame harte Regel“) um „auf dem Audit-Weg nie“ ergänzen.
+
+## Review-Verlauf
+
+**R1 (opus-xhigh):** 1 Blocker, 7 Wichtig, 7 Klein — alle angenommen (B1 Erkennung, W1 Basis/ungepushte Commits, W2 Abgleich, W3 Worktree, W4 öffentliches Repo als Default, W5 PR-Link, W6 Rahmen-Abgrenzung, W7 Verdacht/Verworfen/repo-weit, K1 `bericht.py repo`, K2 Negativtests, K3 ls-remote/Datum, K4 Statistik-Kopf, K5 CI-Hinweise, K6 Kleinbuchstaben-Hex, K7 README).
