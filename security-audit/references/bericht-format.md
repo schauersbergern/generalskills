@@ -76,7 +76,7 @@ Befunde aus `lieferkette.py` (Schritt 5b in `SKILL.md`) tragen `werkzeug`. Sie h
 
 Je Eintrag eine Zeile. Immer enthalten:
 - Hinweise aus `bericht.py kontext` (unverändert) und die Meldungen von `poc.py vorbereiten` (Symlinks, Kollisionen, LFS, Submodule, `.env*`).
-- `hinweise` der drei Unterbefehle von `lieferkette.py` (Schritt 1b), wortgleich und nicht doppelt, auch „gitleaks fehlt …“, „osv-scanner fehlt …“ und „gitleaks-Standardausnahmen nicht geprüft: …“. Ein fehlendes Werkzeug heißt: keine Befunde dieser Art, alle anderen Befunde bleiben gültig.
+- `hinweise` der drei Unterbefehle von `lieferkette.py` (Schritt 1b), wortgleich und nicht doppelt, auch „gitleaks fehlt …“, „osv-scanner fehlt …“ und „gitleaks-Standardausnahmen nicht geprüft: …“. Ein fehlendes Werkzeug heißt: keine Befunde dieser Art, alle anderen Befunde bleiben gültig. Schlägt `abhaengigkeiten` oder `lieferkette` mit Exit ≠ 0 fehl, steht stattdessen „<unterbefehl> fehlgeschlagen (Exit <n>)“ (Text der Hauptsession, ohne stderr).
 - Werkzeugbefunde außerhalb des Teilpfads als „außerhalb des Teilpfads: <titel> (<datei>)“.
 - Docker-Kategorien und Hinweise aus `bauen`/`starten` (`docker-fehlt`, `lockfile-fehlt`, `lockfile-fremde-quelle`, `nicht-npm`, `native-module`, `prisma-engines`, `lockfile-ohne-paketliste`, `node-range-zu-lang`, `node-engines-ignoriert`, `build-fehler`, `build-timeout`, `start-fehler`) mit der Folge („keine PoCs, P1/P2 nur unbestätigt“).
 - „BuildKit-Cache kann Code-Layer des geprüften Repos enthalten (`docker builder prune`).“
@@ -151,11 +151,11 @@ Neutrale Pfade, keine echte Anwendung.
     {
       "id": "S-5", "stufe": "P1", "status": "unbestätigt",
       "datei": "src/lib/render.ts", "zeile": 27, "kategorie": "A03",
-      "titel": "example-lib 2.3.1 mit bekannter Lücke, verwundbare Funktion wird aufgerufen",
+      "titel": "Verwundbare Abhängigkeit example-lib@2.3.1",
       "beschreibung": "Werkzeugbefund, kein Request-Beleg möglich. Das Paket example-lib 2.3.1 hat das Advisory GHSA-aaaa-bbbb-cccc; src/lib/render.ts importiert es in Zeile 3 und ruft die genannte Funktion in Zeile 27 auf.",
-      "szenario": "Ein Angreifer liefert Eingaben, die die Lücke in example-lib auslösen, sobald render() sie verarbeitet",
+      "szenario": "Ein Angreifer löst die bekannte Lücke in example-lib aus, sofern die Anwendung die betroffene Funktion mit Eingaben des Angreifers aufruft",
       "erwartet": "auf ≥ 2.3.4 aktualisieren (behebt nur Advisories mit Fix-Version; für Advisories ohne Fix-Version Nutzung prüfen oder Paket ersetzen)",
-      "klasse": "Abhängigkeit mit bekannter Lücke und belegtem Aufruf",
+      "klasse": "Abhängigkeit mit bekannter Lücke",
       "ohne_anmeldung": false, "mandantenuebergreifend": false,
       "werkzeug": "osv-scanner",
       "pakete": [{ "name": "example-lib", "version": "2.3.1", "advisories": ["GHSA-aaaa-bbbb-cccc"] }],
@@ -164,7 +164,7 @@ Neutrale Pfade, keine echte Anwendung.
     {
       "id": "S-6", "stufe": "P1", "status": "unbestätigt",
       "datei": "config/secrets.ts", "zeile": 4, "kategorie": "A07",
-      "titel": "Secret in der Git-Historie: generic-api-key in config/secrets.ts",
+      "titel": "Secret in der Git-Historie (generic-api-key)",
       "beschreibung": "Werkzeugbefund, kein Request-Beleg möglich. gitleaks fand in der Historie ein Secret (Regel generic-api-key); die Datei existiert in HEAD nicht mehr. Der Wert steht nirgends im Bericht.",
       "szenario": "Wer Zugriff auf das Repo oder einen Klon hat, liest das Secret aus der Historie und nutzt es gegen den Dienst",
       "erwartet": "Secret beim Anbieter rotieren (nicht im Code behebbar); Historie erst nach Rotation manuell bereinigen; Datei existiert in HEAD nicht mehr",
