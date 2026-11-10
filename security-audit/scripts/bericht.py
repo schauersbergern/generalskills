@@ -27,7 +27,7 @@ STATUS = ("bestätigt", "unbestätigt", "verworfen", "verdacht")
 IN_LISTE = ("bestätigt", "unbestätigt")
 EINZEILIG = ("titel", "szenario", "erwartet", "klasse")
 MAX_JSON_BYTES = 16 * 1024 * 1024
-_ID = re.compile(r"S-[0-9]+")
+_ID = re.compile(r"S-[1-9][0-9]{0,8}")
 _KATEGORIE = re.compile(r"A(0[1-9]|10)")
 _CODE_PFAD = re.compile(r"(.+):([1-9][0-9]*)", re.DOTALL)
 
@@ -289,8 +289,8 @@ def pruefe_schema(daten: object) -> list[str]:
 # ------------------------------------------------------------------------------------ Markdown
 
 def _inline(text: object) -> str:
-    """Nicht validierten Text (Karte, Hinweise) einzeilig machen."""
-    return " ".join(str(text).split())
+    """Nicht validierten Text (Karte, Hinweise) einzeilig machen; Backticks escapen (kein Codezaun möglich)."""
+    return " ".join(str(text).split()).replace("`", "\\`")
 
 
 def _block(inhalt: str) -> list[str]:

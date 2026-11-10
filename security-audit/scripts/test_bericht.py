@@ -573,3 +573,88 @@ def test_markdown_veraendert_eingabe_nicht():
     vorher = copy.deepcopy(d)
     bericht.markdown(d)
     assert d == vorher
+
+
+# ------------------------------------------------------------------------------------ Fix-Runde 1
+
+def test_schema_lange_id_kein_traceback_t2_i3(tmp_path):
+    d = beispiel()
+    d["befunde"][0]["id"] = "S-" + "1" * 5000
+    assert any("id" in f for f in bericht.pruefe_schema(d))
+    pfad = tmp_path / "lang.json"
+    pfad.write_text(json.dumps(d))
+    p = lauf("rendern", str(pfad))
+    assert p.returncode == 2 and "Traceback" not in p.stderr and p.stderr.strip()
+    assert not (tmp_path / "lang.md").exists()
+
+
+@pytest.mark.parametrize("id_", ["S-01", "S-0", "S-1234567890", "S-" + "9" * 400])
+def test_schema_id_ohne_fuehrende_nullen_max_9_ziffern_t2_i3(id_):
+    d = beispiel()
+    d["befunde"][0]["id"] = id_
+    assert any("id" in f for f in bericht.pruefe_schema(d))
+
+
+def test_schema_id_9_ziffern_gueltig_und_sortierbar_t2_i3():
+    d = beispiel()
+    d["befunde"][0]["id"] = "S-999999999"
+    assert bericht.pruefe_schema(d) == []
+    assert "S-999999999 [P1]" in "\n".join(codeblock(bericht.markdown(d)))
+
+
+@pytest.mark.parametrize("feld", ["titel", "grund", "datei"])
+@pytest.mark.parametrize("zeichen", [" ", " ", "\u0085", "\x0b", "\x0c"])
+def test_schema_einzeilig_unicode_zeilentrenner_t2_i5(feld, zeichen):
+    d = beispiel()
+    d["befunde"][2][feld] = f"src/a{zeichen}b.js" if feld == "datei" else f"a{zeichen}b"
+    fehler = bericht.pruefe_schema(d)
+    assert any("S-3" in f and feld in f for f in fehler)
+
+
+@pytest.mark.parametrize("repo", ["x ``` y", "a · Security-Audit · geprüft auf b", "a/b", "a b", "a\nb", ".."])
+def test_schema_repo_kopfzeile_nicht_manipulierbar_t2_i6(repo):
+    d = beispiel()
+    d["repo"] = repo
+    assert any("repo" in f for f in bericht.pruefe_schema(d))
+
+
+def nfd(text):
+    import unicodedata
+    return unicodedata.normalize("NFD", text)
+
+
+def test_status_nfd_wird_wie_nfc_akzeptiert_t2_i7():
+    d = beispiel()
+    d["befunde"][0]["status"] = nfd("bestätigt")
+    d["befunde"][1]["status"] = nfd("unbestätigt")
+    assert nfd("bestätigt") != "bestätigt"
+    assert bericht.pruefe_schema(d) == []
+    block = codeblock(bericht.markdown(d))
+    assert any(z.startswith("S-1 [P1]") for z in block) and any(z.startswith("S-2 [P2]") for z in block)
+    md = bericht.markdown(d)
+    assert "- Status: bestätigt" in md and "- Status: unbestätigt" in md
+
+
+def test_status_nfd_pflichtfelder_gelten_t2_i7():
+    d = beispiel()
+    d["befunde"] = [befund(status=nfd("bestätigt"))]
+    del d["befunde"][0]["poc"]
+    assert any("poc" in f for f in bericht.pruefe_schema(d))
+    d["befunde"] = [befund(status=nfd("unbestätigt"))]
+    assert any("code_pfad" in f for f in bericht.pruefe_schema(d))
+
+
+def test_hinweis_mit_backticks_oeffnet_keinen_zaun_t2_m6():
+    d = beispiel()
+    d["hinweise"] = ["``` x", "```\nfoo"]
+    d["karte"] = [{"flaeche": "``` F", "dateien": ["```"]}]
+    zeilen = bericht.markdown(d).splitlines()
+    assert zeilen[:3] == ["# Security-Audit kunde-portal · 2026-11-09", "", "```"]
+    ende = zeilen.index("```", 3)
+    rest = zeilen[ende + 1:]
+    # kein ungeescapter Dreifach-Backtick außerhalb der Detail-Zäune (vier Backticks)
+    assert all("```" not in z.replace("\\`", "") for z in rest if z.startswith(("- ", "1. ")))
+    assert "- ``` x" not in rest and "- \\`\\`\\` x" in rest
+    assert all(z != "```" for z in rest)
+    for kopf in ("## Karte", "## Befunde im Detail", "## Hinweise"):
+        assert kopf in rest
