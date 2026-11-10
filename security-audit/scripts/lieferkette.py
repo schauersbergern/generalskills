@@ -6,14 +6,18 @@ Aufruf (immer als einzelner einfacher Befehl, siehe Netzregel):
   python3 -I lieferkette.py abhaengigkeiten --lauf <id> --quelle <arbeitskopie>
   python3 -I lieferkette.py lieferkette --lauf <id> --quelle <arbeitskopie>
 
-`secrets` (Budget 300 s, davon `gitleaks dir` samt Schwärzung zuerst höchstens 120 s) schwärzt zuerst jede Secret-Fundstelle der
-Arbeitskopie (gleiche Länge, Zeichen `*`, `\\n` und `\\r` bleiben), setzt dann den Marker `<zustand>/lieferkette/geschwaerzt` und
-prüft danach die Historie in einem Spiegelklon des Repos. Ausgabe (JSON auf stdout): `befunde_roh` je (Regel, Datei) mit `regel`,
-`datei`, `zeile`, `commits` (volle SHAs, höchstens 20, jüngster zuerst) und `in_head`, dazu `hinweise` und `geschwaerzt`. Die
+`secrets` (Budget 300 s; `gitleaks dir` zuerst höchstens 120 s ab Start, nach den Vorsuchen mindestens 60 s, die Schwärzung danach
+bis zum Gesamtbudget, ein Ablauf ist Exit 4) schwärzt zuerst jede von gitleaks erkannte Secret-Fundstelle der Arbeitskopie (gleiche
+Länge, Zeichen `*`, `\\n` und `\\r` bleiben), setzt dann den Marker `<zustand>/lieferkette/geschwaerzt` (mit der Kennung der Arbeitskopie
+aus `quelle.fertig`; wird die Kopie währenddessen neu erstellt, Exit 4 ohne Marker) und prüft danach die Historie in einem
+Spiegelklon des Repos. `secrets` und `abhaengigkeiten` teilen sich je Lauf eine Sperre (flock auf `<zustand>/lieferkette`): wer sie
+nicht bekommt, endet mit Exit 1, ohne etwas zu löschen. Ausgabe (JSON auf stdout): `befunde_roh` je (Regel, Datei) mit `regel`,
+`datei`, `zeile`, `commits` (volle SHAs, höchstens 20, jüngster zuerst) und `in_head`, dazu `hinweise` und `geschwaerzt`; höchstens 200 Einträge
+(`MAX_BEFUNDE_ROH`, in HEAD vorhandene zuerst), `in_head` ist `null`, wenn es nicht ermittelt werden konnte. Die
 gitleaks-Felder `Secret`, `Match`, `Author`, `Email`, `Message` und `Fingerprint` werden nie ausgegeben, kein Secret-Wert
 verlässt den Prozess. Grenze: gitleaks überspringt mit `useDefault = true` bestimmte Pfade (`STANDARD_AUSNAHMEN`, z. B.
 `node_modules/`, Lockfiles, `*.svg`); Textdateien dieser Klassen in der Arbeitskopie werden weder geprüft noch geschwärzt und
-stehen deshalb im Hinweis „gitleaks-Standardausnahmen nicht geprüft: …“.
+stehen deshalb im Hinweis „gitleaks-Standardausnahmen nicht geprüft: …“. Secrets ohne bekanntes Muster erkennt gitleaks nirgends: „geschwärzt“ heißt „soweit gitleaks sie erkennt“.
 
 `abhaengigkeiten` (Budget 300 s) kopiert jedes Lockfile (npm `package-lock.json`/`npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`;
 ohne `node_modules/`) mit seinem Dateinamen in einen eigenen leeren Ordner unter `<zustand>/lieferkette/abh/` und ruft darauf
@@ -22,8 +26,8 @@ Kundenrepo, keine `osv-scanner.toml` des Repos). Ausgabe (JSON auf stdout): `pak
 `version`, `lockfile`, `zeile`, `advisories` (`id`, `aliase`, `zusammenfassung` ≤ 200, `details` ≤ 500 Zeichen, einzeilig),
 `behoben_in` (je Advisory die kleinste Fix-Version oberhalb der installierten im passenden Versionsbereich, davon das Maximum),
 `dev` (true nur bei `dev: true` im npm-Lockfile, sonst false; yarn und pnpm tragen keine Dev-Angabe) und `kev` (true/false, null
-wenn der Katalog nicht geladen werden konnte), dazu `hinweise`. Der KEV-Katalog der CISA wird höchstens einmal je Lauf geladen
-(Cache `<zustand>/lieferkette/kev.json`); `SECURITY_AUDIT_KEV_DATEI` ersetzt den Download durch eine lokale Datei. Aus Kundendateien
+wenn der Katalog nicht geladen werden konnte), dazu `hinweise`. Der KEV-Katalog der CISA wird je Lauf einmal geladen und zwischengespeichert
+(Cache `<zustand>/lieferkette/kev.json`; scheitert das Zwischenspeichern, lädt der nächste Aufruf erneut; Weiterleitungen nur auf https); `SECURITY_AUDIT_KEV_DATEI` ersetzt den Download durch eine lokale Datei. Aus Kundendateien
 erscheinen nur Paketnamen, Versionen und Pfade.
 
 `lieferkette` (Budget 60 s, `SECURITY_AUDIT_LK_BUDGET` darf nur verkürzen) prüft die Arbeitskopie rein statisch (kein Kindprozess, kein
@@ -35,8 +39,8 @@ aus dem Repo stehen nie in der Ausgabe (nur der erkannte Befehl), Paketnamen nur
 Läuft das Budget ab, bleiben die bis dahin gefundenen Entwürfe erhalten (Hinweis „Lieferketten-Prüfung abgebrochen (Zeitbudget)“).
 
 Exit-Codes: 0 ok (auch wenn gitleaks fehlt: `{"werkzeug": "gitleaks", "fehlt": true, ...}`, dann ohne Marker), 2 ungültige
-Argumente (auch `--quelle` ≠ Arbeitskopie des Laufs), 4 Schwärzung gescheitert (`kategorie: schwaerzung-fehlgeschlagen`, kein
-Marker), 1 sonstiger Fehler (z. B. Aufräumen unvollständig).
+Argumente (auch `--quelle` ≠ Arbeitskopie des Laufs, `quelle.fertig` ohne Kennung), 4 Schwärzung gescheitert (`kategorie: schwaerzung-fehlgeschlagen`, kein
+Marker), 1 sonstiger Fehler (z. B. Aufräumen unvollständig, Sperre des Laufs belegt).
 
 Sicherheitsgrenze: Werkzeuge laufen nie im Kundenrepo (cwd ist ein leerer Ordner im Zustandsordner, Umgebung aus
 `gitkopie.werkzeug_umgebung()`, eigene Config, eigener leerer Ignore-Ordner, `--ignore-gitleaks-allow`), jedes als eigene
@@ -889,12 +893,13 @@ def _lockfiles_finden(quelle: str, hinweise: list[str]) -> list[str]:
             rel = os.path.relpath(pfad, quelle).replace(os.sep, "/")
             try:
                 st = os.lstat(pfad)
-            except OSError:
+            except OSError as e:
+                hinweise.append(f"Lockfile nicht lesbar, übersprungen: {_t(rel)} ({e.strerror})")
                 continue
             if stat.S_ISLNK(st.st_mode):
                 hinweise.append(f"Lockfile ist ein Symlink, übersprungen: {_t(rel)}")
             elif not stat.S_ISREG(st.st_mode):
-                continue
+                hinweise.append(f"Lockfile keine reguläre Datei, übersprungen: {_t(rel)}")
             elif st.st_size > LOCKFILE_MAX:
                 hinweise.append(f"Lockfile zu groß (> {LOCKFILE_MAX // (1024 * 1024)} MiB), übersprungen: {_t(rel)}")
             else:

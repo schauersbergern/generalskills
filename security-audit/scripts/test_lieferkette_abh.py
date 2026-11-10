@@ -1312,3 +1312,14 @@ def test_osv_ausgabe_ueber_dem_limit_wird_nicht_ausgewertet(umg, monkeypatch, ca
     out = json.loads(capsys.readouterr().out)
     assert out["pakete"] == []
     assert any("Ausgabe zu groß" in h and "package-lock.json" in h for h in out["hinweise"])
+
+
+def test_lockfile_das_keine_regulaere_datei_ist_ein_hinweis(umg):
+    """Ein Lockfile-Name, hinter dem keine reguläre Datei steht (FIFO, Gerät), wird nicht gelesen, verschwindet aber nicht still."""
+    umg.schreibe("package-lock.json", npm_lock(("node_modules/a", "1.0.0", False)))
+    os.makedirs(os.path.join(umg.quelle(), "sub"))
+    os.mkfifo(os.path.join(umg.quelle(), "sub", "yarn.lock"))
+    umg.fake_osv(standard={"rc": 0})
+    out = ausgabe(umg.abh())
+    assert "Lockfile keine reguläre Datei, übersprungen: sub/yarn.lock" in out["hinweise"]
+    assert len(umg.aufrufe()) == 1

@@ -258,7 +258,8 @@ def test_zeitbudgets_in_skill_md_entsprechen_den_skripten_haertung_i3():
     for befehl, sekunden in erwartet.items():
         assert re.search(rf"`{re.escape(befehl)}`[^`]*?{sekunden} s", zusage), (befehl, sekunden)
     assert "SECURITY_AUDIT_KONTEXT_TIMEOUT" in zusage and "SECURITY_AUDIT_KONTEXT_TIMEOUT" in _lies(os.path.join(HIER, "bericht.py"))
-    assert lieferkette.SECRETS_DIR_BUDGET == 120 and "höchstens 120 s" in zusage      # `gitleaks dir` samt Schwärzung zuerst
+    assert lieferkette.SECRETS_DIR_BUDGET == 120 and "höchstens 120 s ab Start" in zusage      # `gitleaks dir` zuerst
+    assert lieferkette.SECRETS_DIR_MINDEST == 60 and "nach den Vorsuchen mindestens 60 s" in zusage
     assert "nur für `kontext`, `vorbereiten`, `secrets` und `abhaengigkeiten` zugesichert" in zusage   # keine pauschale Zusage unter 600 s
     assert "unter 600 s" not in zusage
 
@@ -659,6 +660,7 @@ def test_skill_fehlt_ist_nicht_geschwaerzt_und_laeuft_weiter_m3():
     assert "Kein Reviewer und keine Karte auf einer ungeschwärzten Arbeitskopie (gilt nur für diesen Abbruchzweig, nicht für `fehlt`)." in b1
     regel4 = next(z for z in text.splitlines() if z.startswith("4. **Gelesen wird nur die Arbeitskopie**"))
     assert "sofern gitleaks lief" in regel4 and "bei `fehlt` nicht" in regel4
+    assert "nur dort, wo gitleaks ein Secret erkennt" in regel4 and "Standardausnahmen" in regel4         # keine Endgültigkeit
     assert "ist nach Schritt 1b geschwärzt." not in regel4
     # Reviewer-Briefing: „geschwärzt“ nur über den Platzhalter <SCHWAERZUNG>
     briefing = _lies(BRIEFINGS)
@@ -687,10 +689,11 @@ def test_skill_zeitbudget_der_schwaerzung_ist_abbruch_m2():
     text = _lies(SKILL_MD)
     b1 = _abschnitt(text, "1b.")
     zeile = next(z for z in b1.splitlines() if z.startswith("- **Timeout und Budget:**"))
-    assert "120-s-Teilbudget für `gitleaks dir` samt Schwärzung" in zeile and "endet `secrets` mit Exit 4" in zeile
+    assert "120-s-Teilbudget für `gitleaks dir` (nach den Vorsuchen mindestens 60 s)" in zeile and "endet `secrets` mit Exit 4" in zeile
+    assert "während der Schwärzung das Gesamtbudget" in zeile
     assert "kein Hinweis" in zeile and "Läuft das Budget der Historienprüfung" in zeile
     regel8 = next(z for z in text.splitlines() if BASH_TIMEOUT in z and "poc.py" in z)
-    assert "höchstens 120 s, bei Ablauf Exit 4 `schwaerzung-fehlgeschlagen` und Abbruch" in regel8
+    assert "bei Ablauf einer der beiden Exit 4 `schwaerzung-fehlgeschlagen` und Abbruch" in regel8
     assert "Secret-Prüfung abgebrochen (Zeitbudget)" in regel8
     quelle = _lies(os.path.join(HIER, "lieferkette.py"))                 # Vertrag: Teilbudget -> Exit 4, Historie -> Hinweis
     assert "_schwaerzung_gescheitert" in quelle and 'hinweise.append("Secret-Prüfung abgebrochen (Zeitbudget)")' in quelle
@@ -852,3 +855,26 @@ def test_skill_erreichbarkeit_fehlendes_objekt_und_gegenlesen():
     text = _lies(SKILL_MD)
     assert "Fehlt für ein zugewiesenes Paket das Objekt `erreichbarkeit`" in text
     assert "Einen behaupteten Aufruf liest du gegen" in text
+
+
+def test_skill_zusagen_zur_schwaerzung_sind_nicht_endgueltig_haertung_q7():
+    """Härtung Q7: „geschwärzt“ heißt „soweit gitleaks Secrets erkennt“ (nicht in Standardausnahmen, nicht ohne bekanntes Muster);
+    der Marker gilt je Arbeitskopie; `secrets` und `abhaengigkeiten` laufen nacheinander; `befunde_roh` ist gekappt."""
+    text = _lies(SKILL_MD)
+    b1 = _abschnitt(text, "1b.")
+    assert "jede von gitleaks erkannte Secret-Fundstelle" in b1 and "jede Secret-Fundstelle wird" not in b1
+    assert "Der Marker gilt nur für die Arbeitskopie, auf der `secrets` lief" in b1
+    assert "`secrets` und `abhaengigkeiten` laufen nacheinander, nie parallel" in b1
+    assert "höchstens 200 Einträge" in b1 and "`in_head` ist `null`" in b1
+    assert "Ohne gültigen Marker" in text and "gehört zu einer früheren Arbeitskopie" in text
+    briefing = _lies(BRIEFINGS)
+    assert "Secrets, die gitleaks nicht erkennt, stehen im Klartext." in briefing
+    web = _lies(os.path.join(SKILL_DIR, "references", "pruefpunkte-web.md"))
+    assert "Die Arbeitskopie ist geschwärzt, soweit gitleaks Secrets erkennt" in web and "Die Arbeitskopie ist geschwärzt." not in web
+    assert "möglicherweise die einer anderen Versionslinie" in web
+    fmt = _lies(BERICHT_FORMAT)
+    assert "1 bis 300 Einträgen" in fmt and "höchstens 20 Advisories je Paket" in fmt
+    import bericht as bericht_modul
+    assert bericht_modul.MAX_PAKETE == 300 and bericht_modul.MAX_ADVISORIES == 20
+    doc = _lies(os.path.join(HIER, "lieferkette.py"))
+    assert "„geschwärzt“ heißt „soweit gitleaks sie erkennt“" in doc

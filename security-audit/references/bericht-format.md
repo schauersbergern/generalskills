@@ -63,7 +63,7 @@ Befunde aus `lieferkette.py` (Schritt 5b in `SKILL.md`) tragen `werkzeug`. Sie h
 
 | `werkzeug` | Kopplung (alles Pflicht) | Zusatzfelder |
 |---|---|---|
-| `osv-scanner` | `kategorie` `A03`, `pakete` mit mindestens 1 Eintrag | `pakete`: Liste von `{ "name": Text, "version": Text, "advisories": [Text] }`, optional je Paket `behoben_in` (Text) und `kev` (true/false/null) |
+| `osv-scanner` | `kategorie` `A03`, `pakete` mit 1 bis 300 Einträgen | `pakete`: Liste von `{ "name": Text, "version": Text, "advisories": [Text] }` (höchstens 20 Advisories je Paket, so viele gibt `abhaengigkeiten` aus), optional je Paket `behoben_in` (Text) und `kev` (true/false/null) |
 | `gitleaks` | `kategorie` `A07`, `commits` mit mindestens 1 Eintrag | `commits`: Liste von Hex-Hashes (7 bis 64 Zeichen, klein, höchstens 20); die `secrets`-Ausgabe liefert volle SHAs, nimm sie unverändert |
 | `lieferkette` | `kategorie` `A03`, `klasse` ist `lockfile-fehlt`, `installation-ohne-lockfile-treue` oder `install-skripte-offen` | keine |
 
