@@ -374,10 +374,31 @@ class BelegDublette(Basis):
             self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.text().count("- Beleg:"), 4)
 
-    def test_dublette_innerhalb_der_eingabe(self):
+    def test_dublette_innerhalb_der_eingabe_wird_einmal_geschrieben(self):
         lauf("neu", self.datei, eingabe=GUT)
+        r = lauf("beleg", self.datei, "K-1", eingabe=BELEG2 + BELEG2)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.text().count("PR #200 R1-1"), 1)
+
+    def test_vorhandenen_beleg_ueberspringen_und_neue_schreiben(self):
+        """Review R2-4: eine Gruppe mit einem schon erfassten Beleg schreibt die übrigen."""
+        lauf("neu", self.datei, eingabe=GUT)
+        lauf("beleg", self.datei, "K-1", eingabe=BELEG2)
+        gruppe = BELEG2 + BELEG2.replace("PR #200", "PR #3") + BELEG2.replace("R1-1", "R1-7")
+        r = lauf("beleg", self.datei, "K-1", eingabe=gruppe)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("PR #200 R1-1", r.stderr)
+        self.assertNotIn("PR #3", r.stderr)
+        t = self.text()
+        self.assertEqual(t.count("PR #200 R1-1"), 1)
+        self.assertEqual(t.count("PR #3 R1-1"), 1)
+        self.assertEqual(t.count("PR #200 R1-7"), 1)
+
+    def test_nur_vorhandene_belege_ergeben_exit_1(self):
+        lauf("neu", self.datei, eingabe=GUT)
+        lauf("beleg", self.datei, "K-1", eingabe=BELEG2)
         vorher = self.text()
-        self.assertNotEqual(lauf("beleg", self.datei, "K-1", eingabe=BELEG2 + BELEG2).returncode, 0)
+        self.assertNotEqual(lauf("beleg", self.datei, "K-1", eingabe=BELEG2).returncode, 0)
         self.assertEqual(self.text(), vorher)
 
     def test_gleicher_befund_an_anderem_kandidaten_ist_erlaubt(self):
@@ -496,9 +517,10 @@ class Statuswechsel(Basis):
 
 
 class Sperrverhalten(Basis):
-    """Review R1-5: je schreibendem Befehl ein Wartetest. Der Test hält die Sperre selbst."""
+    """Review R1-5, R2-2: je schreibendem Befehl ein Wartetest. Der Test hält die Sperre selbst und ändert die
+    Datei währenddessen; nach der Freigabe müssen beide Änderungen da sein (Lesen innerhalb der Sperre)."""
 
-    def unter_sperre(self, args, eingabe):
+    def unter_sperre(self, args, eingabe, aendere):
         vorher = self.text()
         with open(self.datei + ".lock", "w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
@@ -510,24 +532,117 @@ class Sperrverhalten(Basis):
             time.sleep(1.0)
             self.assertIsNone(p.poll(), "Der Befehl lief trotz gehaltener Sperre durch")
             self.assertEqual(self.text(), vorher)
+            with open(self.datei, "w", encoding="utf-8") as f:
+                f.write(aendere(vorher))
+            mitte = self.text()
             fcntl.flock(lock, fcntl.LOCK_UN)
         out, err = p.communicate(timeout=15)
         self.assertEqual(p.returncode, 0, err)
-        self.assertNotEqual(self.text(), vorher)
+        self.assertNotEqual(self.text(), mitte)
         return out
 
+    @staticmethod
+    def mit_zweitem_beleg(text):
+        erste = next(z for z in text.splitlines() if z.startswith("- Beleg"))
+        return text.replace(erste, erste + "\n" + BELEG2.strip().replace("PR #200 R1-1", "PR #9 R9-9"), 1)
+
     def test_neu_wartet(self):
-        self.assertEqual(self.unter_sperre(["neu", self.datei], GUT).strip(), "K-1")
+        von_hand = lambda t: t + "\n" + GUT.replace("K-?", "K-2").replace("Token-Prüfung", "Von Hand")
+        self.assertEqual(self.unter_sperre(["neu", self.datei], GUT, von_hand).strip(), "K-3")
+        self.assertIn("## K-2 · Von Hand", self.text())
+        self.assertIn("## K-3 · Token-Prüfung", self.text())
 
     def test_beleg_wartet(self):
         lauf("neu", self.datei, eingabe=GUT)
-        self.unter_sperre(["beleg", self.datei, "K-1"], BELEG2)
+        self.unter_sperre(["beleg", self.datei, "K-1"], BELEG2, self.mit_zweitem_beleg)
         self.assertIn("PR #200", self.text())
+        self.assertIn("PR #9 R9-9", self.text())
 
     def test_status_wartet(self):
         lauf("neu", self.datei, eingabe=GUT)
-        self.unter_sperre(["status", self.datei, "K-1", "verworfen", "x"], None)
+        self.unter_sperre(["status", self.datei, "K-1", "verworfen", "x"], None, self.mit_zweitem_beleg)
         self.assertIn("- Status: verworfen (x)", self.text())
+        self.assertIn("PR #9 R9-9", self.text())
+
+
+MEHRZEILIG = GUT.replace("— release ohne Token-Prüfung blieb 36/36 grün",
+                         "— Befund in zwei\n  Zeilen, zweite Zeile gehört zu diesem Beleg")
+
+
+class Fortsetzung(Basis):
+    """Review R2-1: Fortsetzungszeilen gehören zu ihrer Feldzeile."""
+
+    def test_neuer_beleg_kommt_hinter_die_fortsetzung(self):
+        self.assertEqual(lauf("neu", self.datei, eingabe=MEHRZEILIG).returncode, 0)
+        r = lauf("beleg", self.datei, "K-1", eingabe=BELEG2)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        zeilen = lauf("zeige", self.datei, "K-1").stdout.splitlines()
+        i = next(n for n, z in enumerate(zeilen) if "PR #191" in z)
+        self.assertTrue(zeilen[i].endswith("— Befund in zwei"))
+        self.assertTrue(zeilen[i + 1].startswith("  Zeilen, zweite Zeile"))
+        self.assertIn("PR #200", zeilen[i + 2])
+        self.assertTrue(zeilen[i + 3].startswith("- Durchgerutscht"))
+
+    def test_beleg_mit_fortsetzung_von_stdin(self):
+        lauf("neu", self.datei, eingabe=GUT)
+        r = lauf("beleg", self.datei, "K-1", eingabe=BELEG2 + "  zweite Zeile des Belegs\n")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = lauf("beleg", self.datei, "K-1", eingabe=BELEG2.replace("R1-1", "R1-2"))
+        zeilen = lauf("zeige", self.datei, "K-1").stdout.splitlines()
+        i = next(n for n, z in enumerate(zeilen) if "PR #200 R1-1" in z)
+        self.assertEqual(zeilen[i + 1], "  zweite Zeile des Belegs")
+        self.assertIn("R1-2", zeilen[i + 2])
+
+    def test_fortsetzung_ohne_beleg_oder_mit_zaun_wird_abgelehnt(self):
+        lauf("neu", self.datei, eingabe=GUT)
+        vorher = self.text()
+        for eingabe in ("  nur Fortsetzung\n", BELEG2 + "  ```bash\n", BELEG2 + "irgendwas\n"):
+            self.assertNotEqual(lauf("beleg", self.datei, "K-1", eingabe=eingabe).returncode, 0, eingabe)
+        self.assertEqual(self.text(), vorher)
+
+    def test_fortsetzung_direkt_nach_dem_kopf_in_neu(self):
+        kaputt = GUT.replace("- Beleg:", "  verirrt\n- Beleg:", 1)
+        self.assertNotEqual(lauf("neu", self.datei, eingabe=kaputt).returncode, 0)
+        self.assertEqual(self.text(), KOPF)
+
+    def test_status_ersetzt_die_fortsetzung_der_alten_statuszeile(self):
+        lauf("neu", self.datei, eingabe=GUT.replace("- Status: offen", "- Status: offen\n  Nachtrag zum Status"))
+        self.assertEqual(lauf("status", self.datei, "K-1", "übernommen", "PR #9").returncode, 0)
+        t = self.text()
+        self.assertNotIn("Nachtrag", t)
+        self.assertIn("- Status: übernommen (PR #9)", t)
+
+
+class Blockende(Basis):
+    """Review R2-3: jeder `## `-Kopf beendet einen Kandidaten."""
+
+    def setUp(self):
+        super().setUp()
+        lauf("neu", self.datei, eingabe=GUT)
+        with open(self.datei, "a", encoding="utf-8") as f:
+            f.write("\n## Archiv\n\nalte Notizen\n")
+
+    def test_zeige_endet_vor_dem_fremden_abschnitt(self):
+        out = lauf("zeige", self.datei, "K-1").stdout
+        self.assertNotIn("Archiv", out)
+        self.assertNotIn("alte Notizen", out)
+        self.assertTrue(out.rstrip().endswith("- Status: offen"))
+
+    def test_neu_haengt_vor_den_fremden_abschnitt(self):
+        r = lauf("neu", self.datei, eingabe=GUT.replace("Token-Prüfung", "Zweite"))
+        self.assertEqual(r.stdout.strip(), "K-2")
+        t = self.text()
+        self.assertLess(t.index("## K-2"), t.index("## Archiv"))
+        self.assertTrue(t.rstrip().endswith("alte Notizen"))
+        self.assertEqual(lauf("liste", self.datei).stdout.count("\n"), 2)
+
+    def test_beleg_und_status_bleiben_im_kandidaten(self):
+        lauf("beleg", self.datei, "K-1", eingabe=BELEG2)
+        lauf("status", self.datei, "K-1", "verworfen", "x")
+        t = self.text()
+        self.assertLess(t.index("PR #200"), t.index("## Archiv"))
+        self.assertLess(t.index("- Status: verworfen (x)"), t.index("## Archiv"))
+        self.assertEqual(t.count("- Status:"), 1)
 
 
 class MehrereBloecke(Basis):

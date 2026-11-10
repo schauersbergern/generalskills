@@ -5,8 +5,9 @@
   neu    <datei>   < block(s)         Kandidaten mit Kopf „## K-? · <Klasse>“ anhängen, IDs vergeben, IDs ausgeben
   zeige  <datei> K-<n>                den ganzen Kandidaten ausgeben
   beleg  <datei> K-<n> < zeile        weiteren Beleg („- Beleg: …“, von stdin) an einen Kandidaten hängen;
-                                      ein schon vorhandener Beleg (gleiche Quelle und Befund-ID) und ein
-                                      verworfener Kandidat werden abgelehnt
+                                      ein schon vorhandener Beleg (gleiche Quelle und Befund-ID) wird
+                                      übersprungen und gemeldet, die übrigen kommen hinein (keiner neu: Exit 1);
+                                      ein verworfener Kandidat wird abgelehnt
   status <datei> K-<n> <status> [vermerk]   offen | übernommen | verworfen (übernommen/verworfen mit einzeiligem
                                       Vermerk); nur ein offener Kandidat wechselt den Status
 
@@ -75,17 +76,21 @@ class Sperre:
 
 
 def kandidaten(zeilen):
-    """Liste von (id, klasse, start, ende) mit ende exklusiv. Codeblöcke (Vorlage im Kopf) zählen nicht."""
+    """Liste von (id, klasse, start, ende) mit ende exklusiv. Jeder „## “-Kopf beendet den Block davor.
+    Codeblöcke (Vorlage im Kopf) zählen nicht."""
     koepfe, im_code = [], False
     for i, z in enumerate(zeilen):
         if z.startswith("```"):
             im_code = not im_code
-        elif not im_code and (m := KOPF_RE.match(z)):
+        elif not im_code and z.startswith("## "):
+            m = KOPF_RE.match(z)
+            if not m and z.startswith("## K-"):
+                fehler(f"Zeile {i + 1} sieht nach einem Kandidatenkopf aus, passt aber nicht zu „## K-<n> · <Klasse>“: {z}")
             koepfe.append((i, m))
-        elif not im_code and z.startswith("## K-"):
-            fehler(f"Zeile {i + 1} sieht nach einem Kandidatenkopf aus, passt aber nicht zu „## K-<n> · <Klasse>“: {z}")
     out = []
     for n, (i, m) in enumerate(koepfe):
+        if not m:
+            continue
         ende = koepfe[n + 1][0] if n + 1 < len(koepfe) else len(zeilen)
         while ende > i + 1 and not zeilen[ende - 1].strip():
             ende -= 1
@@ -119,16 +124,17 @@ def pruefe_block(block):
     kopf = KOPF_RE.match(block[0])
     if not kopf or kopf.group(2) != "?":
         fehler(f"Block muss mit „## K-? · <Klasse>“ beginnen: {block[0]}")
-    gesehen = {}
+    gesehen, davor = {}, False
     for z in block[1:]:
         if z.lstrip().startswith("```"):
             fehler(f"{kopf.group(3)}: Zaunzeile (```) im Block, die Vorlage ohne Zaun einfügen: {z}")
         m = ZEILE_RE.match(z)
         if not m:
-            if FORTSETZUNG_RE.match(z):
+            if davor and FORTSETZUNG_RE.match(z):
                 continue
             fehler(f"{kopf.group(3)}: Zeile ist weder „- <Feld>: <Wert>“ mit nicht leerem Wert noch eine "
                    f"eingerückte Fortsetzung: {z}")
+        davor = True
         feld = m.group(1) or m.group(2)
         gesehen[feld] = gesehen.get(feld, 0) + 1
         if feld == "Beleg":
@@ -167,12 +173,15 @@ def cmd_neu(a):
     with Sperre(a.datei):
         zeilen = lies(a.datei)
         hoechste = max([int(k[0][2:]) for k in kandidaten(zeilen) if k[0][2:].isdigit()], default=0)
-        ids = []
+        vorhandene = kandidaten(zeilen)
+        pos = vorhandene[-1][3] if vorhandene else len(zeilen)
+        ids, neu_zeilen = [], []
         for b in neue:
             hoechste += 1
             kid = f"K-{hoechste}"
             ids.append(kid)
-            zeilen += [""] + [b[0].replace("K-?", kid, 1)] + b[1:]
+            neu_zeilen += [""] + [b[0].replace("K-?", kid, 1)] + b[1:]
+        zeilen[pos:pos] = neu_zeilen
         schreibe(a.datei, zeilen)
     print("\n".join(ids))
 
@@ -183,12 +192,24 @@ def cmd_zeige(a):
     print("\n".join(zeilen[start:ende]))
 
 
+def beleg_gruppen(zeilen):
+    """Je Beleg eine Gruppe: die Zeile „- Beleg: …“ und ihre eingerückten Fortsetzungszeilen."""
+    gruppen = []
+    for z in zeilen:
+        if z.lstrip().startswith("```"):
+            fehler(f"Zaunzeile (```) im Beleg: {z}")
+        if gruppen and FORTSETZUNG_RE.match(z):
+            gruppen[-1].append(z)
+        else:
+            pruefe_beleg(z)
+            gruppen.append([z])
+    return gruppen
+
+
 def cmd_beleg(a):
-    neu = [z for z in sys.stdin.read().splitlines() if z.strip()]
-    if not neu:
+    gruppen = beleg_gruppen([z for z in sys.stdin.read().splitlines() if z.strip()])
+    if not gruppen:
         fehler("Kein Beleg auf stdin")
-    for z in neu:
-        pruefe_beleg(z)
     lies(a.datei)
     with Sperre(a.datei):
         zeilen = lies(a.datei)
@@ -197,12 +218,19 @@ def cmd_beleg(a):
             fehler(f"{a.id} ist verworfen und bekommt keine Belege; kommt die Klasse wieder, neuen Kandidaten anlegen")
         belege = [i for i in range(start, ende) if zeilen[i].startswith("- Beleg")]
         vorhanden = {BELEG_RE.match(zeilen[i]).group("quelle") for i in belege if BELEG_RE.match(zeilen[i])}
-        for z in neu:
-            quelle = BELEG_RE.match(z).group("quelle")
+        neu = []
+        for g in gruppen:
+            quelle = BELEG_RE.match(g[0]).group("quelle")
             if quelle in vorhanden:
-                fehler(f"{a.id} hat schon einen Beleg „{quelle}“; der Befund ist erfasst, nichts hinzugefügt")
+                print(f"fehlerklassen.py: {a.id} hat schon einen Beleg „{quelle}“, übersprungen", file=sys.stderr)
+                continue
             vorhanden.add(quelle)
-        pos = (belege[-1] + 1) if belege else start + 1
+            neu += g
+        if not neu:
+            fehler(f"{a.id}: kein neuer Beleg, nichts hinzugefügt")
+        pos = belege[-1] + 1 if belege else start + 1
+        while belege and pos < ende and FORTSETZUNG_RE.match(zeilen[pos]):
+            pos += 1
         zeilen[pos:pos] = neu
         schreibe(a.datei, zeilen)
 
@@ -224,7 +252,10 @@ def cmd_status(a):
         neu = f"- Status: {a.status}" + (f" ({a.vermerk})" if a.vermerk else "")
         for i in range(start, ende):
             if zeilen[i].startswith("- Status"):
-                zeilen[i] = neu
+                j = i + 1
+                while j < ende and FORTSETZUNG_RE.match(zeilen[j]):
+                    j += 1
+                zeilen[i:j] = [neu]
                 break
         else:
             zeilen.insert(ende, neu)
