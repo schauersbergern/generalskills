@@ -112,3 +112,46 @@ Interfaces: `abhaengigkeiten --lauf <id> --quelle <arbeitskopie>` → `{"pakete"
 ## Reihenfolge
 
 Task 4 → 1 → 2 → 3 → 5 → 6 → 7 (Schema zuerst, weil die Entwürfe aus Task 3 und die Auswertung darauf bauen). Danach Härtung, Verifikation (ganze Suite; echte gitleaks-Tests; Evals nur nach CLI-Anmeldung), PR.
+
+## Nachträge nach Plan-Review R1 (Vorrang vor den Tasks oben)
+
+**Gemeinsame Bausteine (W2, K1) — in Task 4 anlegen, Tasks 1–3 nutzen sie:**
+- `poc.werkzeug_fehlt(name: str) -> bool` (`shutil.which` + `SECURITY_AUDIT_OHNE`, kommagetrennt, getrimmt, case-insensitiv) — einziger Parser; `lieferkette.py` importiert ihn.
+- `poc.schwaerz_marker(lauf: str) -> str` = `<zustand_ordner(lauf)>/lieferkette/geschwaerzt`; `vorbereiten` löscht ihn **vor** dem Neuaufbau von `quelle` über `_entferne(pfad, wurzel=<zustand>/lieferkette)`.
+- `gitkopie.werkzeug_umgebung() -> dict` (Umgebung ohne `GIT_*`, `GITLEAKS_*`, `OSV_*`; plus `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_NO_LAZY_FETCH=1`, `GIT_TERMINAL_PROMPT=0`); `gitkopie.spiegel` nutzt sie; `lieferkette.py` ebenfalls.
+- Löschregel: `lieferkette.py` löscht nur unter `<zustand>/lieferkette/` (über `poc._entferne`) und zusätzlich `.gitleaksignore`-Dateien innerhalb `<zustand>/quelle` (Pfad-Containment per `realpath`/`commonpath`).
+
+**B1 (bestehende bauen-Tests):** `Umgebung.env()` in `test_poc.py` und die `stack`-/`test_11`-Umgebung in `test_poc_docker.py` setzen standardmäßig `SECURITY_AUDIT_OHNE=gitleaks`. Neue Marker-Tests legen ein Fake-`gitleaks` in den Shim-PATH: `test_bauen_ohne_marker_mit_gitleaks_verweigert`, `test_bauen_mit_marker_baut`, `test_bauen_ohne_gitleaks_im_path_baut` (`PATH=<shim ohne gitleaks>`), `test_bauen_ohne_marker_bei_ohne_gitleaks_baut`, `test_vorbereiten_loescht_marker`, `test_daemon_pruefen_ohne_docker_exit3` (für `pruefen`, `bauen`, `starten` parametrisiert).
+
+**B2 (Erwartung und Auswertung):** Erwartungsschema:
+```json
+{"fixture": "fixture-deps", "verbotene_muster": ["fixture.invalid"],
+ "koeder_pruefen": false, "secret": true, "werkzeug_hinweise": [], "alle_unbestaetigt": false,
+ "eintraege": [
+  {"id": "W1", "typ": "werkzeug", "dod": "TF2-D1", "dateien": ["src/routes/vorlage.js"], "paket": "lodash", "kategorien": ["A03", "A05"], "stufen": ["P1"]},
+  {"id": "W2", "typ": "werkzeug", "dod": "TF2-D1", "dateien": ["package-lock.json"], "paket": "minimist", "kategorien": ["A03"], "stufen": ["P2", "P3"]},
+  {"id": "W3", "typ": "werkzeug", "dod": "TF2-D2", "dateien": ["config/keys.js"], "kategorien": ["A07", "A04"], "stufen": ["P1"]},
+  {"id": "W4", "typ": "werkzeug", "dod": "TF2-D3", "dateien": ["Dockerfile"], "klasse": "installation-ohne-lockfile-treue", "kategorien": ["A03"], "stufen": ["P2"]}]}
+```
+`fixture-web-ohne.json`: Einträge von `fixture-web` (Lücken und Köder) plus `{"id":"W1","typ":"werkzeug","dod":"TF2-D4","dateien":["package.json"],"klasse":"lockfile-fehlt","kategorien":["A03"],"stufen":["P2"]}`, `werkzeug_hinweise: ["gitleaks fehlt", "osv-scanner fehlt"]`, `alle_unbestaetigt: true`. DoD-Schlüssel je Erwartung: TF1-D3…D7 immer; TF1-D1 nur bei `luecke`-Einträgen; TF1-D2 nur bei `koeder_pruefen` und `koeder`-Einträgen; TF2-Dn für jedes `dod` der `werkzeug`-Einträge; TF2-D2 zusätzlich bei `secret`; TF2-D4 zusätzlich bei `werkzeug_hinweise`/`alle_unbestaetigt`. `ok` = alle vorhandenen Schlüssel ok. Ein `werkzeug`-Eintrag passt auf einen Befund, wenn `datei` ∈ `dateien`, `kategorie` ∈ `kategorien`, bei `paket` dessen Name in `pakete[].name`, bei `klasse` gleiche `klasse`; erfüllt, wenn Stufe ∈ `stufen` und Status `unbestätigt`. `test_auswerten_ok` bleibt für fixture-web bei genau `{TF1-D1..D7}`. **Wert-Suche:** `run_eval` liest Stream-Datei, Bericht-`.md`/`.json` und alle Dateien im Ausgabeordner als Text und übergibt `geheim_quellen: dict[str, str]` und `secret_info: {"sha256": …, "commit": …, "laenge": 32}`; `auswerten` hasht jedes 32-Zeichen-Fenster in Läufen `[A-Za-z0-9]{32,}`; ein Treffer → TF2-D2 rot. TF2-D2 erfüllt außerdem nur, wenn der Secret-Befund `secret_info.commit` in `commits` enthält. `run_eval --erwartung` prüft, dass `fixture` zur gewählten Fixture passt.
+
+**W1:** SKILL.md Regel 8: `lieferkette.py secrets` und `abhaengigkeiten` mit `timeout: 600000`; Budget-Zusage je Befehl (300/300/60 s); `test_skill_text.py` (`LANGE_UNTERBEFEHLE`, `erwartet`-Dict, Budget-Satz) erweitern. SKILL.md: Jeder Ausgang von `secrets` außer Exit 0 mit Marker → Abbruch vor der Karte mit wörtlicher Meldung; nach jedem erneuten `vorbereiten` wieder `secrets` (K3); `nicht-geschwaerzt` in die Fehlerliste von Schritt 3.
+
+**W3 (Task 3 Interface):** `lieferkette --lauf <id> --quelle <arbeitskopie>` → `{"entwuerfe": [...], "hinweise": [...]}`; Entwurf ohne `id` (vergibt die Hauptsession); `lockfile-fehlt`: `datei` = `package.json`, `zeile` = 1, `code_pfad` = [`package.json:1`]; `installation-ohne-lockfile-treue`: `datei`/`zeile` der logischen Zeile (erste physische Zeile); `install-skripte-offen`: `datei` = Lockfile, `zeile` = Zeile des ersten betroffenen Pakets, Paketnamen in `beschreibung`. Tests bauen einen vollständigen Bericht um die Entwürfe (IDs `S-1…`) und prüfen `bericht.pruefe_schema`.
+
+**W4:** `in_head` per `git cat-file -e HEAD:<datei>` auf dem Spiegel (gilt für `.env*` und übersprungene Pfade). Test `test_secrets_in_head_env_datei`.
+
+**W5 (Task 1 Negativ- und Hinweistests):** `test_schwaerzung_scheitert_exit4_ohne_marker` (Fake-gitleaks `dir` Exit 2, Timeout, unlesbarer Report; Ablauf des 120-s-Teilbudgets gilt als Scheitern); `test_schwaerzung_unscharf_hinweis` (Präfix passt nicht → ganze Spannen ohne Umbruch geschwärzt + Hinweis); `test_schwaerzung_pfad_ausserhalb_nicht_geschrieben` (`File` absolut außerhalb, mit `..`); `test_repo_konfig_hinweise` (`.gitleaks.toml`, `.gitleaksignore`, `osv-scanner.toml`, `gitleaks:allow` werden **vor** dem Löschen erkannt und gemeldet); Marker wird direkt nach erfolgreicher Schwärzung gesetzt (`test_marker_vor_historie`); Kappung `commits` ≤ 20; Dedup mit ≥ 2 Regeln je Datei und ≥ 2 Dateien je Regel.
+
+**W6:** `test_skill_text.py` und `test_auswertung.py` verbieten zusätzlich in SKILL.md, references und kopiertem Skill: `config/keys.js`, `src/routes/vorlage.js`, `_.template`, `variable:`, `lodash`, `minimist` (generische Namen wie `package.json`, `package-lock.json`, `Dockerfile` erlaubt).
+
+**W7:** `bericht.markdown` rendert im Detailabschnitt eines Befunds `Commits: <sha7>, …` (≤ 5, dann „+n“) und `Pakete: name@version (IDs)`; in der Befundliste (Codeblock) bleibt das Format unverändert. Test in `test_bericht.py` (Task 4).
+
+**W8 Testnamen je DoD:** TF2-D1 → Task 6 `test_auswertung_tf2_d1_*`, Task 2 `test_abhaengigkeiten_mehrere_lockfiles_und_advisories`, `test_behoben_in_versionslinien`; TF2-D2 → Task 6 `test_auswertung_tf2_d2_wert_im_stream_rot`, `test_secret_einbau_zwei_commits`, Task 1 `test_secrets_ausgabe_ohne_wertfelder`, `test_schwaerzung_echt_*`; TF2-D3 → Task 6 `test_auswertung_tf2_d3_*`, Task 3 `test_installation_dockerfile_fortsetzung`; TF2-D4 → Task 6 `test_auswertung_tf2_d4_*`, Task 4 `test_daemon_pruefen_ohne_docker_exit3`, Task 1 `test_secrets_gitleaks_fehlt`, Task 2 `test_abhaengigkeiten_osv_fehlt`. Review-Focus 1/2/4/6: keine Sperren/keine DB/keine Org-Scopes (Werkzeugskripte ohne Persistenz); Budgets über `time.monotonic`.
+
+**K4 Schema-Tests (Task 4):** unbekannter `werkzeug`-Wert; `commits` kein Hex oder > 20; `pakete[].advisories` kein String; `commits`/`pakete` ohne passendes `werkzeug`.
+**K5:** Task 2 `test_texte_gekuerzt_einzeilig`, `test_kev_einmal_je_lauf` (Cache); Task 3 pnpm `onlyBuiltDependencies`/`neverBuiltDependencies`, nacktes `pnpm`/`yarn`, `--package-lock-only`.
+**K6:** KEV-URL wörtlich `https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json`; Unit-Tests setzen immer `SECURITY_AUDIT_KEV_DATEI` (autouse-Fixture), nie Netz.
+**K7:** `test_fixture.py`: App-Fixture benennt alle `.tmpl` um; Tests „keine Install-Skripte“ und „keine echten Secrets“ für `fixture-deps`; PoC-Payload in Tests harmlos (`variable` liefert ein Rechenergebnis, kein Dateisystem/Prozess); Lockfile-Kopien heißen `package-lock.json`.
+**K8:** Task-3-Satz „bis dahin Felder prüfen“ entfällt (Schema existiert nach Task 4).
+**K9:** Testnamen wie oben, eindeutig gegenüber bestehenden (`test_lockfile_fehlt` u. a.).

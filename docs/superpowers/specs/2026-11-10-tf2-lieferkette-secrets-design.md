@@ -1,6 +1,6 @@
 # Spec TF2: Abhängigkeiten, Lieferkette und Secrets
 
-**Feature-File:** `docs/features/2026-11-09-security-audit.md`, TF2 · **Branch:** `skills/audit-lieferkette` (gestapelt auf `skills/audit-ohne-pr`) · **Datum:** 2026-11-10 · **Stand:** nach Spec-Review R1
+**Feature-File:** `docs/features/2026-11-09-security-audit.md`, TF2 · **Branch:** `skills/audit-lieferkette` (gestapelt auf `skills/audit-ohne-pr`) · **Datum:** 2026-11-10 · **Stand:** nach Spec-Review R2 (Nachträge am Ende)
 
 ## Ziel
 
