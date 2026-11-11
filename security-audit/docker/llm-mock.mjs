@@ -25,7 +25,9 @@ const BODY_MAX_REQUEST = 1024 * 1024;
 const BODY_MAX_STEUER = 256 * 1024;
 const STDIN_MAX = 64 * 1024;
 const BODY_MAX_AUSGABE = 8192;
-const AUSGABE_MAX = 65536;
+const AUSGABE_MAX = 65536 - 1; // die Ausgabe des CLI hat einen abschließenden Zeilenumbruch und darf höchstens 65 536 Bytes haben
+const MAX_VERBINDUNGEN = 64;
+const ZEITGRENZE_MS = 30_000;
 const PFAD_MAX = 512;
 const EMBED_STANDARD = 1536;
 const EMBED_MAX_DIM = 8192;
@@ -66,19 +68,50 @@ function eindeutigeKennung(praefix) {
   return `${praefix}poc_${zustand.kennung}_${randomBytes(6).toString("hex")}`;
 }
 
-async function bodyLesen(req, limit) {
-  const teile = [];
-  let gesamt = 0;
-  let zuGross = false;
-  for await (const teil of req) {
-    gesamt += teil.length;
-    if (gesamt > limit) {
-      zuGross = true;
-      continue; // weiter lesen und verwerfen, damit die Antwort ankommt
-    }
-    teile.push(teil);
-  }
-  return { text: zuGross ? "" : Buffer.concat(teile).toString("utf8"), zuGross };
+// Liest den Body bis `limit`. Wird das Limit überschritten, endet das Lesen sofort (zuGross), der Rest des Requests wird nicht gelesen.
+// Der Aufrufer antwortet dann mit 413 und `Connection: close` (siehe `zuGrossAntworten`).
+function bodyLesen(req, limit) {
+  return new Promise((ok, nein) => {
+    const teile = [];
+    let gesamt = 0;
+    let fertig = false;
+    const ende = (ergebnis) => {
+      if (fertig) return;
+      fertig = true;
+      req.off("data", beiDaten);
+      ok(ergebnis);
+    };
+    const beiDaten = (teil) => {
+      gesamt += teil.length;
+      if (gesamt > limit) {
+        teile.length = 0;
+        req.pause();
+        ende({ text: "", zuGross: true });
+        return;
+      }
+      teile.push(teil);
+    };
+    req.on("data", beiDaten);
+    req.on("end", () => ende({ text: Buffer.concat(teile).toString("utf8"), zuGross: false }));
+    req.on("error", (e) => {
+      if (!fertig) {
+        fertig = true;
+        nein(e);
+      }
+    });
+    req.on("close", () => {
+      if (!fertig && !req.complete) {
+        fertig = true;
+        nein(new Error("abgebrochen"));
+      }
+    });
+  });
+}
+
+// 413 sofort, Verbindung danach schließen: ein Dauerstrom wird nicht bis zum Ende gelesen.
+function zuGrossAntworten(res) {
+  res.setHeader("connection", "close");
+  fehler(res, 413, "invalid_request_error", "Body zu groß");
 }
 
 function antwortJson(res, status, objekt) {
@@ -168,7 +201,8 @@ function naechsteAntwort(body) {
 
 function ringEintragen(methode, pfad, body) {
   zustand.nr += 1;
-  zustand.ring.push({ nr: zustand.nr, methode: String(methode).slice(0, 16), pfad: String(pfad).slice(0, 2048), body });
+  // Methode und Pfad werden hier nicht gekürzt: erst die Ausgabe maskiert und kürzt (Node begrenzt die Request-Zeile über die Headergrenze).
+  zustand.ring.push({ nr: zustand.nr, methode: String(methode), pfad: String(pfad), body });
   while (zustand.ring.length > RING_MAX) zustand.ring.shift();
 }
 
@@ -190,15 +224,18 @@ function regexMaske(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// Ersetzt Rohform und JSON-escapte Form (auch mit \uXXXX), längste zuerst, in einem Durchgang.
+// Ersetzt Rohform, einfach und doppelt JSON-escapte Form (auch mit \uXXXX), längste zuerst, in einem Durchgang.
+// Nicht erfasst: dreifaches Escapen, URL-Kodierung, Base64 und Teilstücke über Feldgrenzen.
 // Der Ersatztext wird nicht erneut durchsucht.
 function maskierer(werte) {
   const formen = [];
   for (const { name, wert } of werte) {
     if (wert.length === 0) continue;
+    // Rohform, einmal escapt (JSON-Body) und zweimal escapt (Tool-Ergebnis als JSON-String in einem JSON-Body), je mit \uXXXX klein und groß.
     const jsonForm = JSON.stringify(wert).slice(1, -1);
-    const grossHex = jsonForm.replace(/[\u007f-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0").toUpperCase()}`);
-    const kandidaten = new Set([wert, jsonForm, ascii(jsonForm), grossHex]);
+    const doppelForm = JSON.stringify(jsonForm).slice(1, -1);
+    const grossHex = (f) => f.replace(/[\u007f-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0").toUpperCase()}`);
+    const kandidaten = new Set([wert, jsonForm, ascii(jsonForm), grossHex(jsonForm), doppelForm, ascii(doppelForm), grossHex(doppelForm)]);
     for (const form of kandidaten) {
       if (form.length > 0) formen.push({ form, name });
     }
@@ -238,8 +275,8 @@ function protokollAusgabe(werte, suche) {
   const maske = maskierer(werte);
   let eintraege = zustand.ring.map((e) => ({
     nr: e.nr,
-    methode: maske(e.methode),
-    pfad: maske(e.pfad).slice(0, PFAD_MAX),
+    methode: maske(e.methode).slice(0, 16),
+    pfad: maske(e.pfad).slice(0, PFAD_MAX), // erst maskieren, dann kürzen
     body: maske(e.body), // erst maskieren, dann kürzen
   }));
   if (suche !== null) eintraege = eintraege.filter((e) => e.body.includes(suche));
@@ -569,7 +606,7 @@ async function apiBehandeln(req, res) {
   const { text: body, zuGross } = await bodyLesen(req, BODY_MAX_REQUEST);
   // Ein zu großer Body wird nicht protokolliert: Maskierung braucht den ganzen Wert.
   ringEintragen(req.method, req.url ?? "", body);
-  if (zuGross) return fehler(res, 413, "invalid_request_error", "Body zu groß");
+  if (zuGross) return zuGrossAntworten(res);
   const pfad = normalisierePfad(req.url ?? "");
   const pfadBekannt = pfad !== null && Object.keys(ROUTEN).some((k) => k.endsWith(` ${pfad}`));
   const route = pfad === null ? undefined : ROUTEN[`${req.method} ${pfad}`];
@@ -592,7 +629,10 @@ async function steuerBehandeln(req, res) {
   if (req.method === "GET" && req.url === "/bereit") return antwortJson(res, 200, { bereit: true });
   if (req.method === "POST" && (req.url === "/setzen" || req.url === "/protokoll")) {
     const { text, zuGross } = await bodyLesen(req, BODY_MAX_STEUER);
-    if (zuGross) return antwortJson(res, 400, { fehler: "Eingabe zu groß" });
+    if (zuGross) {
+      res.setHeader("connection", "close");
+      return antwortJson(res, 400, { fehler: "Eingabe zu groß" });
+    }
     const geparst = parseJson(text);
     if (!geparst.ok) return antwortJson(res, 400, { fehler: "kein gültiges JSON" });
     if (req.url === "/setzen") {
@@ -645,6 +685,11 @@ function lauschen(server, port, host) {
 async function serverStarten(a) {
   const api = http.createServer(absichern(apiBehandeln));
   const steuer = http.createServer(absichern(steuerBehandeln));
+  for (const server of [api, steuer]) {
+    server.maxConnections = MAX_VERBINDUNGEN;
+    server.requestTimeout = ZEITGRENZE_MS;
+    server.headersTimeout = ZEITGRENZE_MS;
+  }
   let apiPort;
   let steuerPort;
   try {

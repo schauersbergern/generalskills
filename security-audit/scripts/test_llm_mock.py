@@ -12,12 +12,14 @@ import http.client
 import json
 import os
 import re
+import select
 import shutil
 import signal
 import socket
 import struct
 import subprocess
 import threading
+import time
 
 import pytest
 
@@ -130,7 +132,7 @@ def protokoll(m, werte=(), suche=None):
     r = cli("--protokoll", m.steuer, json.dumps({"werte": list(werte)}), extra)
     assert r.returncode == 0, r.stderr
     assert r.stdout.isascii()
-    assert len(r.stdout) <= 65536 + 1  # plus Zeilenumbruch
+    assert len(r.stdout) <= 65536  # einschließlich des abschließenden Zeilenumbruchs
     return json.loads(r.stdout)
 
 
@@ -183,12 +185,71 @@ def test_mock_bereit_zeile_und_bereit_befehl(mock):
     assert (r.returncode, r.stdout, r.stderr) == (0, b"", b"")
 
 
+ERLAUBTE_IMPORTE = {"node:http", "node:crypto", "node:util"}
+
+
+def funktionsrumpf(quelle, name):
+    """Quelltext der Funktion `name` (von `function name(` bis zur schließenden Klammer in Spalte 0)."""
+    m = re.search(rf"^(?:async )?function {name}\(.*?^\}}$", quelle, re.M | re.S)
+    assert m, name
+    return m.group(0)
+
+
 def test_mock_nur_node_builtins():
     quelle = open(MOCK, encoding="utf-8").read()
     importe = re.findall(r"^import\b.*?from\s+\"([^\"]+)\"", quelle, re.M)
-    assert importe and all(i.startswith("node:") for i in importe), importe
+    assert set(importe) == ERLAUBTE_IMPORTE and len(importe) == len(ERLAUBTE_IMPORTE), importe
     assert "require(" not in quelle and "import(" not in quelle
     assert "experimental" not in quelle.split("\n", 1)[0].lower()
+
+
+def test_mock_keine_ausgehenden_requests_ausser_steuerclient():
+    quelle = open(MOCK, encoding="utf-8").read()
+    steuer = funktionsrumpf(quelle, "steuerAnfrage")
+    rest = quelle.replace(steuer, "")
+    # Der Quelltext ohne Kommentarzeilen: ausgehender Verkehr gibt es nur im Steuerclient, und der geht an 127.0.0.1.
+    code = "\n".join(z for z in rest.split("\n") if not z.lstrip().startswith("//"))
+    for muster in (r"\bfetch\s*\(", r"\bhttp\.request\b", r"\bhttp\.get\b", r"\bhttps\b", r"\bnet\.connect\b",
+                   r"\bnew\s+WebSocket\b", r"\bXMLHttpRequest\b", r"\bchild_process\b"):
+        assert not re.search(muster, code), muster
+    assert "http.request(" in steuer and 'host: "127.0.0.1"' in steuer
+    assert "fetch(" not in steuer and "http.get" not in steuer
+    assert re.findall(r"\b(?:host|hostname)\s*:\s*([^,}]+)", steuer) == ['"127.0.0.1"']
+
+
+def test_mock_bereit_zeile_nur_bei_port_0_nicht_bei_festen_ports():
+    """Mit festen Ports (ungleich 0) erscheint nie eine bereit-Zeile auf stdout (die Prüfung läuft per --bereit)."""
+    letzter_fehler = None
+    for _ in range(4):  # freie Ports aus einem Bind sind racy: bei Kollision neu versuchen
+        api, steuer = freier_port(), freier_port()
+        if api == steuer:
+            continue
+        p = subprocess.Popen([NODE, MOCK, "--server", "--host", "127.0.0.1", "--port", str(api), "--steuer-port", str(steuer)],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        try:
+            bereit = False
+            for _ in range(100):
+                if p.poll() is not None:
+                    break
+                if cli("--bereit", steuer).returncode == 0:
+                    bereit = True
+                    break
+                time.sleep(0.1)
+            if not bereit:
+                letzter_fehler = p.stderr.read() if p.poll() is not None else b"nicht bereit"
+                continue
+            time.sleep(0.3)  # eine verspätete bereit-Zeile hätte jetzt Zeit zu erscheinen
+        finally:
+            if p.poll() is None:
+                os.killpg(p.pid, signal.SIGTERM)  # nur die eigene Gruppe
+                try:
+                    p.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(p.pid, signal.SIGKILL)
+                    p.wait(timeout=5)
+        assert p.stdout.read() == b"" and p.stderr.read() == b""
+        return
+    pytest.fail(f"Mock mit festen Ports nicht gestartet: {letzter_fehler!r}")
 
 
 def test_mock_nach_bereit_nichts_mehr_auf_stdout_und_kein_echo(mock):
@@ -526,6 +587,89 @@ def test_mock_zu_grosser_body_413(mock):
     assert chat_json(mock)["choices"][0]["message"]["content"] == "ok"  # der Mock lebt weiter
 
 
+def strom_senden(port, pfad, grenze=64 * 1024 * 1024, frist=10):
+    """Sendet einen chunked-Body ohne Ende (bis `grenze` Bytes oder `frist` Sekunden) und liest nebenbei die Antwort.
+    Gibt (gesendet, Antwort-Bytes, Verbindung_vom_Server_beendet) zurück."""
+    s = socket.create_connection(("127.0.0.1", port), timeout=5)
+    s.sendall(f"POST {pfad} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n".encode())
+    stueck = b"10000\r\n" + b"x" * 65536 + b"\r\n"
+    gesendet, antwort, beendet = 0, b"", False
+    ende = time.monotonic() + frist
+    s.settimeout(0.2)
+    try:
+        while time.monotonic() < ende and gesendet < grenze and not beendet:
+            try:
+                s.sendall(stueck)
+                gesendet += 65536
+            except (BrokenPipeError, ConnectionResetError):
+                beendet = True
+            except socket.timeout:
+                pass
+            if select.select([s], [], [], 0)[0]:
+                try:
+                    teil = s.recv(65536)
+                except ConnectionResetError:
+                    beendet = True
+                    break
+                if not teil:
+                    beendet = True
+                else:
+                    antwort += teil
+            if b"\r\n\r\n" in antwort and not beendet:
+                # Antwort da: noch kurz warten, ob der Server die Verbindung beendet
+                s.settimeout(1)
+                try:
+                    while True:
+                        teil = s.recv(65536)
+                        if not teil:
+                            beendet = True
+                            break
+                        antwort += teil
+                except (socket.timeout, ConnectionResetError, OSError) as e:
+                    beendet = beendet or isinstance(e, ConnectionResetError)
+                break
+    finally:
+        s.close()
+    return gesendet, antwort, beendet
+
+
+def test_mock_zu_grosser_body_413_sofort_und_verbindung_wird_beendet(mock):
+    """Der Mock liest einen zu großen Body nicht bis zum Ende, sondern antwortet sofort und schließt (Review Mi-5)."""
+    gesendet, antwort, beendet = strom_senden(mock.api, "/v1/chat/completions")
+    kopf = antwort.split(b"\r\n\r\n", 1)[0].lower()
+    assert antwort.startswith(b"HTTP/1.1 413"), (gesendet, antwort[:200])
+    assert b"connection: close" in kopf
+    assert gesendet < 8 * 1024 * 1024, gesendet  # nach gut 1 MiB ist Schluss, nicht erst nach dem Strom
+    assert beendet
+    assert chat_json(mock)["choices"][0]["message"]["content"] == "ok"  # der Mock lebt weiter
+
+
+def test_mock_begrenzt_verbindungen_und_hat_kurze_zeitgrenzen(mock):
+    """`maxConnections` auf beiden Listenern: Verbindungen über der Grenze werden sofort geschlossen (Review Mi-5)."""
+    quelle = open(MOCK, encoding="utf-8").read()
+    # Zeitgrenzen (ein Verhaltenstest bräuchte 30 s Wartezeit): beide Listener setzen sie auf einen Wert von höchstens 30 s.
+    assert re.search(r"server\.requestTimeout\s*=\s*ZEITGRENZE_MS\b", quelle) and re.search(r"server\.headersTimeout\s*=\s*ZEITGRENZE_MS\b", quelle)
+    (zeit,) = re.findall(r"^const ZEITGRENZE_MS\s*=\s*([\d_]+);", quelle, re.M)
+    assert 0 < int(zeit.replace("_", "")) <= 30_000
+    for port in (mock.api, mock.steuer):
+        offen = [socket.create_connection(("127.0.0.1", port), timeout=5) for _ in range(90)]
+        try:
+            time.sleep(0.3)  # der Server hat alle Verbindungen angenommen und die überzähligen geschlossen
+            lesbar = select.select(offen, [], [], 0.5)[0]  # lesbar: geschlossen (EOF) oder Fehler, nie Daten
+            geschlossen = 0
+            for s in lesbar:
+                try:
+                    geschlossen += s.recv(1) == b""
+                except OSError:
+                    geschlossen += 1
+            assert 90 - 64 - 2 <= geschlossen <= 90 - 64 + 2, geschlossen
+        finally:
+            for s in offen:
+                s.close()
+        time.sleep(0.3)
+    assert chat_json(mock)["choices"][0]["message"]["content"] == "ok"
+
+
 # --------------------------------------------------------------- Protokoll: Ring, Suche, Maskierung, Größe
 
 
@@ -602,6 +746,43 @@ def test_mock_maskierung_ersatztext_wird_nicht_erneut_maskiert(mock):
     assert "<ENV:A>" in e["body"] and "<ENV:<ENV" not in e["body"]
 
 
+def test_mock_maskierung_doppelt_escapte_form(mock):
+    """Tool-Ergebnisse stehen als JSON-String in einem JSON-String: der Wert ist doppelt escapt (Review Mi-1)."""
+    wert = 'ab"cd\\ef\nXYZ-geheim-77'
+    innen = json.dumps({"k": wert})  # Tool-Ergebnis als JSON-Text
+    body = json.dumps({"messages": [{"role": "tool", "content": innen}]})
+    assert json.dumps(json.dumps(wert)[1:-1])[1:-1] in body  # der Body enthält die doppelt escapte Form
+    anfrage(mock.api, "POST", "/v1/chat/completions", body)
+    (e,) = protokoll(mock, [{"name": "SECRET", "wert": wert}])["eintraege"]
+    assert "<ENV:SECRET>" in e["body"]
+    for stueck in ("XYZ-geheim-77", "geheim", "ab\\\"cd", "XYZ"):
+        assert stueck not in e["body"], stueck
+    # auch mit der Suche arbeitet der Mock auf dem maskierten Body
+    (f,) = protokoll(mock, [{"name": "SECRET", "wert": wert}], suche="tool")["eintraege"]
+    assert "geheim" not in f["fundstelle"] and "<ENV:SECRET>" in f["fundstelle"]
+
+
+def test_mock_maskierung_doppelt_escapt_nicht_ascii_und_pem(mock):
+    wert = "-----BEGIN KEY-----\nMIIä€x9\n-----END KEY-----"
+    innen = json.dumps({"k": wert}, ensure_ascii=False)
+    for ascii_ in (True, False):
+        anfrage(mock.api, "POST", "/v1/chat/completions", json.dumps({"messages": [{"role": "tool", "content": innen}]}, ensure_ascii=ascii_))
+    for e in protokoll(mock, [{"name": "KEY", "wert": wert}])["eintraege"]:
+        assert "<ENV:KEY>" in e["body"] and "MII" not in e["body"] and "BEGIN KEY" not in e["body"]
+
+
+def test_mock_pfad_wird_erst_maskiert_dann_gekuerzt(mock):
+    """Ein langer Wert im Pfad, der über die frühere Vorab-Kürzung (2048) hinausragt, steht nie als Bruchstück da (Review Mi-2)."""
+    wert = "".join(chr(97 + (i * 7 + i // 3) % 26) for i in range(1700))
+    pfad = "/v1/nix?" + "a" * 392 + wert + "b" * 200  # der Wert beginnt bei 400 und endet hinter 2048
+    assert pfad.index(wert) == 400 and len(pfad) > 2048 + 100
+    anfrage(mock.api, "GET", pfad)
+    (e,) = protokoll(mock, [{"name": "TOKEN", "wert": wert}])["eintraege"]
+    assert len(e["pfad"]) <= 512
+    assert e["pfad"].startswith("/v1/nix?aaaa") and "<ENV:TOKEN>" in e["pfad"]
+    assert wert[:20] not in e["pfad"] and wert[:20] not in json.dumps(e)
+
+
 @pytest.mark.parametrize("art", ["roh", "json"])
 @pytest.mark.parametrize("ueberhang", ["endet_genau", "ragt_hinaus", "beginnt_an_grenze"])
 def test_mock_maskierung_vor_kuerzung(mock, art, ueberhang):
@@ -635,13 +816,40 @@ def test_mock_protokoll_hoechstens_64kib(mock):
     r = cli("--protokoll", mock.steuer, json.dumps({"werte": []}))
     assert r.returncode == 0 and r.stderr == b""
     assert r.stdout.isascii()
-    assert len(r.stdout.rstrip(b"\n")) <= 65536
+    assert len(r.stdout) <= 65536
     p = json.loads(r.stdout)
     assert p["gekuerzt"] > 0 and p["gekuerzt"] + len(p["eintraege"]) == 8
     # die ältesten werden weggelassen: die verbleibenden sind die neuesten, lückenlos
     nrs = [e["nr"] for e in p["eintraege"]]
     assert nrs == list(range(8 - len(nrs) + 1, 9))
     assert p["eintraege"][-1]["body"].count("é") > 0 and "\\u00e9" not in p["eintraege"][-1]["body"]  # der Body ist Text, nur die Ausgabe ASCII
+
+
+def test_mock_protokoll_genau_an_der_grenze_einschliesslich_zeilenumbruch():
+    """Die Ausgabe (mit Zeilenumbruch) ist höchstens 65 536 Bytes, auch wenn das JSON allein genau 65 536 Bytes hätte (Review Mi-6)."""
+    def fuellen(m, letzter):
+        for _ in range(7):
+            anfrage(m.api, "POST", "/v1/nix", "a" * BODY_GRENZE)
+        anfrage(m.api, "POST", "/v1/nix", "a" * letzter)
+
+    m = Mock()
+    try:
+        fuellen(m, 0)
+        laenge = len(cli("--protokoll", m.steuer, json.dumps({"werte": []})).stdout.rstrip(b"\n"))
+    finally:
+        m.beenden()
+    letzter = 65536 - laenge
+    assert 0 < letzter <= BODY_GRENZE
+    m = Mock()
+    try:
+        fuellen(m, letzter)
+        r = cli("--protokoll", m.steuer, json.dumps({"werte": []}))
+    finally:
+        m.beenden()
+    assert r.returncode == 0 and r.stdout.endswith(b"\n")
+    assert len(r.stdout) <= 65536, len(r.stdout)
+    p = json.loads(r.stdout)
+    assert p["gekuerzt"] + len(p["eintraege"]) == 8
 
 
 def test_mock_protokoll_ist_ascii_und_gueltiges_json(mock):
@@ -1093,7 +1301,7 @@ def test_mock_protokoll_mit_fundstellen_bleibt_unter_64kib(mock):
     for i in range(8):
         anfrage(mock.api, "POST", "/v1/nix", "é" * 4000 + marker + "é" * 400 + f"{i}")
     r = cli("--protokoll", mock.steuer, json.dumps({"werte": []}), ["--suche", marker])
-    assert r.returncode == 0 and r.stdout.isascii() and len(r.stdout.rstrip(b"\n")) <= 65536
+    assert r.returncode == 0 and r.stdout.isascii() and len(r.stdout) <= 65536
     p = json.loads(r.stdout)
     assert p["gekuerzt"] > 0 and p["gekuerzt"] + len(p["eintraege"]) == 8
     assert all(marker in e["fundstelle"] for e in p["eintraege"])
