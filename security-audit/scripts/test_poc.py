@@ -979,7 +979,11 @@ def test_env_regeln_url_liste_mit_trennzeichen_erlaubt_review_r1_8(umg, tmp_path
 @pytest.mark.parametrize("liste, host", [("http://app:3000,http://poc-fremd.invalid/x", "poc-fremd.invalid"),
                                          ("https://localhost:3000;https://poc-fremd.invalid", "poc-fremd.invalid"),
                                          ("http://poc-fremd.invalid,http://app:3000", "poc-fremd.invalid"),
-                                         ("http://app:3000,poc-fremd.invalid@x.invalid", "x.invalid")])
+                                         ("http://app:3000,poc-fremd.invalid@x.invalid", "x.invalid"),
+                                         # Review R2-3: ein Listenelement ohne Schema ist für die Netzregel kein Host; dann gilt der Wert als Ganzes
+                                         ("http://app,poc-fremd.invalid", "app,poc-fremd.invalid"),
+                                         ("http://app,poc-fremd.invalid:80", "app,poc-fremd.invalid"),
+                                         ("http://app;poc-fremd.invalid", "app;poc-fremd.invalid")])
 def test_env_regeln_url_liste_mit_fremdem_host_exit2_review_r1_8(umg, tmp_path, liste, host):
     vorbereitet(umg, tmp_path)
     r = starten(umg, "--env", f"CORS_ORIGINS={liste}")

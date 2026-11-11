@@ -1116,15 +1116,22 @@ def _starte(lauf: str, rolle: str, p: dict) -> int:
     return 0
 
 
+_URL_ANFANG_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://")
+
+
 def _fremde_hosts_env(wert: str) -> list[str]:
     """Nicht erlaubte Hosts in einem `--env`-Wert. Die Netzregel liest die Authority bis `/`, `?`, `#` oder Leerzeichen; in einer Liste
-    `https://app:3000,http://localhost:5173` wäre das `app:3000,http:`. Enthält ein gefundener „Host“ `,` oder `;` (das kommt in
-    keinem Host vor), wird jedes Listenelement für sich geprüft; die Bash-Prüfung (`netzregel.ist_poc_aufruf`) bleibt unberührt."""
+    `https://app:3000,http://localhost:5173` wäre das `app:3000,http:`. Enthält ein gefundener „Host“ `,` oder `;` (das kommt in keinem Host
+    vor) und beginnt jedes Listenelement mit einem URL-Schema, wird jedes Element für sich geprüft. Fehlt einem Element das Schema
+    (`http://app,evil.com`), bleibt es beim Ergebnis für den ganzen Wert: Die Netzregel sähe `evil.com` allein nicht als Host.
+    Die Bash-Prüfung (`netzregel.ist_poc_aufruf`) bleibt unberührt."""
     fremd = netzregel.verstoesse_poc(wert)
     if any("," in h or ";" in h for h in fremd):
-        fremd = [h for h in fremd if "," not in h and ";" not in h]
-        for teil in re.split(r"[,;]", wert):
-            fremd += [h for h in netzregel.verstoesse_poc(teil) if h not in fremd]
+        teile = [t.strip() for t in re.split(r"[,;]", wert)]
+        if all(_URL_ANFANG_RE.match(t) for t in teile if t):
+            fremd = []
+            for teil in teile:
+                fremd += [h for h in netzregel.verstoesse_poc(teil) if h not in fremd]
     return fremd
 
 
