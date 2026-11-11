@@ -192,20 +192,196 @@ def _pruefen(daten: object) -> None:
     raise Abbruch(2, "inhalt", _kappen(zeilen))
 
 
-# ------------------------------------------------------------------------------------ Markdown (Platzhalter, 2b baut ihn aus)
+# ------------------------------------------------------------------------------------ Markdown
+
+KUNDENSTUFEN = ("Kritisch", "Hoch", "Mittel", "Niedrig")
+GITLEAKS_TITEL = "Zugangsschlüssel in der Versionsgeschichte"       # R2-K-9: statt `titel` im Kundenbericht
+MAX_TITEL = 120               # R1-W11: länger wird auf 119 Zeichen plus „…“ gekürzt
+NAME_FALLBACK = "Projekt"
+
+_HINWEIS_NAME = {
+    "ordner": "Hinweis: Es wurde kein Projektname angegeben; verwendet wird der Name des Repository-Ordners.",
+    "repo": "Hinweis: Es wurde kein Projektname angegeben; verwendet wird der Name des Repositorys.",
+}
+
+# Nachweis je Herkunft (R1-W6)
+_NACHWEIS_WERKZEUG = {
+    "osv-scanner": "aus der Abhängigkeitsliste mit bekannten Sicherheitslücken abgeglichen",
+    "gitleaks": "Zugangsschlüssel in der Versionsgeschichte gefunden (Wert nicht wiedergegeben)",
+    "lieferkette": "aus der Build- und Installationskonfiguration abgeleitet",
+}
+_NACHWEIS_NACHGESTELLT = "im Test nachgestellt"
+_NACHWEIS_ANNAHME = "im Test nachgestellt unter der Annahme, dass das KI-Modell einer eingeschleusten Anweisung folgt"
+_NACHWEIS_ABGELEITET = "aus dem Quellcode abgeleitet"
+
+# Management-Zusammenfassung: je Stufe Adjektiv, Auswirkung (nur bei `bestätigt`, enthält „ausnutzbar“) und die Empfehlung (R1-K11, K13).
+# Plural der Auswirkung steht in der zweiten Form. „ausnutzbar“ steht nie in einem Satz zu `unbestätigt`.
+_STUFE_TEXT = {
+    "Kritisch": ("kritische", ("die ohne Anmeldung oder über Mandantengrenzen hinweg ausnutzbar ist",
+                               "die ohne Anmeldung oder über Mandantengrenzen hinweg ausnutzbar sind"),
+                 "Lassen Sie die betroffenen Stellen umgehend beheben.",
+                 "Prüfen Sie die betroffenen Stellen und lassen Sie bestätigte Schwachstellen umgehend beheben."),
+    "Hoch": ("hohe", ("die ausnutzbar ist und erheblichen Schaden verursachen kann", "die ausnutzbar sind und erheblichen Schaden verursachen können"),
+             "Wir empfehlen, die betroffenen Stellen vor dem nächsten Release zu beheben.",
+             "Wir empfehlen, die betroffenen Stellen vor dem nächsten Release zu prüfen und bei Bestätigung zu beheben."),
+    "Mittel": ("mittlere", ("die ausnutzbar ist, deren Auswirkung aber begrenzt bleibt", "die ausnutzbar sind, deren Auswirkung aber begrenzt bleibt"),
+               "Wir empfehlen, die betroffenen Stellen zeitnah einzuplanen und zu beheben.",
+               "Wir empfehlen, die betroffenen Stellen zeitnah zu prüfen und bei Bestätigung zu beheben."),
+    "Niedrig": ("niedrige", ("die ausnutzbar ist, deren Auswirkung aber gering ist", "die ausnutzbar sind, deren Auswirkung aber gering ist"),
+                "Wir empfehlen, die betroffenen Stellen bei nächster Gelegenheit zu beheben.",
+                "Wir empfehlen, die betroffenen Stellen bei nächster Gelegenheit zu prüfen und bei Bestätigung zu beheben."),
+}
+_KEINE_SCHWACHSTELLEN = "In der geprüften Version wurden keine ausnutzbaren Schwachstellen gefunden."
+
+# Eingeschränkte Prüfung: abschließende Tabelle aus Spec R2-W-5 (Teilstring in `hinweise`, ohne Beachtung der Schreibweise -> Kundentext).
+# „nicht geschwärzt“ entfällt (R2-K-12). Jeder Text erscheint höchstens einmal, in der Reihenfolge der Tabelle.
+_EINGESCHRAENKT = (
+    (("gitleaks fehlt",), "Suche nach Zugangsschlüsseln"),
+    (("osv-scanner fehlt", "abhaengigkeiten fehlgeschlagen"), "Abgleich der Abhängigkeiten"),
+    (("lieferkette fehlgeschlagen",), "Prüfung der Build-Konfiguration"),
+    (("docker-fehlt", "build-fehler", "build-timeout", "start-fehler", "lockfile-fehlt", "lockfile-fremde-quelle", "nicht-npm"), "Nachweis im Test"),
+    (("zeitbudget",), "vollständige Laufzeit einzelner Prüfungen"),
+    (("ki.py erkennen fehlgeschlagen", "modell-mock nicht möglich"), "Prüfung der KI-Funktionen"),
+)
+
+_GRENZEN = (
+    "Geprüft wurde der oben genannte Commit.",
+    "Methode: Code-Analyse durch KI-Agenten; Nachweise entstanden nur in einer isolierten Testumgebung ohne Zugriff auf Produktivsysteme.",
+    "Es besteht keine Garantie auf Vollständigkeit.",
+    "Der technische Bericht mit Details liegt Manibase vor.",
+)
+_FUSS = "Manibase · vertraulich"
+
+
+def _text(wert: object) -> str | None:
+    return wert if isinstance(wert, str) and wert.strip() else None
+
+
+def _name_und_hinweis(daten: dict) -> tuple[str, str | None]:
+    """Name für Kopf und Titel in der Rangfolge `projekt`, `ordner`, `repo` (R1-W10) und der passende Hinweis."""
+    if name := _text(daten.get("projekt")):
+        return name, None
+    for feld in ("ordner", "repo"):
+        if name := _text(daten.get(feld)):
+            return name, _HINWEIS_NAME[feld]
+    return NAME_FALLBACK, _HINWEIS_NAME["repo"]
+
 
 def _name(daten: dict) -> str:
-    for feld in ("projekt", "ordner", "repo"):
-        if isinstance(daten.get(feld), str) and daten[feld].strip():
-            return daten[feld]
-    return "Projekt"
+    return _name_und_hinweis(daten)[0]
+
+
+def pagetitle(daten: dict) -> str:
+    """Titel des PDF-Dokuments (für pandoc `--metadata pagetitle=…`): unescaped, pandoc escapt selbst (R2-K-7 der Plan-Nachträge)."""
+    return f"Manibase · Sicherheitsprüfung {_name(daten)}"
+
+
+def _datum(wert: object) -> str:
+    """`YYYY-MM-DD` -> `TT.MM.JJJJ`; alles andere unverändert (escaped)."""
+    if isinstance(wert, str) and (m := re.fullmatch(r"([0-9]{4})-([0-9]{2})-([0-9]{2})", wert)):
+        return f"{m.group(3)}.{m.group(2)}.{m.group(1)}"
+    return escape(str(wert))
+
+
+def _kundenstufe(b: dict) -> str:
+    if b.get("stufe") == "P1":
+        return "Kritisch" if (b.get("ohne_anmeldung") is True or b.get("mandantenuebergreifend") is True) else "Hoch"
+    return "Mittel" if b.get("stufe") == "P2" else "Niedrig"
+
+
+def _status(b: dict) -> str:
+    return unicodedata.normalize("NFC", b["status"])
+
+
+def _titel(b: dict) -> str:
+    if b.get("werkzeug") == "gitleaks":
+        return GITLEAKS_TITEL
+    titel = b["titel"]
+    return titel if len(titel) <= MAX_TITEL else titel[:MAX_TITEL - 1] + "…"
+
+
+def _nachweis(b: dict) -> str:
+    if b.get("werkzeug") in _NACHWEIS_WERKZEUG:
+        return _NACHWEIS_WERKZEUG[b["werkzeug"]]
+    if _status(b) == "bestätigt":
+        return _NACHWEIS_ANNAHME if b.get("annahme_modell") is True else _NACHWEIS_NACHGESTELLT
+    return _NACHWEIS_ABGELEITET
+
+
+def _eingeschraenkt(daten: dict) -> list[str]:
+    """Kundentexte der zutreffenden Einträge: zuerst der Teilpfad, dann die Tabelle (jeder Text höchstens einmal)."""
+    texte: list[str] = []
+    if teilpfad := _text(daten.get("teilpfad")):
+        texte.append(f"nur der Teilbereich {escape(teilpfad)}")
+    hinweise = [h.lower() for h in daten.get("hinweise", []) if isinstance(h, str)] if isinstance(daten.get("hinweise"), list) else []
+    for muster, text in _EINGESCHRAENKT:
+        if text not in texte and any(m in h for h in hinweise for m in muster):
+            texte.append(text)
+    return texte
+
+
+def _eingeschraenkt_satz(texte: list[str]) -> str:
+    return f"Die Prüfung war eingeschränkt ({', '.join(texte)}); das Ergebnis ist deshalb nicht vollständig."
+
+
+def _zusammenfassung(zaehler: dict[tuple[str, str], int]) -> list[str]:
+    """Tabelle der Anzahlen und je Stufe ein Absatz: ein Satz je Status mit Anzahl > 0, danach die Empfehlung."""
+    z = ["| Kundenstufe | Anzahl |", "|---|---|"]
+    z += [f"| {st} | {zaehler.get((st, 'bestätigt'), 0) + zaehler.get((st, 'unbestätigt'), 0)} |" for st in KUNDENSTUFEN]
+    for st in KUNDENSTUFEN:
+        adjektiv, (auswirkung_sg, auswirkung_pl), empfehlung_best, empfehlung_unbest = _STUFE_TEXT[st]
+        n_best, n_unbest = zaehler.get((st, "bestätigt"), 0), zaehler.get((st, "unbestätigt"), 0)
+        saetze = []
+        if n_best:
+            saetze.append(f"Es besteht 1 {adjektiv} Schwachstelle, {auswirkung_sg}." if n_best == 1
+                          else f"Es bestehen {n_best} {adjektiv} Schwachstellen, {auswirkung_pl}.")
+        if n_unbest:
+            saetze.append(f"Es besteht 1 mögliche Schwachstelle der Stufe {st}, die im Test nicht nachgestellt werden konnte." if n_unbest == 1
+                          else f"Es bestehen {n_unbest} mögliche Schwachstellen der Stufe {st}, die im Test nicht nachgestellt werden konnten.")
+        if saetze:
+            z += ["", " ".join(saetze + [empfehlung_best if n_best else empfehlung_unbest])]
+    return z
 
 
 def markdown_erzeugen(daten: dict) -> str:
-    """Platzhalter in 2a: Kopf und Befundliste mit escapten Datenfeldern."""
-    z = [f"# Manibase · Sicherheitsprüfung {escape(_name(daten))}", ""]
-    for b in sorted((b for b in daten["befunde"] if _gelistet(b)), key=lambda b: int(b["id"][2:])):
-        z += [f"### {b['id']} · {escape(b['titel'])}", ""]
+    """Kundenbericht als Markdown (feste Reihenfolge: Kopf, Management-Zusammenfassung, Befunde, Umfang und Grenzen, Fuß).
+
+    Erwartet ein geprüftes Dokument. Jeder Wert aus den Daten geht durch `escape()` und steht hinter einem festen Präfix,
+    nie am Zeilenanfang. Die festen Texte bestehen `bericht.text_verstoesse` (Test)."""
+    name, hinweis = _name_und_hinweis(daten)
+    gelistet = sorted((b for b in daten["befunde"] if _gelistet(b)), key=lambda b: (KUNDENSTUFEN.index(_kundenstufe(b)), int(b["id"][2:])))
+    zaehler: dict[tuple[str, str], int] = {}
+    for b in gelistet:
+        schluessel = (_kundenstufe(b), _status(b))
+        zaehler[schluessel] = zaehler.get(schluessel, 0) + 1
+    eingeschraenkt = _eingeschraenkt(daten)
+
+    z = [f"# Manibase · Sicherheitsprüfung {escape(name)}", "", f"**Datum:** {_datum(daten.get('datum'))}", "",
+         f"**Geprüfter Commit:** {escape(str(daten.get('sha'))[:7])}"]
+    if teilpfad := _text(daten.get("teilpfad")):
+        z += ["", f"**Geprüfter Bereich:** nur der Teilbereich {escape(teilpfad)}"]
+    if hinweis:
+        z += ["", hinweis]
+
+    z += ["", "## Management-Zusammenfassung", ""] + _zusammenfassung(zaehler)
+    if not gelistet:
+        z += ["", _eingeschraenkt_satz(eingeschraenkt) if eingeschraenkt else _KEINE_SCHWACHSTELLEN]
+
+    z += ["", "## Befunde"]
+    if not gelistet:
+        z += ["", "In diesem Bericht sind keine Befunde aufgeführt."]
+    for b in gelistet:
+        datei = _text(b.get("datei"))
+        z += ["", f"### {b['id']} · {_kundenstufe(b)} · {escape(_titel(b))}",
+              "", f"**Risiko:** {escape(str(b.get('zusammenfassung', '')))}",
+              "", f"**Maßnahme:** {escape(str(b.get('massnahme', '')))}",
+              "", f"**Betroffene Datei:** {escape(datei) if datei else 'gesamtes Projekt'}",
+              "", f"**Nachweis:** {_nachweis(b)}"]
+
+    z += ["", "## Umfang und Grenzen", ""] + [f"- {satz}" for satz in _GRENZEN]
+    if eingeschraenkt:
+        z += ["", _eingeschraenkt_satz(eingeschraenkt)]
+    z += ["", "---", "", _FUSS]
     return "\n".join(z) + "\n"
 
 
@@ -229,7 +405,7 @@ def _erstellen(pfad: str, ende: float) -> tuple[int, str | None, list[str]]:
         _ablegen(md, markdown_erzeugen(daten))
     except Abbruch as a:
         return a.code, a.kategorie, a.zeilen
-    code, kategorie, meldungen = pdf_erstellen(md, pdf, f"Manibase · Sicherheitsprüfung {_name(daten)}", ende)
+    code, kategorie, meldungen = pdf_erstellen(md, pdf, pagetitle(daten), ende)
     zeilen = [f"kunde-md: {_t(md, 4096)}"]
     if code == 0:
         return 0, None, zeilen + [f"kunde-pdf: {_t(pdf, 4096)}"]

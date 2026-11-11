@@ -1,4 +1,4 @@
-"""Tests für kundenbericht.py (TF4, Teil 2a: CLI, Exit-Codes, Eingabe, Prüfung, Ablage, PDF-Stub).
+"""Tests für kundenbericht.py (TF4, Teil 2a: CLI, Exit-Codes, Eingabe, Prüfung, Ablage, PDF-Stub; Teil 2b: Inhalt des Markdowns, Escaping).
 
 Aufruf: python3 -m pytest security-audit/scripts/test_kundenbericht.py -q
 Alle Berichte sind synthetisch und liegen in tmp_path. Der Helfer `lauf` setzt standardmäßig SECURITY_AUDIT_OHNE=pandoc,weasyprint:
@@ -462,3 +462,427 @@ def test_escape_k1_menge():
     for zeichen in "\\`*_{}[]<>!$^~@&|#":
         assert kundenbericht.escape(zeichen) == "\\" + zeichen
     assert kundenbericht.escape("Fremde Bestellungen") == "Fremde Bestellungen"
+
+
+# ------------------------------------------------------------------------------------ 2b: Inhalt des Markdowns
+
+def md_von(*befunde, **kopf):
+    return kundenbericht.markdown_erzeugen(bericht_daten(*befunde, **kopf))
+
+
+def md_zeilen(text):
+    return text.splitlines()
+
+
+def abschnitt(text, kopf):
+    """Zeilen zwischen der Überschrift `kopf` und der nächsten `## `-Überschrift."""
+    z = md_zeilen(text)
+    i = z.index(kopf)
+    j = next((k for k in range(i + 1, len(z)) if z[k].startswith("## ")), len(z))
+    return z[i + 1:j]
+
+
+def tabelle(text):
+    return {m.group(1): int(m.group(2)) for m in re.finditer(r"^\| (Kritisch|Hoch|Mittel|Niedrig) \| (\d+) \|$", text, re.M)}
+
+
+# --- TF4-D1: Kopf
+
+def test_kopf_mit_projekt():
+    md = md_von(befund(), datum="2026-11-03", sha="1234567" + "a" * 33)
+    z = md_zeilen(md)
+    assert z[0] == "# Manibase · Sicherheitsprüfung Portal"
+    kopf = "\n".join(z[:abschnitt_ende(md)])
+    assert "03.11.2026" in kopf and "1234567" in kopf and "1234567a" not in kopf
+    assert "kein Projektname" not in md
+    assert "Teilbereich" not in kopf
+
+
+def abschnitt_ende(text):
+    z = md_zeilen(text)
+    return next(i for i, x in enumerate(z) if x.startswith("## "))
+
+
+def test_kopf_ohne_projekt_ordner_hinweis():
+    md = md_von(befund(), projekt=None, ordner="kundenordner", repo="repo-name")
+    assert md.startswith("# Manibase · Sicherheitsprüfung kundenordner\n")
+    assert "Hinweis: Es wurde kein Projektname angegeben; verwendet wird der Name des Repository-Ordners." in md
+    assert "Name des Repositorys" not in md
+
+
+def test_kopf_ohne_ordner_repo_hinweis():
+    for kopf in ({"projekt": None}, {"projekt": None, "ordner": None}):
+        md = md_von(befund(), repo="repo-name", **kopf)
+        assert md.startswith("# Manibase · Sicherheitsprüfung repo-name\n")
+        assert "Hinweis: Es wurde kein Projektname angegeben; verwendet wird der Name des Repositorys." in md
+        assert "Repository-Ordners" not in md
+
+
+def test_kopf_name_und_teilpfad_escaped():
+    md = md_von(befund(), projekt="Mein_Portal [neu]", teilpfad="apps/web_ui")
+    assert md.startswith("# Manibase · Sicherheitsprüfung Mein\\_Portal \\[neu\\]\n")
+    kopf = md_zeilen(md)[:abschnitt_ende(md)]
+    assert any("nur der Teilbereich apps/web\\_ui" in x for x in kopf), kopf
+
+
+def test_pagetitle_unescaped():
+    assert kundenbericht.pagetitle(bericht_daten(projekt="Mein_Portal [x]")) == "Manibase · Sicherheitsprüfung Mein_Portal [x]"
+    assert kundenbericht.pagetitle(bericht_daten(projekt=None, ordner=None, repo="r_1")) == "Manibase · Sicherheitsprüfung r_1"
+    assert kundenbericht.pagetitle(bericht_daten(projekt=None, ordner="o", repo="r")) == "Manibase · Sicherheitsprüfung o"
+
+
+# --- TF4-D2: Stufen und Filter
+
+def stufe_von(md, nr=1):
+    m = re.search(rf"^### S-{nr} · (Kritisch|Hoch|Mittel|Niedrig) · ", md, re.M)
+    assert m, md
+    return m.group(1)
+
+
+def test_stufe_p1_ohne_anmeldung_kritisch():
+    assert stufe_von(md_von(befund(ohne_anmeldung=True, mandantenuebergreifend=False))) == "Kritisch"
+
+
+def test_stufe_p1_mandantenuebergreifend_kritisch():
+    assert stufe_von(md_von(befund(ohne_anmeldung=False, mandantenuebergreifend=True))) == "Kritisch"
+
+
+def test_stufe_p1_hoch():
+    assert stufe_von(md_von(befund(ohne_anmeldung=False, mandantenuebergreifend=False))) == "Hoch"
+
+
+def test_stufe_p2_mittel():
+    assert stufe_von(md_von(befund(stufe="P2", ohne_anmeldung=True, mandantenuebergreifend=True))) == "Mittel"
+
+
+def test_stufe_p3_niedrig():
+    assert stufe_von(md_von(befund(stufe="P3", ohne_anmeldung=True, mandantenuebergreifend=True))) == "Niedrig"
+
+
+def test_stufe_status_nfc_normalisiert():
+    import unicodedata
+    zerlegt = unicodedata.normalize("NFD", "unbestätigt")
+    md = md_von(befund(status=zerlegt, poc=None, code_pfad=["src/a.ts:1", "src/b.ts:2"]))
+    assert "### S-1 · " in md and "aus dem Quellcode abgeleitet" in md
+
+
+def test_verworfen_und_verdacht_fehlen():
+    md = md_von(befund(1, titel="Gelistet eins"),
+                befund(2, status="verworfen", titel="Verworfener Titel", grund="Kein Fehler"),
+                befund(3, status="verdacht", titel="Verdacht Titel"),
+                befund(4, status="unbestätigt", titel="Gelistet vier", poc=None, code_pfad=["src/a.ts:1", "src/b.ts:2"]))
+    assert "Gelistet eins" in md and "Gelistet vier" in md
+    assert "Verworfener Titel" not in md and "Verdacht Titel" not in md and "S-2" not in md and "S-3" not in md
+    assert tabelle(md) == {"Kritisch": 2, "Hoch": 0, "Mittel": 0, "Niedrig": 0}
+
+
+def test_sortierung_stufe_dann_id_numerisch():
+    md = md_von(befund(10, titel="Zehn"), befund(2, titel="Zwei"), befund(3, stufe="P3", titel="Drei"),
+                befund(4, stufe="P2", titel="Vier"), befund(5, ohne_anmeldung=False, mandantenuebergreifend=False, titel="Fünf"))
+    ids = re.findall(r"^### (S-\d+) · ", md, re.M)
+    assert ids == ["S-2", "S-10", "S-5", "S-4", "S-3"]
+
+
+# --- Nachweis, Titel, Datei
+
+def test_nachweis_je_herkunft():
+    def nachweis(**kw):
+        md = md_von(befund(**kw))
+        m = re.search(r"^\*\*Nachweis:\*\* (.+)$", md, re.M)
+        assert m, md
+        return m.group(1)
+
+    assert nachweis() == "im Test nachgestellt"
+    assert nachweis(annahme_modell=True) == "im Test nachgestellt unter der Annahme, dass das KI-Modell einer eingeschleusten Anweisung folgt"
+    assert nachweis(status="unbestätigt", poc=None, code_pfad=["src/a.ts:1", "src/b.ts:2"]) == "aus dem Quellcode abgeleitet"
+    assert nachweis(werkzeug="osv-scanner") == "aus der Abhängigkeitsliste mit bekannten Sicherheitslücken abgeglichen"
+    assert nachweis(werkzeug="gitleaks") == "Zugangsschlüssel in der Versionsgeschichte gefunden (Wert nicht wiedergegeben)"
+    assert nachweis(werkzeug="lieferkette") == "aus der Build- und Installationskonfiguration abgeleitet"
+
+
+def test_gitleaks_titel_fest():
+    md = md_von(befund(werkzeug="gitleaks", titel="Geheimer Schlüssel sk_live_abc im Commit"))
+    assert "### S-1 · Kritisch · Zugangsschlüssel in der Versionsgeschichte\n" in md
+    assert "sk\\_live" not in md and "Geheimer Schlüssel" not in md
+    md2 = md_von(befund(werkzeug="osv-scanner", titel="Bekannte Lücke in einem Paket"))
+    assert "· Bekannte Lücke in einem Paket\n" in md2
+
+
+def test_titel_gekuerzt():
+    lang = "x" * 130
+    md = md_von(befund(titel=lang))
+    assert f"### S-1 · Kritisch · {'x' * 119}…\n" in md and "x" * 120 not in md
+    genau = "y" * 120
+    assert f"· {genau}\n" in md_von(befund(titel=genau))
+    kurz = md_von(befund(titel="z" * 119 + "_" * 5))
+    assert "z" * 119 + "…\n" in kurz and "\\_" not in kurz, "Kürzung auf dem Rohwert, danach Escaping"
+
+
+def test_datei_null_gesamtes_projekt():
+    md = md_von(befund(datei=None, zeile=None, code_pfad=["a/b.ts:1", "c/d.ts:2"]))
+    assert "**Betroffene Datei:** gesamtes Projekt" in md_zeilen(md)
+    md2 = md_von(befund(datei="src/api/orders.ts"))
+    assert "**Betroffene Datei:** src/api/orders.ts" in md_zeilen(md2)
+    assert "orders.ts:" not in md2 and "11" not in re.search(r"\*\*Betroffene Datei:\*\* (.+)", md2).group(1)
+
+
+def test_befund_felder_in_fester_reihenfolge_ohne_exploit_details():
+    md = md_von(befund())
+    block = md[md.index("### S-1"):]
+    pos = [block.index(x) for x in ("**Risiko:** ", "**Maßnahme:** ", "**Betroffene Datei:** ", "**Nachweis:** ")]
+    assert pos == sorted(pos)
+    assert ZUSAMMENFASSUNG in block and MASSNAHME in block
+    for geheim in ("Bearer", "poc.py", "org_id", "/api/orders/9", "Erste Zeile", "Nutzer A liest", "Mandanten-Scope", "src/lib/fetch.ts"):
+        assert geheim not in md
+
+
+# --- Zusammenfassung
+
+def zus(md):
+    return " ".join(abschnitt(md, "## Management-Zusammenfassung"))
+
+
+def test_zusammenfassung_singular_plural():
+    md1 = md_von(befund(1))
+    assert tabelle(md1) == {"Kritisch": 1, "Hoch": 0, "Mittel": 0, "Niedrig": 0}
+    assert "Es besteht 1 kritische Schwachstelle" in zus(md1) and "bestehen" not in zus(md1)
+    md3 = md_von(befund(1), befund(2), befund(3, stufe="P2"), befund(4, stufe="P2"), befund(5, stufe="P3"),
+                 befund(6, stufe="P3"), befund(7, stufe="P3"), befund(8, ohne_anmeldung=False, mandantenuebergreifend=False),
+                 befund(9, ohne_anmeldung=False, mandantenuebergreifend=False))
+    assert tabelle(md3) == {"Kritisch": 2, "Hoch": 2, "Mittel": 2, "Niedrig": 3}
+    z = zus(md3)
+    assert "Es bestehen 2 kritische Schwachstellen" in z and "Es bestehen 2 hohe Schwachstellen" in z
+    assert "Es bestehen 2 mittlere Schwachstellen" in z and "Es bestehen 3 niedrige Schwachstellen" in z
+    z1 = zus(md_von(befund(1, stufe="P3")))
+    assert "Es besteht 1 niedrige Schwachstelle" in z1
+    assert "Es besteht 1 hohe Schwachstelle" in zus(md_von(befund(1, ohne_anmeldung=False, mandantenuebergreifend=False)))
+    assert "Es besteht 1 mittlere Schwachstelle" in zus(md_von(befund(1, stufe="P2")))
+
+
+def test_zusammenfassung_kritisch_umgehend_beheben():
+    assert "umgehend beheben" in zus(md_von(befund(1)))
+    assert "umgehend beheben" in zus(md_von(befund(1, status="unbestätigt", poc=None, code_pfad=["a/b.ts:1", "c/d.ts:2"])))
+    assert "umgehend" not in zus(md_von(befund(1, stufe="P2")))
+
+
+def test_zusammenfassung_ausnutzbar_nur_bestaetigt():
+    unb = dict(status="unbestätigt", poc=None, code_pfad=["src/a.ts:1", "src/b.ts:2"])
+    z = zus(md_von(befund(1, **unb), befund(2, stufe="P2", **unb)))
+    assert "ausnutzbar" not in z
+    assert "1 mögliche Schwachstelle der Stufe Kritisch" in z and "1 mögliche Schwachstelle der Stufe Mittel" in z
+    z = zus(md_von(befund(1)))
+    assert "ausnutzbar" in z and "mögliche Schwachstelle" not in z
+    for stufe in ("P2", "P3"):
+        assert "ausnutzbar" in zus(md_von(befund(1, stufe=stufe)))
+    # gemischter Status in einer Stufe: ein Satz je Status (R1-K11)
+    z = zus(md_von(befund(1), befund(2), befund(3, **unb)))
+    assert "Es bestehen 2 kritische Schwachstellen" in z and "ausnutzbar" in z
+    assert "Es besteht 1 mögliche Schwachstelle der Stufe Kritisch" in z
+    assert z.count("umgehend beheben") == 1
+
+
+def test_zusammenfassung_ohne_befunde_entwarnung():
+    md = md_von(befund(1, status="verworfen", grund="Kein Fehler"))
+    assert tabelle(md) == {"Kritisch": 0, "Hoch": 0, "Mittel": 0, "Niedrig": 0}
+    assert "In der geprüften Version wurden keine ausnutzbaren Schwachstellen gefunden." in zus(md)
+    assert "Die Prüfung war eingeschränkt" not in md
+
+
+# --- Eingeschränkte Prüfung
+
+EINGESCHRAENKT = [
+    ("gitleaks fehlt (Standardausnahmen)", "Suche nach Zugangsschlüsseln"),
+    ("osv-scanner fehlt", "Abgleich der Abhängigkeiten"),
+    ("abhaengigkeiten fehlgeschlagen (Exit 2)", "Abgleich der Abhängigkeiten"),
+    ("lieferkette fehlgeschlagen (Exit 1)", "Prüfung der Build-Konfiguration"),
+    ("docker-fehlt", "Nachweis im Test"), ("build-fehler", "Nachweis im Test"), ("build-timeout", "Nachweis im Test"),
+    ("start-fehler", "Nachweis im Test"), ("lockfile-fehlt", "Nachweis im Test"), ("lockfile-fremde-quelle", "Nachweis im Test"),
+    ("nicht-npm", "Nachweis im Test"),
+    ("Zeitbudget von bericht.py kontext erschöpft", "vollständige Laufzeit einzelner Prüfungen"),
+    ("ki.py erkennen fehlgeschlagen (Exit 1)", "Prüfung der KI-Funktionen"),
+    ("Modell-Mock nicht möglich: kein Modell", "Prüfung der KI-Funktionen"),
+]
+
+
+@pytest.mark.parametrize("hinweis,text", EINGESCHRAENKT)
+def test_eingeschraenkt_tabelle(hinweis, text):
+    md = md_von(befund(), hinweise=[hinweis])
+    satz = [x for x in abschnitt(md, "## Umfang und Grenzen") if x.startswith("Die Prüfung war eingeschränkt (")]
+    assert satz == [f"Die Prüfung war eingeschränkt ({text}); das Ergebnis ist deshalb nicht vollständig."]
+
+
+def test_eingeschraenkt_mehrere_hinweise():
+    md = md_von(befund(), hinweise=["KI-Prüfpunkte: angewendet (sdk)", "gitleaks fehlt (nicht im PATH)", "osv-scanner fehlt", "docker-fehlt",
+                                    "build-fehler", "Zeitbudget erschöpft", "ki.py erkennen fehlgeschlagen (Exit 1)", "Modell-Mock nicht möglich: x",
+                                    "gitleaks-Standardausnahmen nicht geprüft: abc", "native-module"], teilpfad="apps/web")
+    satz = next(x for x in abschnitt(md, "## Umfang und Grenzen") if x.startswith("Die Prüfung war eingeschränkt ("))
+    for text in ("nur der Teilbereich apps/web", "Suche nach Zugangsschlüsseln", "Abgleich der Abhängigkeiten", "Nachweis im Test",
+                 "vollständige Laufzeit einzelner Prüfungen", "Prüfung der KI-Funktionen"):
+        assert satz.count(text) == 1, (text, satz)
+    assert "Prüfung der Build-Konfiguration" not in satz
+    assert satz.endswith("; das Ergebnis ist deshalb nicht vollständig.")
+    # nichts zutreffend: kein Satz (auch kein Treffer auf bloße Erwähnung ähnlicher Hinweise)
+    ohne = md_von(befund(), hinweise=["KI-Prüfpunkte: nicht anwendbar (kein LLM- oder Agenten-SDK in package.json)", "native-module"])
+    assert "Die Prüfung war eingeschränkt" not in ohne
+
+
+def test_eingeschraenkt_keine_befunde_kein_entwarnungssatz():
+    md = md_von(befund(1, status="verworfen", grund="Kein Fehler"), hinweise=["gitleaks fehlt (nicht im PATH)"])
+    z = zus(md)
+    assert "keine ausnutzbaren Schwachstellen" not in md and "keine Schwachstellen" not in md
+    assert "Die Prüfung war eingeschränkt (Suche nach Zugangsschlüsseln); das Ergebnis ist deshalb nicht vollständig." in z
+    assert "Die Prüfung war eingeschränkt" in "\n".join(abschnitt(md, "## Umfang und Grenzen"))
+    assert tabelle(md) == {"Kritisch": 0, "Hoch": 0, "Mittel": 0, "Niedrig": 0}
+
+
+def test_teilpfad_eingeschraenkt():
+    md = md_von(befund(1, status="verworfen", grund="Kein Fehler"), teilpfad="apps/web")
+    assert "In der geprüften Version wurden keine ausnutzbaren Schwachstellen gefunden." not in md
+    assert "Die Prüfung war eingeschränkt (nur der Teilbereich apps/web); das Ergebnis ist deshalb nicht vollständig." in md
+    kopf = md_zeilen(md)[:abschnitt_ende(md)]
+    assert any("nur der Teilbereich apps/web" in x for x in kopf)
+    mit = md_von(befund(), teilpfad="apps/web")
+    assert "Die Prüfung war eingeschränkt (nur der Teilbereich apps/web)" in "\n".join(abschnitt(mit, "## Umfang und Grenzen"))
+    assert "Die Prüfung war eingeschränkt" not in zus(mit)
+
+
+# --- Aufbau
+
+def test_abschnittsfolge_und_fuss():
+    md = md_von(befund(1), befund(2, stufe="P3"))
+    ueberschriften = [x for x in md_zeilen(md) if x.startswith("#") and not x.startswith("###")]
+    assert ueberschriften == ["# Manibase · Sicherheitsprüfung Portal", "## Management-Zusammenfassung", "## Befunde", "## Umfang und Grenzen"]
+    assert md_zeilen(md).index("## Befunde") < md.splitlines().index("### S-1 · Kritisch · Fremde Bestellungen einsehbar") < md_zeilen(md).index("## Umfang und Grenzen")
+    assert md.endswith("\n\nManibase · vertraulich\n") and md.count("Manibase · vertraulich") == 1
+    grenzen = "\n".join(abschnitt(md, "## Umfang und Grenzen"))
+    for satz in ("Geprüft wurde der oben genannte Commit.", "Code-Analyse durch KI-Agenten", "isolierten Testumgebung ohne Zugriff auf Produktivsysteme",
+                 "keine Garantie auf Vollständigkeit", "Der technische Bericht mit Details liegt Manibase vor."):
+        assert satz in grenzen, satz
+
+
+def test_ohne_befunde_befunde_abschnitt_bleibt():
+    md = md_von(befund(1, status="verdacht"))
+    assert "## Befunde" in md and "### " not in md
+
+
+# --- Escaping (nur escape() und die Ausgabe; kein pandoc)
+
+SONDER = ("Titel [Klick](http://x.example/a)", "![Bild](http://x.example/b.png)", "<img src=x onerror=1> <b>fett</b>",
+          "Titel {.klasse width=10}", "[Text]{.klasse}", "Titel ##", "# Überschrift", "*kursiv* _kursiv_ `code` ~~weg~~ $x$ ^hoch^ @quelle &amp; a|b")
+
+
+def test_escaping_link():
+    e = kundenbericht.escape("Titel [Klick](http://x.example/a)")
+    assert e == "Titel \\[Klick\\](http://x.example/a)"
+    assert not re.search(r"(?<!\\)\[|(?<!\\)\]", e)
+
+
+def test_escaping_bild():
+    e = kundenbericht.escape("![Bild](http://x.example/b.png)")
+    assert e.startswith("\\!\\[") and not re.search(r"(?<!\\)[!\[\]]", e)
+
+
+def test_escaping_html():
+    e = kundenbericht.escape("<img src=x onerror=1> <b>fett</b>")
+    assert not re.search(r"(?<!\\)[<>]", e) and e.startswith("\\<img")
+
+
+def test_escaping_attribut_klammer():
+    e = kundenbericht.escape("Titel {.klasse width=10}")
+    assert not re.search(r"(?<!\\)[{}]", e)
+
+
+def test_escaping_span():
+    e = kundenbericht.escape("[Text]{.klasse}")
+    assert e == "\\[Text\\]\\{.klasse\\}"
+
+
+def test_escaping_atx_schluss():
+    assert kundenbericht.escape("Titel ##") == "Titel \\#\\#"
+    assert kundenbericht.escape("# Überschrift").startswith("\\#")
+
+
+def test_escaping_in_ausgabe_und_daten_nie_am_zeilenanfang():
+    daten = bericht_daten(befund(titel="Tit [a](b) {.c} <i> #", zusammenfassung="ZQX " + "[Link](http://x.example) " * 3 + "ende ende ende ende",
+                                 massnahme="Wir empfehlen, ZQX _fett_ und `code` zu entfernen.", datei="src/a_b/c*.ts"),
+                          projekt="ZQX_Projekt [x]", teilpfad="ZQX/dir_1")
+    md = kundenbericht.markdown_erzeugen(daten)
+    assert "### S-1 · Kritisch · Tit \\[a\\](b) \\{.c\\} \\<i\\> \\#\n" in md
+    assert "**Betroffene Datei:** src/a\\_b/c\\*.ts" in md_zeilen(md)
+    assert md.startswith("# Manibase · Sicherheitsprüfung ZQX\\_Projekt \\[x\\]\n")
+    for zeile in md_zeilen(md):
+        assert not zeile.startswith("ZQX"), zeile
+        assert not zeile.startswith(("[", "!", "<", "{", ">", "`", "~", "ZQX")), zeile
+    assert not re.search(r"(?<![\\])\[[^\]]*\]\(", md.replace("\\[", "")), "kein Link aus Daten"
+    assert "<" not in md.replace("\\<", "") and ">" not in md.replace("\\>", "")
+
+
+# --- Feste Texte
+
+NEUTRAL = "Platzhalter"
+
+
+def neutral_daten(n=2, **kopf):
+    """Berichte über alle Stufen, Singular und Plural, bestätigt und unbestätigt; Datenfelder sind neutrale Platzhalter."""
+    unb = dict(status="unbestätigt", poc=None, code_pfad=["src/a.ts:1", "src/b.ts:2"])
+    bef = []
+    nr = 0
+    for stufe, kritisch in (("P1", True), ("P1", False), ("P2", False), ("P3", False)):
+        for extra in ({}, unb):
+            for _ in range(n):
+                nr += 1
+                bef.append(befund(nr, stufe=stufe, ohne_anmeldung=kritisch, mandantenuebergreifend=False, titel=NEUTRAL,
+                                  zusammenfassung=NEUTRAL * 5, massnahme=NEUTRAL * 3, datei=NEUTRAL, **extra))
+    d = bericht_daten(*bef, projekt=NEUTRAL, hinweise=[h for h, _ in EINGESCHRAENKT], teilpfad=NEUTRAL)
+    d.update(kopf)
+    return d
+
+
+def feste_texte_faelle():
+    yield neutral_daten(1)
+    yield neutral_daten(2)
+    yield neutral_daten(befunde=[], hinweise=[], teilpfad=None)
+    yield neutral_daten(befunde=[], hinweise=[], teilpfad=NEUTRAL)
+    yield neutral_daten(befunde=[], hinweise=["gitleaks fehlt"], teilpfad=None)
+    yield neutral_daten(projekt=None, ordner=NEUTRAL, hinweise=[], teilpfad=None)
+    yield neutral_daten(projekt=None, ordner=None, hinweise=[], teilpfad=None)
+    for h, _ in EINGESCHRAENKT:
+        yield neutral_daten(hinweise=[h], teilpfad=None)
+    b = [befund(1, titel=NEUTRAL, zusammenfassung=NEUTRAL * 5, massnahme=NEUTRAL * 3, datei=None, werkzeug=w) for w in ("gitleaks", "osv-scanner", "lieferkette")]
+    for i, x in enumerate(b, 1):
+        x["id"] = f"S-{i}"
+    yield neutral_daten(befunde=b, hinweise=[], teilpfad=None)
+    yield neutral_daten(befunde=[befund(1, annahme_modell=True, titel=NEUTRAL, zusammenfassung=NEUTRAL * 5, massnahme=NEUTRAL * 3, datei=NEUTRAL)])
+
+
+def test_feste_texte_ohne_du_und_spuren():
+    anzahl = 0
+    for daten in feste_texte_faelle():
+        md = kundenbericht.markdown_erzeugen(daten)
+        anzahl += 1
+        assert bericht.text_verstoesse(md) == [], (anzahl, bericht.text_verstoesse(md))
+        for zeile in md_zeilen(md):
+            assert not re.search(r"\b(GET|POST|PUT|PATCH|DELETE)\s+/", zeile)
+    assert anzahl >= 20
+    # Bausteine einzeln: jede Zeile aus allen Fällen auch ohne Markdown-Zeichen geprüft
+    texte = {z for d in feste_texte_faelle() for z in md_zeilen(kundenbericht.markdown_erzeugen(d))}
+    assert any("Es bestehen 2 kritische Schwachstellen" in t for t in texte)
+    for t in texte:
+        assert bericht.text_verstoesse(t) == [], t
+
+
+def test_feste_texte_enthalten_keine_nachtraeglichen_datenwerte():
+    """Mit Platzhalter-Daten besteht jede Zeile entweder aus festem Text oder trägt den Platzhalter hinter einem festen Präfix."""
+    md = kundenbericht.markdown_erzeugen(neutral_daten())
+    for zeile in md_zeilen(md):
+        if NEUTRAL in zeile:
+            assert zeile.startswith(("# Manibase · Sicherheitsprüfung ", "### S-", "**Risiko:** ", "**Maßnahme:** ", "**Betroffene Datei:** ",
+                                     "**Geprüfter Bereich:** ", "Die Prüfung war eingeschränkt (", "**Geprüfter Bereich:** ")), zeile
+
+
+def test_erstellen_schreibt_neues_markdown(tmp_path):
+    pfad = schreibe(tmp_path / "out", bericht_daten(befund(1), befund(2, stufe="P3")), name=BASIS + ".json")
+    p = lauf(pfad)
+    assert p.returncode == 3, p.stdout + p.stderr
+    md = open(kunde_pfad(pfad, "md"), encoding="utf-8").read()
+    assert "## Management-Zusammenfassung" in md and "## Umfang und Grenzen" in md and md.endswith("Manibase · vertraulich\n")
