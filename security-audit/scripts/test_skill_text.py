@@ -24,6 +24,7 @@ BRIEFINGS = os.path.join(REFERENCES, "agenten-briefings.md")
 BERICHT_FORMAT = os.path.join(REFERENCES, "bericht-format.md")
 ERWARTUNG = os.path.join(SKILL_DIR, "evals", "expected", "fixture-web.json")
 # Geschwister-Skill (TF5): per realpath, damit auch ein Symlink ~/.claude/skills/security-audit den Pfad findet
+PR_REVIEW_LOOP_MD = os.path.join(os.path.dirname(os.path.realpath(SKILL_DIR)), "pr-review-loop", "SKILL.md")
 FIX_FINDINGS_MD = os.path.join(os.path.dirname(os.path.realpath(SKILL_DIR)), "fix-findings", "SKILL.md")
 
 sys.path.insert(0, HIER)
@@ -391,6 +392,78 @@ def test_audit_kopfzeile_vertrag():
     assert not re.fullmatch(muster, "PR #12 · Code · Runde 1/3 · geprüft auf abc1234")
     eingabe = "mergen\nbitte fixen:\n```\n" + kopf + "\n```"
     assert sum(1 for z in eingabe.split("\n") if re.fullmatch(muster, z.strip())) == 1
+
+
+@pytest.mark.parametrize("repo, sha", [
+    ("My_App.v2", "0123456"),
+    ("Web_App", "a" * 64),
+    ("a", "b" * 40),
+    ("x.y-z_9", "0123456789abcdef"),
+], ids=["gross-punkt-unterstrich-sha7", "unterstrich-sha64", "ein-zeichen", "mischform"])
+def test_audit_kopfzeile_vertrag_schemaraender(repo, sha):
+    """Review R1-2: Die Regex deckt den ganzen Wertebereich des Schemas ab (repo [A-Za-z0-9._-]+, sha 7 bis 64 Hex), nicht nur die
+    Beispielzeile; eine Verengung (z. B. `[a-z-]+`, `{40}`) wird rot."""
+    daten = json.loads(json.dumps(_beispiel_json()))
+    daten["repo"], daten["sha"] = repo, sha
+    assert bericht.pruefe_schema(daten) == []
+    kopf = _bloecke(bericht.markdown(daten))[0][1].split("\n")[0]
+    assert kopf == f"Repo {repo} · Security-Audit · geprüft auf {sha}", kopf
+    assert re.fullmatch(_audit_muster(), kopf), (_audit_muster(), kopf)
+
+
+def _audit_erkennung() -> str:
+    text = _lies(FIX_FINDINGS_MD)
+    m = re.search(r"\*\*Erkennung:\*\*.*?(?=\n\s*<!-- audit-kopfzeile -->)", text, re.S)
+    assert m, "Erkennungsabsatz vor dem Marker nicht gefunden"
+    return m.group(0)
+
+
+def test_audit_erkennung_pr_kopfzeile_hat_vorrang():
+    """Review R1-5: Zitiert eine pr-review-loop-Liste die Audit-Kopfzeile in einem Befund, gewinnt der PR-Weg."""
+    erkennung = _audit_erkennung()
+    assert "Vorrang" in erkennung and "PR #[0-9]+ · " in erkennung
+    m = re.search(r"`(PR #\[0-9\]\+ · )`", erkennung)
+    assert m, "Vorrangmuster nicht im Erkennungsabsatz"
+    vorlage = [z for z in _lies(PR_REVIEW_LOOP_MD).split("\n") if z.startswith("PR #<n> · ")]
+    assert vorlage, "Kopfzeilen-Vorlage in pr-review-loop/SKILL.md nicht gefunden"
+    pr_kopf = vorlage[0].replace("<n>", "12")
+    assert re.match("^" + m.group(1), pr_kopf), (m.group(1), pr_kopf)
+    assert not re.match("^" + m.group(1), "Repo beispiel-shop · Security-Audit · geprüft auf abc1234")
+
+
+def test_fix_findings_audit_weg_zielt_gh_explizit_auf_origin():
+    """Review R1-1/R2-2: Ohne Argument löst gh das Repo über `gh repo set-default`/upstream auf, gepusht wird aber nach origin, und
+    zwar an dessen Push-URL (`remote.origin.pushurl`). Sichtbarkeit und compare-Link prüfen daher `get-url --push`, die Basis (aus
+    origin/* gefetcht) die Fetch-URL."""
+    text = _lies(FIX_FINDINGS_MD)
+    aufrufe = re.findall(r"gh repo view[^`]*", text)
+    assert len(aufrufe) == 3, aufrufe
+    erwartet = {"defaultBranchRef": "get-url origin", "visibility": "get-url --push origin", "url": "get-url --push origin"}
+    for a in aufrufe:
+        feld = a.rsplit("--json ", 1)[1].strip()
+        assert a.startswith(f'gh repo view "$(git remote {erwartet[feld]})"'), a
+    assert "gh repo view --json" not in text
+
+
+def test_fix_findings_kein_unerreichbarer_ohne_github_zweig():
+    """Review R2-1: Gepusht wird nur nach erfolgreichem `gh repo view <origin>`, also immer bei GitHub-Origin; ein Sonst-Zweig für
+    „Branch gepusht“ ohne compare-Link ist unerreichbar."""
+    assert "Branch gepusht" not in _lies(FIX_FINDINGS_MD)
+
+
+def test_fix_findings_basis_hereinholen_ist_fast_forward():
+    """Review R1-3: Die Basis enthält den geprüften SHA immer, `git merge` ist daher ein Fast-forward ohne Konfliktzweig."""
+    text = _lies(FIX_FINDINGS_MD)
+    punkt = re.search(r"\*\*Basis hereinholen:\*\*[^\n]*", text).group(0)
+    assert "git merge --ff-only origin/<basis>" in punkt
+    assert "eigener Merge-Commit" not in punkt and "Konflikt" not in punkt
+
+
+def test_fix_findings_audit_ohne_push_gilt_als_ohne_ci():
+    """Review R1-4: Wird nicht gepusht (öffentlich/unbestimmbar), läuft nie eine CI, also läuft die ganze Suite vor dem Abschluss."""
+    text = _lies(FIX_FINDINGS_MD)
+    punkt = re.search(r"- \*\*Audit-Liste:\*\* Fehlt `\.github/workflows/`[^\n]*", text).group(0)
+    assert "nicht gepusht" in punkt and "ohne CI" in punkt and "Sichtbarkeit" in punkt
 
 
 def test_fix_findings_nennt_bericht_repo():
