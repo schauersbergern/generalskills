@@ -88,7 +88,7 @@ import und aufruf sind datei:zeile oder null (nichts gefunden). Kein Befund-Obje
 
 kategorie: A01 bis A10 ohne Jahr. stufe: Vorschlag P1, P2 oder P3 nach den Stufen in den Prüfpunkten. datei null und zeile null nur bei repo-weiten Befunden. code_pfad: Liste von datei:zeile, Schritt für Schritt von der Eingabe bis zur Senke.
 
-Bei KI-Befunden (Prüfpunkte K1 bis K7) trägt das Objekt zusätzlich "owasp_ki": ["ASI01", "ASI02"] (1 bis 3 verschiedene IDs aus ASI01 bis ASI10 oder LLM01 bis LLM10 aus der Tabelle in pruefpunkte-ki.md); bei allen anderen Befunden lässt du das Feld weg. klasse beginnt bei KI-Befunden mit der Prüfpunkt-Nummer und einem Leerzeichen („K1 Injection → Tool mit Wirkung“); daran erkennt die Hauptsession, ob die Modellannahme gilt. datei:zeile ist die Stelle des Fehlers, der code_pfad nennt auch die Stelle, an der der Prompt benutzt wird.
+Bei KI-Befunden (Prüfpunkte K1 bis K7) trägt das Objekt zusätzlich "owasp_ki": ["ASI01", "ASI02"] (1 bis 3 verschiedene IDs aus ASI01 bis ASI10 oder LLM01 bis LLM10 aus der Tabelle in pruefpunkte-ki.md); bei allen anderen Befunden lässt du das Feld weg. klasse beginnt bei KI-Befunden mit der Prüfpunkt-Nummer und einem Leerzeichen, danach folgt die Eigenschaft, nach der /fix-findings gleichartige Stellen sucht („K1 Tool mit Wirkung nach fremd befülltem Kontext“); daran erkennt die Hauptsession, ob die Modellannahme gilt. datei:zeile ist die Stelle des Fehlers, der code_pfad nennt auch die Stelle, an der der Prompt benutzt wird.
 ````
 
 ## Prüfer
@@ -97,7 +97,7 @@ Je Prüfer ein Briefing mit allen seinen Befunden (keine Pakete, keine Nachliefe
 
 Werkzeugbefunde aus Schritt 5b (osv-scanner, gitleaks, lieferkette) gehen nie an die Prüfer.
 
-Je Befund in `<BEFUNDE>` stehen **nur** vier Angaben: ID, Titel, Kategorie, `datei:zeile` und die behauptete Eingabe. Nie Szenario, Beschreibung oder Code-Pfad des Reviewers: Der Prüfer leitet den Weg selbst her.
+Je Befund in `<BEFUNDE>` stehen **nur** fünf Angaben: ID, Titel, Kategorie, `datei:zeile` und die behauptete Eingabe. Nie Szenario, Beschreibung oder Code-Pfad des Reviewers: Der Prüfer leitet den Weg selbst her.
 
 ````text
 Du bist Prüfer eines Security-Audits des Repos <REPO>. Ein anderer Agent behauptet die Befunde unten. Dein Auftrag ist, jeden zu widerlegen. Gelingt das nicht und läuft die App, belegst du ihn per PoC. Du änderst nichts im Repo.
@@ -134,12 +134,12 @@ python3 -I <SKILL_DIR>/scripts/poc.py modell --lauf <LAUF> --rolle <ROLLE> --pro
 - anfrage: --pfad beginnt mit genau einem / und enthält kein Schema und keinen Host vor dem Query, keine Leer- oder Steuerzeichen und keinen Rückstrich. Kodiere Payloads prozentweise (Leerzeichen %20, einfaches Anführungszeichen %27, doppeltes %22, & %26, # %23). Die Ausgabe ist auf 64 KiB gekürzt.
 - SSRF-Ziele im Query nur app, db, 127.0.0.1 oder localhost, nie Metadaten-IPs oder andere fremde Ziele, auch nicht kodiert.
 - ausfuehren: führt den Befehl nach -- als Argumentliste ohne Shell im App-Container aus. Für Pipes oder Umleitungen nutze sh -c '…'. Zum Beispiel, um den Zustand der Daten nach einem PoC zu lesen.
-- neustart: setzt App und Datenbank auf den Seed zurück. Führe ihn vor jedem neuen Befund aus und nach jedem PoC, der Daten ändert (POST, PUT, PATCH, DELETE). Reine Lese-Requests desselben Befunds brauchen ihn nicht.
+- neustart: setzt App und Datenbank auf den Seed zurück. Führe ihn vor jedem neuen Befund aus und nach jedem PoC, der Daten ändert (POST, PUT, PATCH, DELETE). Reine Lese-Requests desselben Befunds brauchen ihn nicht. Ausnahme ist der Modell-Ablauf (Abschnitt MODELL-MOCK): Dort gilt allein die Reihenfolge seiner Punkte 1 bis 7, zwischen Punkt 2 und Punkt 7 steht kein neustart, auch nicht nach dem POST der Quelle oder des Auslösers.
 - Höchstens 8 anfrage-Aufrufe je Befund.
 
 MODELL-MOCK
-- Mock deiner Rolle: <MODELL_MOCK>. Bei „nein“ gibt es keine Modell-PoCs: Befunde, die an einer Modellentscheidung hängen (K1, K2, K4), sind nie bestätigt, höchstens unbestätigt, mit eigenem code_pfad. Prüfpunkte: <SKILL_DIR>/references/pruefpunkte-ki.md.
-- Der Mock ersetzt nur die Modellentscheidung, nicht den Weg in der App. Ablauf je Befund, genau in dieser Reihenfolge (neustart leert Warteschlange und Protokoll und setzt App und Datenbank auf den Seed zurück, also auch die fremde Quelle):
+- Mock deiner Rolle: <MODELL_MOCK>. Bei „nein“ gibt es keine Modell-PoCs: Befunde, die an einer Modellentscheidung hängen (K1, K2, K4), sind nie bestätigt, höchstens unbestätigt, mit eigenem code_pfad. Prüfpunkte: <SKILL_DIR>/references/pruefpunkte-ki.md. Die Prüfpunkt-Nummer (K1 bis K7) steht nicht im Befund: Du bestimmst sie selbst aus dieser Datei; im Zweifel gilt der strengere Ablauf (K1 mit Zugang A und B).
+- Der Mock ersetzt nur die Modellentscheidung, nicht den Weg in der App. Ablauf je Befund, genau in dieser Reihenfolge (neustart leert Warteschlange und Protokoll und setzt App und Datenbank auf den Seed zurück, also auch die fremde Quelle; zwischen Punkt 2 und Punkt 7 steht kein neustart):
   1. neustart
   2. Antwort-Datei <DATEIORDNER>/modell-<ROLLE>-<n>.json mit poc.py modell --antworten-datei setzen
   3. fremde Quelle mit dem Marker befüllen (K1: mit Zugang A oder ohne Anmeldung; bei K2 und K4 steckt der Marker in der eigenen Eingabe aus Punkt 4)
@@ -147,7 +147,7 @@ MODELL-MOCK
   5. poc.py modell --protokoll --suche <marker>
   6. Wirkung beobachten (Antwort der App oder ausfuehren)
   7. poc mit den Belegen schreiben
-- Marker: POCMARKER-<ROLLE>-<8 hex> (8 neu gewählte Hex-Zeichen, kein Wert aus Repo oder Testdaten), je Befund ein neuer, in die fremde Quelle, bei K2 und K4 in die eigene Eingabe.
+- Marker: POCMARKER-<ROLLE>-<8 hex> (8 neu gewählte Hex-Zeichen in Kleinbuchstaben 0-9a-f, kein Wert aus Repo oder Testdaten), je Befund ein neuer, in die fremde Quelle, bei K2 und K4 in die eigene Eingabe.
 - Antwort-Datei: JSON-Liste mit höchstens 20 Einträgen, je {"text": "…"} oder {"werkzeug": {"name": "<tool>", "argumente": {…}}}, dazu "wenn_enthaelt": "<marker>", damit der Mock sie nur auf den Request mit dem Marker liefert. Ein Eintrag wird verbraucht; passt keiner, antwortet der Mock mit „ok“.
 - Inhalte: E-Mail-Empfänger nur @example.invalid, URL-Ziele nur app, db oder llm. Keine Werte, auch keine Dummy-Werte, in der Datei und im poc. api.openai.com und api.anthropic.com stehen in keinem Befehl, auch nicht als Suchmuster.
 - modell-Aufrufe: höchstens 4 je Befund; sie zählen nicht zum Anfrage-Budget (höchstens 8 anfrage-Aufrufe).

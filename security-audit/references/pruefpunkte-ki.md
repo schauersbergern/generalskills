@@ -14,7 +14,7 @@ Für K2 und K4 zählt auch die **eigene Eingabe** des Nutzers als Quelle. **Das 
 
 | Prüfpunkt | `owasp_ki` | `kategorie` | Befund, wenn … | Stufe |
 |---|---|---|---|---|
-| K1 Injection → Tool mit Wirkung | ASI01, ASI02 | A01 oder A05 | Fremd befüllter Inhalt gelangt in den Kontext eines Modellaufrufs, dessen Antwort ein Tool mit Wirkung auslöst. Es gibt keine Bestätigung durch den Nutzer und keine Rechteprüfung gegen den Auslöser. | P1, wenn die Wirkung nach außen geht (E-Mail, Zahlung, Webhook), auf den Host (Datei, Shell) oder auf fremde Mandanten; sonst P2 |
+| K1 Tool mit Wirkung nach fremd befülltem Kontext | ASI01, ASI02 | A01 oder A05 | Fremd befüllter Inhalt gelangt in den Kontext eines Modellaufrufs, dessen Antwort ein Tool mit Wirkung auslöst. Es gibt keine Bestätigung durch den Nutzer und keine Rechteprüfung gegen den Auslöser. | P1, wenn die Wirkung nach außen geht (E-Mail, Zahlung, Webhook), auf den Host (Datei, Shell) oder auf fremde Mandanten; sonst P2 |
 | K2 Tool-Argumente in Senke | ASI02, ASI05 | A05 | Tool-Argumente gehen ohne Allowlist oder Parametrisierung in Shell, SQL, Dateipfad, URL-Abruf (SSRF) oder `eval`. | P1 bei Shell, `eval` und SQL mit Schreibrecht; sonst P2 |
 | K3 Tool-Rechte | ASI03 | A01 | Das Tool läuft mit mehr Rechten als der Auslöser: fremder Mandant, Admin-Token oder globaler Key. | P2 (P1 mit belegtem Fremdzugriff) |
 | K4 Modellausgabe in Senke | LLM05 | A05 | Die Ausgabe geht ungefiltert in HTML (`innerHTML`, `dangerouslySetInnerHTML`, `res.send` oder Template mit HTML), SQL, Shell oder ein Template. | P1, wenn sie andere Nutzer erreicht (gespeichert oder geteilt); sonst P2 |
@@ -22,7 +22,7 @@ Für K2 und K4 zählt auch die **eigene Eingabe** des Nutzers als Quelle. **Das 
 | K6 Speicher und Kontext | ASI06 | A01 | Verlauf, Vektor-Index oder Cache wird mandantenübergreifend geteilt. | P1 mit Beleg, sonst P2 |
 | K7 MCP und Tool-Herkunft | ASI04, ASI07 | A08 | MCP-Server oder Tools aus nicht vertrauenswürdiger Quelle werden ohne Pinning geladen, oder Tool-Beschreibungen sind fremd befüllt. | P2 |
 
-- **Nummer im Befund:** `klasse` beginnt mit der Prüfpunkt-Nummer und einem Leerzeichen (`K1 Injection → Tool mit Wirkung`, einzeilig). Daran erkennt die Hauptsession, ob `annahme_modell` gilt (nur K1, K2 und K4).
+- **Nummer im Befund:** `klasse` beginnt mit der Prüfpunkt-Nummer und einem Leerzeichen (`K1 Tool mit Wirkung nach fremd befülltem Kontext`, einzeilig). Danach steht die Eigenschaft, nach der `/fix-findings` im Repo gleichartige Stellen sucht (nicht die Überschrift des Prüfpunkts). Daran erkennt die Hauptsession, ob `annahme_modell` gilt (nur K1, K2 und K4).
 - **Vorrang:** Ein Befund braucht den Weg von einer fremd befüllbaren Quelle (bei K2 und K4 auch von der eigenen Eingabe) bis zur Wirkung. Ohne Quelle höchstens P3.
 - **Gegenprüfung (zusätzlich zu `pruefpunkte-web.md`):** Suche eine Bestätigung durch den Nutzer vor dem Tool-Aufruf, eine Allowlist oder Parametrisierung der Argumente, eine Rechteprüfung gegen den Auslöser (nicht gegen das Modell) und Escaping vor der Senke. Findest du eine wirksame, ist es kein Befund.
 - **Wo der Befund steht:** `datei:zeile` ist die Stelle des Fehlers (die Senke, das Tool oder die Stelle, an der das Geheimnis in den Prompt gelangt). Der `code_pfad` führt von der Quelle über den Modellaufruf bis zur Wirkung und nennt bei K5 auch die Stelle, an der der Prompt benutzt wird.
@@ -32,7 +32,7 @@ Für K2 und K4 zählt auch die **eigene Eingabe** des Nutzers als Quelle. **Das 
 
 - **K1, K2 und K4** hängen an einer Modellentscheidung. Sie sind `bestätigt` nur mit Marker-Beleg gegen den Modell-Mock (Briefing „Modell-Mock“ und Schritt 6 in `SKILL.md`): ein Marker `POCMARKER-<rolle>-<8 hex>` in der Quelle bzw. der eigenen Eingabe, ein Antwort-Eintrag mit `wenn_enthaelt`, der Request im Protokoll (`--suche`) und die beobachtete Wirkung. Die Hauptsession setzt dann `annahme_modell: true`; das Markdown nennt die Annahme („bestätigt (Modell-Mock, Annahme: Modell folgt)“). Ohne Mock in der Rolle (`<MODELL_MOCK>` „nein: …“) wird ein K1-, K2- oder K4-Befund nie `bestätigt`; ohne vollständigen Beleg bleibt er `unbestätigt` mit eigenem `code_pfad`.
 - **K3, K5, K6 und K7** hängen nicht an einer Modellentscheidung. Es gelten die Belegstufen von `pruefpunkte-web.md`. K5 ist `bestätigt`, wenn `--protokoll --suche <marker>` im `body` des Requests (dem Prompt) den Platzhalter `<ENV:NAME>` (NAME ist der Variablenname) zeigt; der Beleg stammt aus dem `body`, nicht aus der `fundstelle` (fehlt der Platzhalter dort, gilt `body` als Beleg); das setzt voraus, dass die Variable beim Start als `--env` mit einem Dummy-Wert ab 6 Zeichen gesetzt war, sonst ersetzt der Mock nichts. K3, K6 und K7 belegt ein Request mit zwei Zugängen oder der Code-Pfad.
-- **Marker:** `POCMARKER-<rolle>-<8 hex>` (8 neu gewählte Hex-Zeichen), je Befund neu, nie aus Repo-Inhalt oder Testdaten übernommen.
+- **Marker:** `POCMARKER-<rolle>-<8 hex>` (8 neu gewählte Hex-Zeichen in Kleinbuchstaben 0-9a-f; Großbuchstaben lehnt `poc.py` ab), je Befund neu, nie aus Repo-Inhalt oder Testdaten übernommen.
 - **Der Mock ersetzt nur die Modellentscheidung,** nicht den Weg in der App: Ob eine echte Modellantwort dieselbe Tool-Wahl träfe, belegt er nicht. Das ist die Annahme in `annahme_modell`.
 
 ## Modell-Mock

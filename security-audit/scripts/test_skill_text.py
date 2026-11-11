@@ -1434,7 +1434,7 @@ def test_klasse_traegt_die_pruefpunkt_nummer_i3():
     """Fix I3: Der Reviewer schreibt die Prüfpunkt-Nummer als Präfix in `klasse` (einzeilig im Schema); die Hauptsession leitet daraus
     `annahme_modell` ab. Ohne Mock in der Rolle wird ein K1-, K2- oder K4-Befund nie `bestätigt`."""
     assert "klasse" in bericht.EINZEILIG
-    beispiel = "K1 Injection → Tool mit Wirkung"
+    beispiel = "K1 Tool mit Wirkung nach fremd befülltem Kontext"
     reviewer = next(b for info, b in _bloecke(_abschnitt(_lies(BRIEFINGS), "Reviewer")) if info.startswith("text"))
     z = _punkt(reviewer, r"^Bei KI-Befunden")
     assert "klasse" in z and "Prüfpunkt-Nummer" in z and beispiel in z and "Leerzeichen" in z, z
@@ -1669,3 +1669,97 @@ def test_verbotsliste_namen_stehen_in_der_ki_test_app_m39_m41():
     heuhaufen = ["\n".join(pfade).lower()] + texte
     fehlt = [n for n in VERBOTENE_NAMEN_TF3 if not any(n.lower() in h for h in heuhaufen)]
     assert not fehlt, f"nicht in der Test-App: {fehlt}"
+
+
+# ------------------------------------------------------------------------------------ Härtung TF3 (Re-Review 5: N1 bis N4 und Nits)
+
+def test_haertung_n1_kein_neustart_zwischen_punkt_2_und_7():
+    """N1: Im Modell-Ablauf steht zwischen Punkt 2 und Punkt 7 kein `neustart` (in keinem der Punkte 2 bis 7, in SKILL.md und im Briefing),
+    und die allgemeine `neustart`-Regel nimmt den Modell-Ablauf ausdrücklich aus."""
+    s6, abschnitt = _s6(), _mock_abschnitt_briefing()
+    for text, name in ((s6, "SKILL.md"), (abschnitt, "Briefing")):
+        punkte = _nummerierte(text, "Ablauf je Befund")
+        assert all("neustart" not in p for p in punkte[1:]), (name, punkte)
+        kopf = _punkt(text, r"Ablauf je Befund")
+        assert "zwischen Punkt 2 und Punkt 7 steht kein" in kopf and "neustart" in kopf.split("zwischen Punkt 2 und Punkt 7")[1][:40], (name, kopf)
+    assert "auch nicht nach dem POST der Quelle oder des Auslösers" in _punkt(s6, r"Ablauf je Befund")
+    assert "„neustart nach jedem Daten ändernden PoC“ nicht" in _punkt(s6, r"Ablauf je Befund")
+    allgemein = _punkt(_pruefer_vorlage(), r"^- neustart: setzt App und Datenbank")
+    assert "nach jedem PoC, der Daten ändert" in allgemein
+    assert "Ausnahme ist der Modell-Ablauf (Abschnitt MODELL-MOCK)" in allgemein and "kein neustart" in allgemein.split("Ausnahme")[1]
+    assert "(im Modell-Ablauf unten nur als dessen Punkt 1)" in s6
+
+
+def test_haertung_n2_typische_fehler_nur_k1_k2_k4_und_marker_null_wird_unbestaetigt():
+    """N2: Der Satz in „Typische Fehler“ gilt für K1, K2 und K4 (nicht K3, K5, K6, K7). Das Gegenlesen setzt K1/K2/K4 mit `bestätigt` und
+    `marker: null` auf `unbestätigt`."""
+    text = _lies(SKILL_MD)
+    fehler = _punkt(_abschnitt(text, "Typische Fehler"), r"Befund `bestätigt` ohne Marker")
+    assert fehler.startswith("- K1-, K2- oder K4-Befund `bestätigt` ohne Marker"), fehler
+    assert "K3, K5, K6 und K7" in fehler and "gilt das nicht" in fehler
+    assert "- KI-Befund `bestätigt` ohne Marker" not in text
+    gegenlesen = _punkt(_s6(), r"^- Übernimm die Ergebnisse")
+    assert re.search(r"K1-, K2- oder K4-Befund mit `bestätigt` und `marker: null` wird ebenfalls `unbestätigt`", gegenlesen), gegenlesen
+    assert "kein `annahme_modell`" in gegenlesen
+    briefing = _pruefer_vorlage()
+    assert "marker: der Marker, den du für diesen Befund verwendet hast" in briefing and "sonst null" in briefing
+
+
+def test_haertung_n3_dummy_key_ohne_mock_neben_nie_uebernommen():
+    """N3: Bei „aus `.env.example` nie übernommen“ steht der Halbsatz zum Dummy-Key ohne Mock; er verweist auf den Punkt „Ohne Mock“, der ihn setzt."""
+    s3 = _abschnitt(_lies(SKILL_MD), "3. Docker-Vorbereitung")
+    zeile = _zeile(s3, "- **Reservierte Namen")
+    assert "nie übernommen" in zeile and "ohne Mock setzt du nur den Dummy-Key" in zeile and "nie einen Wert aus der Datei" in zeile
+    ohne_mock = _punkt(s3, r"^- \*\*Ohne Mock \(bei `anwendbar: true`\)")
+    assert "--env 'OPENAI_API_KEY=poc-dummy-openai'" in ohne_mock and "nie einen echten Key" in ohne_mock
+
+
+def test_haertung_n4_pruefer_bestimmt_k_nummer_und_fuenf_angaben():
+    """N4: Der Prüfer bekommt `klasse` nicht und bestimmt die K-Nummer selbst aus `pruefpunkte-ki.md` (im Zweifel der strengere Ablauf);
+    das Briefing nennt fünf Angaben je Befund (nicht vier), und die Zahl stimmt mit der Aufzählung."""
+    s6 = _s6()
+    zeile = _zeile(s6, "  - **Prüfpunkt-Nummer:**")
+    assert "bestimmt die Nummer (K1 bis K7) selbst aus `references/pruefpunkte-ki.md`" in zeile and "strengere Ablauf (K1 mit Zugang A und B)" in zeile
+    assert "`klasse` des Reviewers" in zeile and "nicht die Einordnung des Prüfers" in zeile
+    mock = _punkt(_mock_abschnitt_briefing(), r"^- Mock deiner Rolle")
+    assert "Du bestimmst sie selbst aus dieser Datei" in mock and "im Zweifel gilt der strengere Ablauf (K1 mit Zugang A und B)" in mock
+    briefings = _lies(BRIEFINGS)
+    angaben = _punkt(briefings, r"stehen \*\*nur\*\* ")
+    assert "**nur** fünf Angaben" in angaben and "vier Angaben" not in briefings
+    aufzaehlung = re.search(r"Angaben: (.*?)\. Nie Szenario", angaben).group(1)
+    assert len(re.split(r", | und ", aufzaehlung)) == 5, aufzaehlung
+    assert "Je Befund nur** ID, Titel, Kategorie, `datei:zeile` und die behauptete Eingabe" in s6
+
+
+def test_haertung_marker_hex_ist_kleinbuchstaben_hex():
+    """Nit: „Hex“ heißt Kleinbuchstaben-Hex (`poc.MARKER_RE`); Großbuchstaben lehnt `poc.py` ab. Alle Stellen, die die 8 Zeichen beschreiben, sagen es."""
+    assert poc.MARKER_RE.fullmatch("POCMARKER-p1-0a1b2c3d") and not poc.MARKER_RE.fullmatch("POCMARKER-p1-0A1B2C3D")
+    for text, name in ((_s6(), "SKILL.md"), (_mock_abschnitt_briefing(), "Briefing"), (_lies(PRUEFPUNKTE_KI), "pruefpunkte-ki.md")):
+        assert "Kleinbuchstaben 0-9a-f" in text, name
+    assert "Großbuchstaben lehnt `poc.py` ab" in _lies(PRUEFPUNKTE_KI)
+
+
+def test_haertung_zahlen_im_text_stehen_im_skript_proben_b_und_c():
+    """Nits (Proben B und C aus Re-Review 5): „höchstens 20 Einträge“ in SKILL.md folgt `poc.ANTWORTEN_MAX`, und `annahme_modell` gilt laut
+    bericht-format.md nur bei K1, K2 und K4 (nicht K1 bis K7)."""
+    s6 = _s6()
+    zeile = _zeile(s6, "  - `--antworten-datei` ersetzt die Warteschlange")
+    assert f"höchstens {poc.ANTWORTEN_MAX} Einträge" in zeile, zeile
+    assert f"höchstens {poc.ANTWORTEN_MAX} Einträgen" in _punkt(_mock_abschnitt_briefing(), r"^- Antwort-Datei: JSON-Liste")
+    fmt = _punkt(_lies(BERICHT_FORMAT), r"^- `klasse` beginnt bei KI-Befunden")
+    assert "nur bei `K1`, `K2` und `K4`" in fmt and "K1 bis K7" not in fmt, fmt
+    ki_text = _lies(PRUEFPUNKTE_KI)
+    assert "nur K1, K2 und K4" in _punkt(ki_text, r"^- \*\*Nummer im Befund")
+
+
+def test_haertung_klasse_beispiel_ist_suchbare_eigenschaft():
+    """Nit: Das `klasse`-Beispiel ist eine Eigenschaft, nach der `/fix-findings` Geschwisterstellen sucht, keine Überschrift mit Pfeil."""
+    neu = "K1 Tool mit Wirkung nach fremd befülltem Kontext"
+    for pfad in (SKILL_MD, PRUEFPUNKTE_KI, BERICHT_FORMAT, BRIEFINGS):
+        text = _lies(pfad)
+        assert neu in text, pfad
+        assert "Injection → Tool mit Wirkung" not in text, pfad
+    assert _beispiel_json()["befunde"][-1]["klasse"] == neu
+    assert bericht.pruefe_schema(_beispiel_json()) == []
+    assert "Eigenschaft, nach der `/fix-findings` im Repo gleichartige Stellen sucht" in _lies(PRUEFPUNKTE_KI)
+    assert "nach der /fix-findings gleichartige Stellen sucht" in _lies(BRIEFINGS)
