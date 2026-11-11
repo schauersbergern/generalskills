@@ -654,6 +654,11 @@ def test_marker_alt_wird_vor_dem_lauf_entfernt(umg):
     {"roh": '{"kein": "array"}'},
     {"kein_report": True},
     {"report": [{"RuleID": "x", "File": "{ziel}/src/a.js", "StartLine": "eins", "EndLine": 1, "StartColumn": 1, "EndColumn": 2}]},
+    {"report": [treffer(datei="{ziel}/src/a.js", zeile=99, von=1, bis=5)]},                  # Zeile hinter dem Dateiende (R1-3)
+    {"report": [treffer(datei="{ziel}/src/a.js", zeile=0, von=1, bis=5)]},
+    {"report": [treffer(datei="")]},                                                           # leerer Dateipfad
+    {"report": [{k: w for k, w in treffer().items() if k != "File"}]},                         # kein Dateipfad
+    {"report": [treffer(datei="{ziel}/a\0b.js")]},                                             # NUL im Pfad
 ])
 def test_schwaerzung_scheitert_exit4_ohne_marker(umg, dir_verhalten):
     v = vorbereiten(umg, [MINI])
