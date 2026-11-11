@@ -1559,6 +1559,32 @@ def test_auflisten_zeigt_laeufe_aus_ordnern_und_docker_haertung_b2(umg, tmp_path
     assert not any(a["args"][0] in ("rm", "rmi") or a["args"][:2] == ["network", "rm"] for a in umg.aufrufe())   # nur lesen
 
 
+def test_auflisten_nennt_repo_alter_und_laeuft_r1_13(umg, tmp_path):
+    """R1-13: ein eigener, beendeter Lauf ist von einem laufenden (parallelen) Audit unterscheidbar."""
+    vorbereitet(umg, tmp_path)
+    anderer = umg.poc("neu").stdout.strip()
+    alt = os.path.join(umg.tmp, f"security-audit-{anderer}")
+    os.utime(alt, (time.time() - 3 * 3600, time.time() - 3 * 3600))
+    umg.konfig({
+        "ps -a": {"stdout": f"security-audit-{LAUF}-p1-app\nsecurity-audit-{anderer}-p1-app\n"},
+        "ps --format": {"stdout": f"security-audit-{LAUF}-p1-app\n"},     # nur LAUF läuft noch
+    })
+    r = umg.poc("auflisten")
+    assert r.returncode == 0, r.stderr
+    zeilen = {z.split()[0]: z for z in r.stdout.splitlines() if z.strip()}
+    assert "laeuft=ja" in zeilen[LAUF] and "repo=kunde" in zeilen[LAUF] and re.search(r"alter_min=\d+", zeilen[LAUF])
+    assert "laeuft=nein" in zeilen[anderer] and "repo=?" in zeilen[anderer]
+    assert int(re.search(r"alter_min=(\d+)", zeilen[anderer]).group(1)) >= 179
+    assert not any(a["args"][0] in ("rm", "rmi") or a["args"][:2] == ["network", "rm"] for a in umg.aufrufe())
+
+
+def test_auflisten_laeuft_unbekannt_ohne_docker_r1_13(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    umg.konfig({"ps": {"rc": 1, "stderr": "Cannot connect to the Docker daemon. Is the docker daemon running?"}})
+    r = umg.poc("auflisten")
+    assert f"{LAUF} " in r.stdout and "laeuft=?" in r.stdout
+
+
 def test_auflisten_ohne_docker_meldet_und_endet_mit_1_haertung_b2(umg, tmp_path):
     vorbereitet(umg, tmp_path)
     umg.konfig({"version": {"rc": 1, "stderr": "Cannot connect to the Docker daemon"},

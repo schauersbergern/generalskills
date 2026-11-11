@@ -793,7 +793,7 @@ def _vorbereiten(a: argparse.Namespace, repo: str, ordner: str, quelle: str, mar
     if any("Arbeitskopie unvollständig" in m for m in meldungen):
         print("kategorie: arbeitskopie-unvollstaendig")
         return 4
-    _schreibe_atomar(marker, {"fertig": True, "sha": kopiert})
+    _schreibe_atomar(marker, {"fertig": True, "sha": kopiert, "repo": os.path.basename(repo)})
     print(quelle)
     return 0
 
@@ -1058,12 +1058,47 @@ def cmd_auflisten(_a: argparse.Namespace) -> int:
     except DockerFehlt as e:
         unvollstaendig = True
         print(f"auflisten: Docker nicht erreichbar ({e}); nur Zustandsordner aufgelistet", file=sys.stderr)
+    laufend = _laufende_laeufe()
     for lauf in sorted(laeufe):
         e = laeufe[lauf]
-        print(f"{lauf} ordner={e['ordner']} container={e['container']} netze={e['netze']} images={e['images']}")
+        print(f"{lauf} ordner={e['ordner']} container={e['container']} netze={e['netze']} images={e['images']} "
+              f"{_lauf_angaben(lauf, laufend)}")
     if laeufe:
-        print("auflisten: je Lauf aufräumen mit `poc.py aufraeumen --lauf <id>` (nur eigene, beendete Läufe!)", file=sys.stderr)
+        print("auflisten: je Lauf aufräumen mit `poc.py aufraeumen --lauf <id>` (nur eigene Läufe mit laeuft=nein; ein "
+              "paralleles Audit sieht gleich aus: im Zweifel den User fragen)", file=sys.stderr)
     return 1 if unvollstaendig else 0
+
+
+def _laufende_laeufe() -> set[str] | None:
+    """Lauf-IDs mit mindestens einem laufenden Container; None, wenn Docker nicht lesbar ist."""
+    try:
+        r = _docker(["ps", "--format", "{{.Names}}"], KURZ_TIMEOUT)
+    except DockerFehlt:
+        return None
+    if not r.ok:
+        return None
+    treffer = (_LAUF_NAME.fullmatch(z.strip()) for z in r.out.decode("utf-8", "replace").splitlines())
+    return {m.group(1) for m in treffer if m}
+
+
+def _lauf_angaben(lauf: str, laufend: set[str] | None) -> str:
+    """`repo=<name> alter_min=<n> laeuft=ja|nein|?` aus Fertig-Marker (Repo), Zustandsordner (letzte Änderung) und `docker ps`.
+    Fehlende Angaben heißen `?`, nie geraten."""
+    ordner = zustand_ordner(lauf)
+    repo = alter = "?"
+    try:
+        alter = str(max(0, int((time.time() - os.lstat(ordner).st_mtime) // 60)))
+    except OSError:
+        pass
+    try:
+        with open(os.path.join(ordner, "quelle.fertig"), encoding="utf-8") as f:
+            marker = json.load(f)
+        if isinstance(marker, dict) and isinstance(marker.get("repo"), str):
+            repo = re.sub(r"\s", "_", _entschaerfen(marker["repo"]))[:60] or "?"   # Ordnername des Kunden: eine Zeile, entschärft
+    except (OSError, ValueError):
+        pass
+    laeuft = "?" if laufend is None else ("ja" if lauf in laufend else "nein")
+    return f"repo={repo} alter_min={alter} laeuft={laeuft}"
 
 
 # ------------------------------------------------------------------------------------ Argumente
