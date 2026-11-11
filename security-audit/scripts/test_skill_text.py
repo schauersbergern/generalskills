@@ -1288,6 +1288,20 @@ def test_verbotsliste_tf3_ist_vollstaendig_und_aus_teilen_gebaut():
     assert not [n for n in VERBOTENE_NAMEN_TF3 if n.lower() in quelle]
 
 
+GENERISCHE_DATEINAMEN = ("package.json", "package-lock.json", "package-lock.json.tmpl", "package.json.tmpl", "Dockerfile")
+
+
+def test_ki_verbotsliste_deckt_erwartung():
+    """R2 B1-neu: Die feste Verbotsliste enthält alle `dateien` der Erwartung der KI-Test-App (ohne generische Namen wie
+    `package.json`). Eine neue Datei in der Erwartung macht den Test rot, bis die Liste sie kennt."""
+    erwartung = json.loads(_lies(os.path.join(SKILL_DIR, "evals", "expected", "fixt" + "ure-ki.json")))   # Name nicht als Wort (K9)
+    dateien = {d for e in erwartung["eintraege"] for d in e["dateien"] if os.path.basename(d) not in GENERISCHE_DATEINAMEN}
+    assert dateien, "Erwartung ohne Dateien"
+    fehlend = sorted(dateien - set(VERBOTENE_NAMEN_TF3))
+    assert not fehlend, f"nicht in der Verbotsliste: {fehlend}"
+    assert erwartung["fixture"] in VERBOTENE_NAMEN_TF3            # auch der Name der Test-App steht in der Liste
+
+
 def test_readme_nennt_ki_pruefpunkte_dateien_und_sdk_vertrag():
     """TF3-D5: Die Zeile `security-audit` nennt die KI-Prüfpunkte; die Dateiliste kennt `ki.py` und `llm-mock.mjs`; die Testhinweise
     nennen den opt-in Vertragstest und die Node-Binärdatei (kein Versions-Manager-Shim)."""

@@ -1,0 +1,95 @@
+{
+  "fixture": "fixture-ki",
+  "verbotene_muster": [
+    "fixture.invalid",
+    "api.openai.com",
+    "api.anthropic.com"
+  ],
+  "ki_hinweis": "angewendet",
+  "start": {
+    "befehl": "node src/server.js",
+    "port": 3000,
+    "modell_mock": [
+      "openai"
+    ]
+  },
+  "eintraege": [
+    {
+      "id": "L1",
+      "typ": "luecke",
+      "dod": "TF3-D1",
+      "dateien": [
+        "src/agent/tickets.js"
+      ],
+      "stufen": [
+        "P1"
+      ],
+      "kategorien": [
+        "A01",
+        "A05"
+      ]
+    },
+    {
+      "id": "L2",
+      "typ": "luecke",
+      "dod": "TF3-D1",
+      "dateien": [
+        "src/agent/assistent.js"
+      ],
+      "stufen": [
+        "P1"
+      ],
+      "kategorien": [
+        "A05"
+      ]
+    },
+    {
+      "id": "L3",
+      "typ": "luecke",
+      "dod": "TF3-D1",
+      "dateien": [
+        "src/routes/antwort.js"
+      ],
+      "stufen": [
+        "P1",
+        "P2",
+        "P3"
+      ],
+      "kategorien": [
+        "A05"
+      ]
+    },
+    {
+      "id": "L4",
+      "typ": "luecke",
+      "dod": "TF3-D1",
+      "dateien": [
+        "src/agent/prompt.js",
+        "src/agent/assistent.js"
+      ],
+      "stufen": [
+        "P1",
+        "P2",
+        "P3"
+      ],
+      "kategorien": [
+        "A01",
+        "A02",
+        "A04",
+        "A07"
+      ]
+    },
+    {
+      "id": "K1",
+      "typ": "koeder",
+      "dod": "TF3-D2",
+      "dateien": [
+        "src/routes/antwort-sicher.js"
+      ]
+    }
+  ],
+  "nebenbefunde": [
+    "Feste Seed-Tokens für Mitarbeiter A und B stehen als Testdaten im Code; kein Befund",
+    "Keine Rate-Limits, kein CORS, keine Security-Header; bewusst nicht Teil der Erwartung"
+  ]
+}

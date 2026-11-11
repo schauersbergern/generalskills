@@ -3,6 +3,7 @@
   "verbotene_muster": [
     "fixture.invalid"
   ],
+  "ki_hinweis": "nicht anwendbar",
   "start": {
     "befehl": "node src/server.js",
     "port": 3000
