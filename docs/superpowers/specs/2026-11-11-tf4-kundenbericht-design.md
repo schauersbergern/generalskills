@@ -333,3 +333,14 @@ W11: Das E-Mail-Muster ist `[\w.+-]+@[\w-]+(\.[\w-]+)*\.[A-Za-z]{2,}\b`; `name@1
   > Der Test für TF4-D4 nutzt `datei: src/dir/x.ts` bei einem Befund und schreibt diesen Pfad nicht in `massnahme` (das wäre ein Treffer der Regel e). Zusätzlich gibt es einen Test, in dem „dir“ als eigenes Wort in `massnahme` Exit 2 ergibt.
 
 **Entscheidung R2-B2:** K16 aus R1 entfällt; es gilt B-2 (Inhaltsregeln nur in `bericht.kunden_verstoesse`, `rendern` warnt, `kundenbericht.py` entscheidet). **Entscheidung K-8:** Geprüft werden die Rohwerte der Kundenfelder und des Titels (W-2/W-3), nicht das ganze Markdown — Abweichung vom Default „ganzes Markdown“, weil Escapes den Abgleich verfälschen und feste Bausteine keine Kundendaten enthalten.
+
+
+## Nachträge nach PR-Review Runde 1 (Vorrang vor allem oben)
+
+- **R1-1 Regel b:** Neben „HTTP-Methode vor einem Pfad“ (auch `POST-/api`) gilt jeder Pfad mit führendem Schrägstrich (`/segment…`) als Regel b, unabhängig vom `poc`. `und/oder`, `24/7`, `TCP/IP`, `Lese-/Schreibrechte` und ` / ` bleiben erlaubt. Der feste Detailtext lautet „Request oder Pfad mit Schrägstrich“. Kopfangaben prüfen weiter nur den Request. Bezeichner (camelCase, snake_case) prüft das Skript nur, wenn sie als Token im `poc` stehen (Regel a); sonst gilt allein die Schreibregel.
+- **R1-2:** Die Titel der Lieferkette-Entwürfe nennen keinen Pfad („Lockfile fehlt“, „Installation ohne Lockfile-Treue“, „Install-Skripte nicht abgeschaltet“); der Pfad steht unter „Betroffene Datei“.
+- **R1-3:** Kopfangaben werden vollständig geprüft (keine Kappung bei 5000 Zeichen); Befundfelder bleiben gekappt.
+- **R1-4:** Nach dem Sperren muss der Pfad noch auf die gesperrte Inode zeigen (sonst Exit 5), und die JSON wird über den gesperrten Deskriptor gelesen. Ein Ersetzen der JSON während eines Laufs fängt erst die zweite Prüfung vor dem Schreiben des Markdown ab.
+- **R1-6:** Eine Eingabe mit dem Dateinamen `.json` (in beliebigem Ordner) ist Exit 5.
+- **R1-7:** `--help` endet mit Exit 0, schreibt keine Dateien und nennt weder `kunde-md:` noch `kunde-pdf:`.
+- **R1-8 (nach R2-K-4):** `ordner` ist der Ordnername der Hauptkopie des Repos (im git-Worktree der Hauptordner), nicht der Basename von `wurzel`.

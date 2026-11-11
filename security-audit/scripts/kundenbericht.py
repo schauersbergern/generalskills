@@ -698,7 +698,8 @@ def _sperre(pfad: str):
     """Sperre (flock, nicht blockierend) auf die Eingabe-JSON für die Dauer eines Laufs: zwei `erstellen` auf dieselbe Datei würden sich die
     Kundendateien gegenseitig entfernen (das Entfernen kommt vor dem Lesen) und ihr PDF aus dem Markdown des anderen bauen. Der zweite Lauf
     endet mit Exit 5. Die Sperre hängt am offenen Dateideskriptor: sie endet mit dem Lauf, auch nach einem Absturz oder SIGKILL (nie eine
-    Sperrdatei, die liegen bleibt). Nur zwischen Läufen von `erstellen`; `rendern` und das Schreiben der JSON sperrt sie nicht."""
+    Sperrdatei, die liegen bleibt). Nur zwischen Läufen von `erstellen`; `rendern` und das Schreiben der JSON sperrt sie nicht. Die Sperre hängt an der Inode: nach dem Sperren
+    und vor dem Schreiben muss der Pfad noch auf sie zeigen (sonst Exit 5), und die JSON wird über den gesperrten Deskriptor gelesen (R1-4)."""
     try:
         fd = os.open(pfad, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
     except OSError:
