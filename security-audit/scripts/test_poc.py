@@ -965,6 +965,29 @@ def test_env_regeln_db_und_localhost_erlaubt(umg, tmp_path, mock):
     assert "DATABASE_URL=postgres://poc:poc@db:5432/poc" in env and "SELBST=http://localhost:3000" in env
 
 
+@pytest.mark.parametrize("mock", [[], ["--modell-mock", "openai"]])
+@pytest.mark.parametrize("liste", ["https://app:3000,http://localhost:5173", "http://localhost:5173;http://app:3000/x",
+                                   "http://app:3000,http://llm:4010,http://127.0.0.1:1"])
+def test_env_regeln_url_liste_mit_trennzeichen_erlaubt_review_r1_8(umg, tmp_path, mock, liste):
+    """Review R1-8: Eine übliche Origin-Liste (Komma oder Semikolon) ist kein fremder Host `app:3000,http:`."""
+    vorbereitet(umg, tmp_path)
+    r = starten(umg, *mock, "--env", f"CORS_ORIGINS={liste}")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"CORS_ORIGINS={liste}" in wert(run_mit_name(umg, APP)[0], "-e")
+
+
+@pytest.mark.parametrize("liste, host", [("http://app:3000,http://poc-fremd.invalid/x", "poc-fremd.invalid"),
+                                         ("https://localhost:3000;https://poc-fremd.invalid", "poc-fremd.invalid"),
+                                         ("http://poc-fremd.invalid,http://app:3000", "poc-fremd.invalid"),
+                                         ("http://app:3000,poc-fremd.invalid@x.invalid", "x.invalid")])
+def test_env_regeln_url_liste_mit_fremdem_host_exit2_review_r1_8(umg, tmp_path, liste, host):
+    vorbereitet(umg, tmp_path)
+    r = starten(umg, "--env", f"CORS_ORIGINS={liste}")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert r.stderr.strip().endswith(f"--env CORS_ORIGINS: nicht erlaubter Host {host}"), r.stderr
+    assert umg.aufrufe() == []
+
+
 def test_env_regeln_meldung_ohne_wert(umg, tmp_path):
     """W2-neu: Die Meldung nennt Namen und Host, nie den Wert (auch nicht Pfad, Query oder Zugangsdaten)."""
     vorbereitet(umg, tmp_path)
@@ -2715,6 +2738,24 @@ def test_modell_protokoll_fehler_exit1_entschaerft_ohne_werte(umg, tmp_path):
     assert "Steuerung nicht erreichbar" in r.stderr and "\x1b" not in r.stderr
     assert geheim not in r.stderr and geheim not in r.stdout                          # auch ein Wert im Fehlertext erscheint nicht
     assert "teil" not in r.stdout
+
+
+def test_modell_protokoll_fehler_laengster_wert_zuerst_review_r1_11(umg, tmp_path):
+    """Review R1-11: Ist ein Wert Präfix eines anderen, ersetzt `_ohne_werte` den längeren zuerst; sonst bliebe `XYZ-geheim` im Auszug."""
+    mit_mock(umg, tmp_path, "--env", "A=abcdef", "--env", "B=abcdefXYZ-geheim")
+    umg.konfig({"exec -i": {"rc": 1, "stderr": "boom abcdefXYZ-geheim und abcdef\n"}})
+    r = modell(umg, "--protokoll")
+    assert r.returncode == 1, r.stderr
+    assert "boom <ENV:B> und <ENV:A>" in r.stderr and "XYZ" not in r.stderr and "geheim" not in r.stderr, r.stderr
+
+
+def test_modell_protokoll_fehler_maskiert_ab_genau_6_zeichen_review_r1_11(umg, tmp_path):
+    """Die zweite Maskiersicherung gilt wie der Mock für Werte ab 6 Zeichen: genau 6 werden ersetzt, 5 nicht."""
+    mit_mock(umg, tmp_path, "--env", "SECHS=abcdef", "--env", "FUENF=vwxyz")
+    umg.konfig({"exec -i": {"rc": 1, "stderr": "boom abcdef und vwxyz\n"}})
+    r = modell(umg, "--protokoll")
+    assert r.returncode == 1, r.stderr
+    assert "boom <ENV:SECHS> und vwxyz" in r.stderr, r.stderr
 
 
 def test_modell_protokoll_fehler_maskiert_auch_mock_keys(umg, tmp_path):

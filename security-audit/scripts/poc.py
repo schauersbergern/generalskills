@@ -1017,6 +1017,18 @@ def _starte(lauf: str, rolle: str, p: dict) -> int:
     return 0
 
 
+def _fremde_hosts_env(wert: str) -> list[str]:
+    """Nicht erlaubte Hosts in einem `--env`-Wert. Die Netzregel liest die Authority bis `/`, `?`, `#` oder Leerzeichen; in einer Liste
+    `https://app:3000,http://localhost:5173` wäre das `app:3000,http:`. Enthält ein gefundener „Host“ `,` oder `;` (das kommt in
+    keinem Host vor), wird jedes Listenelement für sich geprüft; die Bash-Prüfung (`netzregel.ist_poc_aufruf`) bleibt unberührt."""
+    fremd = netzregel.verstoesse_poc(wert)
+    if any("," in h or ";" in h for h in fremd):
+        fremd = [h for h in fremd if "," not in h and ";" not in h]
+        for teil in re.split(r"[,;]", wert):
+            fremd += [h for h in netzregel.verstoesse_poc(teil) if h not in fremd]
+    return fremd
+
+
 def _env_pruefen(env: list[str], modell_mock: list[str]) -> None:
     """Regeln für `--env` (Exit 2, Meldungen nennen nur Namen und Host, nie den Wert): jeder Wert läuft durch die Netzregel
     (`netzregel.verstoesse_poc`: nur app, db, llm, localhost und Loopback); mit `--modell-mock` sind die Namen in `MOCK_RESERVIERT`
@@ -1025,7 +1037,7 @@ def _env_pruefen(env: list[str], modell_mock: list[str]) -> None:
         name, _, wert = e.partition("=")
         if modell_mock and name.upper() in MOCK_RESERVIERT:
             raise PocFehler(f"--env {name}: reservierter Name bei --modell-mock")
-        fremd = netzregel.verstoesse_poc(wert)
+        fremd = _fremde_hosts_env(wert)
         if fremd:
             raise PocFehler(f"--env {name}: nicht erlaubter Host {_entschaerfen(fremd[0])[:100]}")
 
