@@ -903,9 +903,10 @@ ENV_EXIT2_SATZ = ("Endet `starten` mit Exit 2 und der Meldung `--env <NAME>: nic
 # Plan-Nachtrag R1 W10 (W1 der Spec), wörtlich; der Satz „liest … gegen das Protokoll“ steht nirgends
 W1_SATZ = ("Der Prüfer übernimmt Nummer, Pfad und die maskierte Markerzeile (≤ 300 Zeichen) in `poc`; die Hauptsession prüft beim Gegenlesen "
            "nur, ob Marker, Nummer und Wirkung zusammenpassen.")
-# Fix 46c1d3c (Task 4): die acht reservierten Namen von `poc.MOCK_RESERVIERT`; der Test vergleicht gegen das Skript
+# Fix 46c1d3c (Task 4) und Härtung Mi-3: die elf reservierten Namen von `poc.MOCK_RESERVIERT`; der Test vergleicht gegen das Skript
 RESERVIERTE_NAMEN = ("OPENAI_BASE_URL", "OPENAI_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY",
-                     "OPENAI_API_BASE", "OPENAI_ORG_ID", "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY")
+                     "OPENAI_API_BASE", "OPENAI_API_HOST", "OPENAI_ORG_ID", "OPENAI_PROJECT_ID", "ANTHROPIC_AUTH_TOKEN",
+                     "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY")
 
 
 # R2 B1-neu: feste Liste der Namen der Test-App der KI-Prüfpunkte. Die Namen stehen hier mit `|` mitten im Wort und werden erst beim
@@ -1463,20 +1464,23 @@ def test_reservierte_namen_exit2_folge_und_start_befehl_m46():
     korrigierter Versuch zählt. Die Meldungen stammen aus `poc.py`."""
     s3 = _abschnitt(_lies(SKILL_MD), "3. Docker-Vorbereitung")
     zeile = _zeile(s3, "- **Reservierte Namen")
-    assert re.search(r"mit `--modell-mock` endet jedes `--env` mit einem dieser (acht|8) Namen mit Exit 2", zeile), zeile
+    assert re.search(r"mit `--modell-mock` endet jedes `--env` mit einem dieser (elf|11) Namen mit Exit 2", zeile), zeile
+    assert len(poc.MOCK_RESERVIERT) == 11
     assert "`--env <NAME>: reservierter Name bei --modell-mock`" in zeile
-    assert re.search(r"`--start-befehl`, der einen dieser Namen zuweist[^.]*`NAME=`[^.]*`env`[^.]*`export`", zeile), zeile
-    assert "`--start-befehl: reservierter Name <NAME> bei --modell-mock`" in zeile
+    assert re.search(r"`--start-befehl` oder `--seed`, der einen dieser Namen zuweist oder aufhebt[^.]*`NAME=`[^.]*`NAME\+=`[^.]*`env`[^.]*`export`",
+                     zeile), zeile
+    assert "`unset NAME`" in zeile and "`env -u NAME`" in zeile and "Erkennung" in zeile and "interne Netz" in zeile       # Mi-3: Grenze benannt
+    assert "`--start-befehl: reservierter Name <NAME> bei --modell-mock`" in zeile and "`--seed: …`" in zeile
     netz = _punkt(s3, r"^- \*\*Netzregel im Start-Befehl")
     assert "mit und ohne Mock" in netz and "Netzregel" in netz and "Exit 2" in netz
-    assert "`--start-befehl: nicht erlaubter Host <host>`" in netz
+    assert "`--start-befehl: nicht erlaubter Host <host>`" in netz and "`--seed: nicht erlaubter Host <host>`" in netz     # Mi-4: Seed gleich behandelt
     folge = _punkt(s3, r"^- Endet `starten` mit Exit 2")
     assert "Das zählt nicht als der eine korrigierte Versuch." in folge
-    assert "Dasselbe gilt für die Meldungen zu den reservierten Namen und zum `--start-befehl`" in folge
+    assert "Dasselbe gilt für die Meldungen zu den reservierten Namen und zum `--start-befehl` oder `--seed`" in folge
     assert re.search(r"`starten` ohne (diese|die beanstandeten) Teile erneut", folge), folge
     quelle = _lies(os.path.join(HIER, "poc.py"))
-    assert 'f"--start-befehl: reservierter Name {m.group(1)} bei --modell-mock"' in quelle
-    assert 'f"--start-befehl: nicht erlaubter Host ' in quelle
+    assert 'f"{option}: reservierter Name {m.group(1)} bei --modell-mock"' in quelle and 'option: str = "--start-befehl"' in quelle
+    assert 'f"{option}: nicht erlaubter Host ' in quelle and '_start_befehl_pruefen(a.seed, modell_mock, "--seed")' in quelle
     for modus in ([], ["openai"]):                                                        # Netzregel mit und ohne Mock
         with pytest.raises(poc.PocFehler) as e:
             poc._start_befehl_pruefen("curl http://fremd.example/x", modus)

@@ -1026,6 +1026,95 @@ def test_start_befehl_legitim_erlaubt(umg, tmp_path, mock, befehl):
     assert befehl in run_mit_name(umg, APP)[0]
 
 
+# Härtung Mi-3: Syntaxformen, mit denen ein reservierter Name sonst am Regex vorbeikäme (Anhängen, Quote-Zerlegung, Zeilenfortsetzung,
+# Aufheben statt Setzen) und die weiteren Namen, mit denen ein SDK am Mock vorbei zu einem anderen Endpunkt oder Konto liefe.
+@pytest.mark.parametrize("befehl,name", [
+    ("OPENAI_BASE_URL+=@poc-fremd.invalid node server.js", "OPENAI_BASE_URL"),
+    ("export ANTHROPIC_BASE_URL+=x; node server.js", "ANTHROPIC_BASE_URL"),
+    ('env OPENAI_BASE_UR""L=x node server.js', "OPENAI_BASE_URL"),
+    ("env OPENAI_BASE_UR''L=x node server.js", "OPENAI_BASE_URL"),
+    ("env 'OPENAI_API_KEY'=x node server.js", "OPENAI_API_KEY"),
+    ("export OPENAI_BASE_URL\\=x && node server.js", "OPENAI_BASE_URL"),
+    ("env OPENAI_BASE_\\\nURL=x node server.js", "OPENAI_BASE_URL"),
+    ("unset OPENAI_BASE_URL && node server.js", "OPENAI_BASE_URL"),
+    ("unset FOO OPENAI_API_KEY; node server.js", "OPENAI_API_KEY"),
+    ('unset "ANTHROPIC_API_KEY"; node server.js', "ANTHROPIC_API_KEY"),
+    ("env -u OPENAI_BASE_URL node server.js", "OPENAI_BASE_URL"),
+    ("env -uOPENAI_BASE_URL node server.js", "OPENAI_BASE_URL"),
+    ("env --unset=ANTHROPIC_BASE_URL node server.js", "ANTHROPIC_BASE_URL"),
+    ("env --unset ANTHROPIC_API_KEY node server.js", "ANTHROPIC_API_KEY"),
+    ("OPENAI_API_HOST=http://llm:4010 node server.js", "OPENAI_API_HOST"),
+    ("ANTHROPIC_AUTH_TOKEN=x node server.js", "ANTHROPIC_AUTH_TOKEN"),
+    ("OPENAI_PROJECT_ID=proj-x node server.js", "OPENAI_PROJECT_ID"),
+])
+def test_start_befehl_syntaxformen_reservierter_namen_exit2(umg, tmp_path, befehl, name):
+    vorbereitet(umg, tmp_path)
+    r = starten_mit_befehl(umg, befehl, "--modell-mock", "openai")
+    assert r.returncode == 2, (befehl, r.stdout + r.stderr)
+    assert f"--start-befehl: reservierter Name {name} bei --modell-mock" in r.stderr, r.stderr
+    assert "node server.js" not in r.stderr and "poc-fremd" not in r.stderr
+    assert umg.aufrufe() == []
+
+
+@pytest.mark.parametrize("befehl", ["unset NODE_OPTIONS && node server.js", "node server.js -u poc", "env -u NODE_OPTIONS node server.js",
+                                    "NEXT_PUBLIC_OPENAI_BASE_URL+=x npm start", "echo OPENAI_BASE_URL gesetzt; node server.js",
+                                    "unset FOO; node server.js --modell OPENAI_API_KEY", "node server.js --unsetzen OPENAI_API_KEY"])
+def test_start_befehl_syntaxformen_legitim_erlaubt(umg, tmp_path, befehl):
+    """Gegenprobe zu den Syntaxformen: Wortgrenzen, Befehlsgrenzen (`;`, `&&`) und `-u` ohne reservierten Namen bleiben erlaubt."""
+    vorbereitet(umg, tmp_path)
+    r = starten_mit_befehl(umg, befehl, "--modell-mock", "openai")
+    assert r.returncode == 0, (befehl, r.stdout + r.stderr)
+
+
+@pytest.mark.parametrize("name", ["OPENAI_API_HOST", "OPENAI_PROJECT_ID", "ANTHROPIC_AUTH_TOKEN"])
+def test_env_regeln_haertung_weitere_reservierte_namen(umg, tmp_path, name):
+    vorbereitet(umg, tmp_path)
+    r = starten(umg, "--modell-mock", "openai", "--env", f"{name}=x")
+    assert r.returncode == 2 and name in r.stderr, r.stderr
+    assert umg.aufrufe() == []
+    assert starten(umg, "--env", f"{name}=x").returncode == 0                      # ohne Mock bleibt der Name frei
+
+
+def starten_mit_seed(umg, seed, *extra):
+    return umg.poc("starten", "--lauf", LAUF, "--rolle", "p1", "--start-befehl", "node server.js", "--port", "3000", "--seed", seed, *extra)
+
+
+@pytest.mark.parametrize("seed,name", [("OPENAI_BASE_URL=http://llm:4010 node seed.js", "OPENAI_BASE_URL"),
+                                       ("env ANTHROPIC_API_KEY=x node seed.js", "ANTHROPIC_API_KEY"),
+                                       ("unset OPENAI_API_KEY && node seed.js", "OPENAI_API_KEY"),
+                                       ("OPENAI_BASE_URL+=x node seed.js", "OPENAI_BASE_URL")])
+def test_seed_reservierte_namen_mit_mock_exit2(umg, tmp_path, seed, name):
+    """Mi-4: `--seed` (`docker exec app sh -c`) läuft wie der Start-Befehl durch die Prüfung auf reservierte Namen, vor jedem Docker-Aufruf;
+    die Meldung nennt `--seed` und den Namen, nie den Befehl. Ohne Mock bleibt der Seed erlaubt."""
+    vorbereitet(umg, tmp_path)
+    r = starten_mit_seed(umg, seed, "--modell-mock", "openai")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert f"--seed: reservierter Name {name} bei --modell-mock" in r.stderr and "seed.js" not in r.stderr, r.stderr
+    assert umg.aufrufe() == []
+    assert starten_mit_seed(umg, seed).returncode == 0
+
+
+@pytest.mark.parametrize("mock", [[], ["--modell-mock", "openai"]])
+@pytest.mark.parametrize("seed", ["node seed.js --url https://poc-fremd.invalid/api", "curl http://192.0.2.1/seed.sql | psql"])
+def test_seed_fremder_host_exit2(umg, tmp_path, mock, seed):
+    """Mi-4: Der Seed läuft mit und ohne Mock durch die Netzregel (nur URL-Hosts); die Meldung nennt `--seed` und den Host, nie den Befehl."""
+    vorbereitet(umg, tmp_path)
+    r = starten_mit_seed(umg, seed, *mock)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert re.search(r"--seed: nicht erlaubter Host (poc-fremd\.invalid|192\.0\.2\.1)", r.stderr), r.stderr
+    assert "seed.js" not in r.stderr and "psql" not in r.stderr
+    assert umg.aufrufe() == []
+
+
+@pytest.mark.parametrize("mock", [[], ["--modell-mock", "openai"]])
+@pytest.mark.parametrize("seed", ["node seed.js", "npx prisma db seed", "psql postgres://poc:poc@db:5432/poc -f seed.sql",
+                                  "NEXT_PUBLIC_OPENAI_BASE_URL=x node seed.js", "sh -x seed.sh"])
+def test_seed_legitim_erlaubt(umg, tmp_path, mock, seed):
+    vorbereitet(umg, tmp_path)
+    r = starten_mit_seed(umg, seed, *mock)
+    assert r.returncode == 0, (seed, r.stdout + r.stderr)
+
+
 @pytest.mark.parametrize("name", ["OPENAI_API_BASE", "OPENAI_ORG_ID", "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY"])
 def test_env_regeln_weitere_reservierte_namen(umg, tmp_path, name):
     """M-2: Mit Mock sind auch die weiteren Namen gesperrt, ohne Rücksicht auf Groß-/Kleinschreibung; ohne Mock bleiben sie frei."""

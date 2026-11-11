@@ -105,11 +105,18 @@ MOCK_ENV = {
     "openai": (("OPENAI_BASE_URL", f"{MOCK_URL}/v1"), ("OPENAI_API_KEY", "poc-dummy-openai")),
     "anthropic": (("ANTHROPIC_BASE_URL", MOCK_URL), ("ANTHROPIC_API_KEY", "poc-dummy-anthropic")),
 }
-# Mit --modell-mock kein --env und keine Zuweisung im Start-Befehl mit diesen Namen (Groß-/Kleinschreibung egal): die Variablen des Mocks
-# und weitere, mit denen ein SDK sonst am Mock vorbei zu einem anderen Endpunkt oder Konto liefe.
+# Mit --modell-mock kein --env und keine Zuweisung oder Aufhebung im Start-Befehl und im Seed mit diesen Namen (Groß-/Kleinschreibung egal):
+# die Variablen des Mocks und weitere, mit denen ein SDK sonst am Mock vorbei zu einem anderen Endpunkt, Schlüssel oder Konto liefe.
 MOCK_RESERVIERT = frozenset({name for paare in MOCK_ENV.values() for name, _ in paare}
-                            | {"OPENAI_API_BASE", "OPENAI_ORG_ID", "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY"})
-MOCK_RESERVIERT_RE = re.compile(r"(?<![A-Za-z0-9_])(" + "|".join(sorted(MOCK_RESERVIERT)) + r")=", re.IGNORECASE)
+                            | {"OPENAI_API_BASE", "OPENAI_API_HOST", "OPENAI_ORG_ID", "OPENAI_PROJECT_ID", "ANTHROPIC_AUTH_TOKEN",
+                               "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY"})
+_RESERVIERT_NAMEN = "|".join(sorted(MOCK_RESERVIERT))
+# `NAME=` und `NAME+=` (Anhängen), mit Wortgrenze davor (`NEXT_PUBLIC_OPENAI_BASE_URL=` ist ein anderer Name).
+MOCK_RESERVIERT_RE = re.compile(r"(?<![A-Za-z0-9_])(" + _RESERVIERT_NAMEN + r")\+?=", re.IGNORECASE)
+# Aufheben statt Setzen: `unset … NAME` (im selben Befehl, nicht über `;`, `&`, `|`, Zeilenende hinweg), `env -u NAME`, `--unset NAME`.
+MOCK_ENTFERNT_RE = re.compile(r"(?<![A-Za-z0-9_])(?:unset\b[^;&|\n]*?\s|(?<![\w-])-u\s*|--unset[=\s]\s*)(" + _RESERVIERT_NAMEN + r")(?![A-Za-z0-9_])",
+                              re.IGNORECASE)
+_QUOTES_RE = re.compile(r"\\\r?\n|[\"'\\]")     # Zeilenfortsetzung, Anführungszeichen und Rückstrich: die Shell entfernt sie vor dem Lesen des Namens
 
 # Hinweis-Kategorien, die `bauen` ausgeben kann (`hinweis: <kategorie>`); SKILL.md und bericht-format.md nennen jede.
 HINWEIS_KATEGORIEN = ("native-module", "prisma-engines", "lockfile-ohne-paketliste", "node-range-zu-lang",
@@ -1013,22 +1020,28 @@ def _env_pruefen(env: list[str], modell_mock: list[str]) -> None:
             raise PocFehler(f"--env {name}: nicht erlaubter Host {_entschaerfen(fremd[0])[:100]}")
 
 
-def _start_befehl_pruefen(befehl: str, modell_mock: list[str]) -> None:
-    """Regeln für `--start-befehl` (Exit 2, die Meldung nennt nur Namen oder Host, nie den Befehl): mit `--modell-mock` darf er keinen
-    Namen aus `MOCK_RESERVIERT` zuweisen (`NAME=`, auch nach `env` und `export`); unabhängig davon läuft er durch die Netzregel."""
+def _start_befehl_pruefen(befehl: str, modell_mock: list[str], option: str = "--start-befehl") -> None:
+    """Regeln für `--start-befehl` und `--seed` (`option`; Exit 2, die Meldung nennt nur Namen oder Host, nie den Befehl): mit `--modell-mock`
+    darf der Befehl keinen Namen aus `MOCK_RESERVIERT` zuweisen oder aufheben (`NAME=`, `NAME+=`, auch nach `env` und `export`, `unset NAME`,
+    `env -u NAME`; Anführungszeichen, Rückstriche und Zeilenfortsetzungen im Namen zählen nicht: `OPENAI_BASE_UR""L=` wird erkannt);
+    unabhängig davon läuft er durch die Netzregel (nur URL-Hosts). Nicht erkennbar ist, was die Shell erst beim Ausführen zusammensetzt
+    (`eval`, Variablennamen aus Variablen, `process.env[…]` in einem Skript): die Sperre ist das interne Netz, nicht diese Prüfung."""
     if modell_mock:
-        m = MOCK_RESERVIERT_RE.search(befehl)
-        if m:
-            raise PocFehler(f"--start-befehl: reservierter Name {m.group(1)} bei --modell-mock")
+        for text in (befehl, _QUOTES_RE.sub("", befehl)):
+            m = MOCK_RESERVIERT_RE.search(text) or MOCK_ENTFERNT_RE.search(text)
+            if m:
+                raise PocFehler(f"{option}: reservierter Name {m.group(1)} bei --modell-mock")
     fremd = netzregel.url_verstoesse(befehl)
     if fremd:
-        raise PocFehler(f"--start-befehl: nicht erlaubter Host {_entschaerfen(fremd[0])[:100]}")
+        raise PocFehler(f"{option}: nicht erlaubter Host {_entschaerfen(fremd[0])[:100]}")
 
 
 def cmd_starten(a: argparse.Namespace) -> int:
     modell_mock = a.modell_mock or []
     _env_pruefen(a.env or [], modell_mock)
     _start_befehl_pruefen(a.start_befehl, modell_mock)
+    if a.seed:
+        _start_befehl_pruefen(a.seed, modell_mock, "--seed")      # läuft per `docker exec app sh -c`, also wie der Start-Befehl
     _daemon_pruefen()
     _frist_setzen("SECURITY_AUDIT_START_BUDGET", START_BUDGET)
     ordner = _ordner(a.lauf, anlegen=True)
