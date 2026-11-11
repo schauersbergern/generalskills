@@ -697,6 +697,14 @@ def test_kopf_ohne_ordner_repo_hinweis():
         assert "Repository-Ordners" not in md
 
 
+def test_kopf_ohne_projekt_ordner_und_repo_name_projekt_mit_hinweis_r1_10():
+    """R1-10 (Punkt 11): ohne `projekt`, `ordner` und `repo` (fehlend, null oder nur Leerraum) steht „Projekt“ im Kopf, mit dem Hinweissatz."""
+    for kopf in ({"ordner": None, "repo": None}, {"ordner": "  ", "repo": ""}, {"ordner": None, "repo": 5}):
+        md = md_von(befund(), projekt=None, **kopf)
+        assert md.startswith("# Manibase · Sicherheitsprüfung Projekt\n"), kopf
+        assert "Hinweis: Es wurde kein Projektname angegeben; verwendet wird der Name des Repositorys." in md, kopf
+
+
 def test_kopf_name_und_teilpfad_escaped():
     md = md_von(befund(), projekt="Mein_Portal [neu]", teilpfad="apps/web_ui")
     assert md.startswith("# Manibase · Sicherheitsprüfung Mein\\_Portal \\[neu\\]\n")
@@ -1985,6 +1993,25 @@ def test_zweiter_lauf_auf_dieselbe_json_endet_mit_exit5_und_entfernt_nichts_haer
     p = lauf(pfad)                                                           # Sperre frei: der Lauf geht durch (ohne Werkzeuge bis Exit 3)
     assert p.returncode == 3, p.stdout + p.stderr
     assert "Stand des ersten Laufs" not in open(kunde_pfad(pfad, "md"), encoding="utf-8").read()
+
+
+def test_altes_pdf_nicht_entfernbar_exit5_nichts_geschrieben_r1_11(tmp_path, monkeypatch, capsys):
+    """R1-11: Scheitert `unlink` einer alten Kundendatei, endet der Lauf mit Exit 5 `eingabe` (ohne den Dateinamen-Wert des Systems), bevor
+    etwas Neues geschrieben wird. Mit `except OSError: pass` liefe er weiter und ließe bei einem späteren PDF-Fehler ein altes PDF liegen."""
+    pfad = schreibe(tmp_path / "out", bericht_daten())
+    for endung in ("md", "pdf"):
+        open(kunde_pfad(pfad, endung), "w").write("alt")
+    echt = os.unlink
+
+    def kaputt(p, *a, **k):
+        if str(p).endswith("-kunde.pdf"):
+            raise PermissionError(13, "Operation not permitted", str(p))
+        return echt(p, *a, **k)
+    monkeypatch.setattr(os, "unlink", kaputt)
+    assert kundenbericht.main(["erstellen", "--json", str(pfad)]) == 5
+    assert capsys.readouterr().out.splitlines() == ["kategorie: eingabe", f"{BASIS}-kunde.pdf konnte nicht entfernt werden."]
+    assert open(kunde_pfad(pfad, "pdf")).read() == "alt"
+    assert inhalt(tmp_path / "out") == [BASIS + "-kunde.pdf", BASIS + ".json"]               # das Markdown war schon entfernt, nichts Neues geschrieben
 
 
 def test_sperre_wird_nach_jedem_lauf_frei_haertung(tmp_path):
