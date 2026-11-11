@@ -2117,6 +2117,83 @@ def test_projekt_ueber_200_zeichen_exit5_nichts_geschrieben_r2_5(tmp_path):
     assert lauf(pfad).returncode == 3
 
 
+def _halte_ordner(ordner, art=None):
+    import fcntl
+    fd = os.open(ordner, os.O_RDONLY)
+    fcntl.flock(fd, (art or fcntl.LOCK_EX) | fcntl.LOCK_NB)
+    return fd
+
+
+def test_ordnersperre_ist_exklusiv_auch_gegen_geteilte_sperre_r2_4(tmp_path, monkeypatch, capsys):
+    """Wie bei der JSON (R1-4): hält jemand den Ordner nur geteilt, muss die exklusive Sperre trotzdem warten bzw. scheitern."""
+    import fcntl
+    pfad = schreibe(tmp_path / "out", bericht_daten())
+    fd = _halte_ordner(tmp_path / "out", fcntl.LOCK_SH)
+    try:
+        monkeypatch.setattr(kundenbericht, "_ORDNER_WARTEN", 0.2)
+        assert kundenbericht.main(["erstellen", "--json", str(pfad)]) == 5
+        assert capsys.readouterr().out.splitlines() == ["kategorie: eingabe", "Ein anderer Lauf von erstellen belegt den Ausgabeordner gerade."]
+    finally:
+        os.close(fd)
+
+
+def test_ersetzte_json_umgeht_die_sperre_nicht_ordnersperre_r2_4(tmp_path, monkeypatch, capsys):
+    """R2-4: Lauf A hält die Sperre auf Inode 1 und steckt in der PDF-Kette; die JSON wird per rename ersetzt; Lauf B sperrt Inode 2 ohne
+    Konflikt und entfernte bisher As Kundendateien. Jetzt sperrt jeder Lauf den Ausgabeordner (stabil beim rename): B endet mit Exit 5
+    und lässt As Dateien liegen."""
+    import fcntl
+    pfad = schreibe(tmp_path / "out", bericht_daten())
+    for endung in ("md", "pdf"):
+        open(kunde_pfad(pfad, endung), "w").write("Stand von A")
+    a_json = os.open(pfad, os.O_RDONLY)
+    fcntl.flock(a_json, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    a_ordner = _halte_ordner(tmp_path / "out")
+    try:
+        neu = tmp_path / "out" / "neu.tmp"
+        neu.write_text(pfad.read_text(encoding="utf-8"), encoding="utf-8")
+        os.replace(neu, pfad)                                                      # Inode 2
+        monkeypatch.setattr(kundenbericht, "_ORDNER_WARTEN", 0.3)
+        assert kundenbericht.main(["erstellen", "--json", str(pfad)]) == 5
+        assert capsys.readouterr().out.splitlines() == ["kategorie: eingabe", "Ein anderer Lauf von erstellen belegt den Ausgabeordner gerade."]
+        assert [open(kunde_pfad(pfad, e)).read() for e in ("md", "pdf")] == ["Stand von A"] * 2
+    finally:
+        os.close(a_json)
+        os.close(a_ordner)
+
+
+def test_lauf_wartet_auf_den_ordner_und_laeuft_danach_r2_4(tmp_path, monkeypatch):
+    """Ein Lauf für eine andere JSON im selben Ordner wartet (statt mit Exit 5 zu enden), bis der andere fertig ist."""
+    import threading
+    monkeypatch.setenv("SECURITY_AUDIT_OHNE", "pandoc,weasyprint")
+    pfad = schreibe(tmp_path / "out", bericht_daten(), name="zweite.json")
+    fd = _halte_ordner(tmp_path / "out")
+    ergebnis = []
+    t = threading.Thread(target=lambda: ergebnis.append(kundenbericht._erstellen(str(pfad), time.monotonic() + 60)))
+    t.start()
+    time.sleep(0.5)
+    assert ergebnis == [] and t.is_alive(), "der Lauf wartet"
+    os.close(fd)
+    t.join(10)
+    assert ergebnis and ergebnis[0][0] == 3, ergebnis                               # ohne Werkzeuge: Markdown liegt, Exit 3
+
+
+def test_ordner_nicht_lesbar_oder_nicht_sperrbar_exit5_r2_4(tmp_path, monkeypatch, capsys):
+    import fcntl
+    pfad = schreibe(tmp_path / "out", bericht_daten())
+    echt = fcntl.flock
+    zaehler = []
+
+    def zweiter_schlaegt_fehl(fd, art):
+        zaehler.append(1)
+        if len(zaehler) == 2:                                                      # der erste ist die Sperre auf die JSON
+            raise OSError(__import__("errno").ENOLCK, "keine Sperren")
+        return echt(fd, art)
+    monkeypatch.setattr(fcntl, "flock", zweiter_schlaegt_fehl)
+    assert kundenbericht.main(["erstellen", "--json", str(pfad)]) == 5
+    assert capsys.readouterr().out.splitlines() == ["kategorie: eingabe", "Der Ausgabeordner lässt sich nicht sperren."]
+    assert inhalt(tmp_path / "out") == [BASIS + ".json"]
+
+
 # ------------------------------------------------------------------------------------ TF4 Härtung: Mutationsproben (Lücken geschlossen)
 
 @pytest.mark.parametrize("abkuerzung", ["--js", "--jso"])

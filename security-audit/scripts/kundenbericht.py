@@ -698,8 +698,12 @@ def _sperre(pfad: str):
     """Sperre (flock, nicht blockierend) auf die Eingabe-JSON für die Dauer eines Laufs: zwei `erstellen` auf dieselbe Datei würden sich die
     Kundendateien gegenseitig entfernen (das Entfernen kommt vor dem Lesen) und ihr PDF aus dem Markdown des anderen bauen. Der zweite Lauf
     endet mit Exit 5. Die Sperre hängt am offenen Dateideskriptor: sie endet mit dem Lauf, auch nach einem Absturz oder SIGKILL (nie eine
-    Sperrdatei, die liegen bleibt). Nur zwischen Läufen von `erstellen`; `rendern` und das Schreiben der JSON sperrt sie nicht. Die Sperre hängt an der Inode: nach dem Sperren
-    und vor dem Schreiben muss der Pfad noch auf sie zeigen (sonst Exit 5), und die JSON wird über den gesperrten Deskriptor gelesen (R1-4)."""
+    Sperrdatei, die liegen bleibt). Nur zwischen Läufen von `erstellen`; `rendern` und das Schreiben der JSON sperrt sie nicht.
+    Die Sperre auf die JSON hängt an der Inode: nach dem Sperren und vor dem Schreiben muss der Pfad noch auf sie zeigen (sonst Exit 5),
+    und die JSON wird über den gesperrten Deskriptor gelesen (R1-4). Wird die JSON per rename ersetzt, sperrt ein anderer Lauf die neue Inode
+    ohne Konflikt; darum sperrt jeder Lauf zusätzlich den Ausgabeordner (flock auf einen O_RDONLY-Deskriptor des Ordners, stabil beim rename,
+    ebenfalls ohne Sperrdatei) und wartet höchstens `_ORDNER_WARTEN` Sekunden darauf (R2-4): Läufe im selben Ordner laufen nacheinander,
+    nie gleichzeitig; danach Exit 5. Der Ordner gehört einem Repo, Läufe für andere Audits desselben Repos warten also kurz."""
     try:
         fd = os.open(pfad, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
     except OSError:
@@ -711,10 +715,40 @@ def _sperre(pfad: str):
             if ex.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
                 raise Abbruch(5, "eingabe", ["Ein anderer Lauf von erstellen bearbeitet diese Datei gerade."]) from None
             raise Abbruch(5, "eingabe", ["Die Eingabedatei lässt sich nicht sperren."]) from None
-        _ist_noch_diese_datei(fd, pfad)
-        yield fd
+        ordner_fd = _ordner_sperren(os.path.dirname(pfad))
+        try:
+            _ist_noch_diese_datei(fd, pfad)
+            yield fd
+        finally:
+            os.close(ordner_fd)
     finally:
         os.close(fd)
+
+
+_ORDNER_WARTEN = 30.0       # Sekunden, die ein Lauf auf den Ausgabeordner eines anderen wartet (R2-4)
+
+
+def _ordner_sperren(ordner: str) -> int:
+    """flock (exklusiv) auf den Ausgabeordner; wartet bis `_ORDNER_WARTEN` s, dann Exit 5. Gibt den offenen Deskriptor zurück."""
+    try:
+        fd = os.open(ordner, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        raise Abbruch(5, "eingabe", ["Der Ausgabeordner ist nicht lesbar."]) from None
+    frist = time.monotonic() + _ORDNER_WARTEN
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fd
+            except OSError as ex:
+                if ex.errno not in (errno.EWOULDBLOCK, errno.EAGAIN):
+                    raise Abbruch(5, "eingabe", ["Der Ausgabeordner lässt sich nicht sperren."]) from None
+            if time.monotonic() >= frist:
+                raise Abbruch(5, "eingabe", ["Ein anderer Lauf von erstellen belegt den Ausgabeordner gerade."])
+            time.sleep(0.1)
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def _ist_noch_diese_datei(fd: int, pfad: str) -> None:
