@@ -442,3 +442,31 @@ def test_ki_keine_fixture_namen_in_ki_und_test():
         text = open(os.path.join(HIER, datei), encoding="utf-8").read()
         for n in namen:
             assert n not in text, (datei, n)
+
+
+def test_ki_bom_wird_gelesen(umg):
+    """Task-2-Review Minor 1: package.json mit UTF-8-BOM."""
+    umg.schreibe("package.json", b"\xef\xbb\xbf" + json.dumps({"dependencies": {"openai": "1.0.0"}}).encode())
+    out = umg.ergebnis()
+    assert out["anwendbar"] is True and out["sdks"] == [{"paket": "openai", "datei": "package.json"}]
+
+
+def test_ki_unvollstaendige_suche_ohne_fund_exit1(umg, monkeypatch, capsys):
+    """Task-2-Review Minor 2: Kappung des Verzeichnislaufs ohne Fund ist kein „nicht anwendbar“."""
+    import lieferkette
+    monkeypatch.setattr(lieferkette, "MAX_EINTRAEGE", 3)
+    for i in range(6):
+        umg.schreibe(f"d{i}/datei.txt", "x")
+    rc, out, err = umg.inproc(monkeypatch, capsys)
+    assert rc == 1 and out is None and "unvollständig" in err
+
+
+def test_ki_unvollstaendige_suche_mit_fund_anwendbar(umg, monkeypatch, capsys):
+    import lieferkette
+    monkeypatch.setattr(lieferkette, "MAX_EINTRAEGE", 3)
+    umg.pkg(dependencies=["openai"])
+    for i in range(6):
+        umg.schreibe(f"z{i}/datei.txt", "x")
+    rc, out, _ = umg.inproc(monkeypatch, capsys)
+    assert rc == 0 and out["anwendbar"] is True
+    assert any(h.endswith("weitere Dateien nicht geprüft") for h in out["hinweise"])

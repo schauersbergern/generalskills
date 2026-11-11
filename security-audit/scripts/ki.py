@@ -99,7 +99,7 @@ def _auswerten(quelle: str, ende: float, s: _Sammler, f: _Funde) -> None:
             text = _lese_text(quelle, rel, groesse, s)
             if text is None:
                 return
-            daten = json.loads(text)
+            daten = json.loads(text.lstrip("\ufeff"))   # UTF-8-BOM (Task-2-Review Minor 1)
             if not isinstance(daten, dict):
                 raise TypeError(type(daten).__name__)
             f.datei(rel, daten)
@@ -119,6 +119,10 @@ def cmd_erkennen(a: argparse.Namespace) -> int:
         abgebrochen = True
     if abgebrochen and not f.paare:
         raise PocFehler("KI-Erkennung abgebrochen (Zeitbudget), bevor ein SDK gefunden wurde; kein Ergebnis", code=1)
+    # Task-2-Review Minor 2: unvollständige Suche (Kappung, Fehler im Verzeichnislauf) ohne Fund ist kein „nicht anwendbar“
+    if not f.paare and any(h.endswith("weitere Dateien nicht geprüft") for h in s.hinweise):
+        raise PocFehler("KI-Erkennung unvollständig (Verzeichnissuche abgebrochen), bevor ein SDK gefunden wurde; kein Ergebnis",
+                        code=1)
     sdks = sorted(f.paare)
     if sdks:
         namen = sorted({p for p, _ in sdks})[:MAX_NAMEN_IM_HINWEIS]
