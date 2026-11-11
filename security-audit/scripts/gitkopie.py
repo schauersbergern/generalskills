@@ -504,6 +504,34 @@ def repo_konfiguration(repo: str, rev: str = "HEAD") -> list[str]:
     return sorted(gefunden)
 
 
+def arbeitsbaum_konfiguration(wurzel: str, versioniert: list[str]) -> list[str]:
+    """Claude-/MCP-Konfiguration im Arbeitsbaum der Repo-Wurzel, die nicht in `versioniert` steht (ungetrackt oder ignoriert,
+    z. B. `.claude/settings.local.json`): Claude Code lädt sie trotzdem. Nur `lstat` auf die Orte im Wurzelordner
+    (`.mcp.json`, `.claude/settings*.json`, `.claude/skills|agents|commands`), der Inhalt wird nie gelesen."""
+    bekannt = set(versioniert)
+    gefunden: list[str] = []
+
+    def vorhanden(rel: str) -> bool:
+        try:
+            os.lstat(os.path.join(wurzel, rel))
+            return True
+        except OSError:
+            return False
+
+    kandidaten = [".mcp.json"]
+    try:
+        kandidaten += [f".claude/{n}" for n in sorted(os.listdir(os.path.join(wurzel, ".claude")))
+                       if (n.startswith("settings") and n.endswith(".json")) or n in ("skills", "agents", "commands")]
+    except OSError:
+        pass
+    for rel in kandidaten:
+        if rel in bekannt or any(b.startswith(rel + "/") for b in bekannt):
+            continue
+        if vorhanden(rel):
+            gefunden.append(rel)
+    return gefunden
+
+
 # ------------------------------------------------------------------------------------ Hinweise
 
 def _blob_hash(algo: str, fd: int, groesse: int) -> str | None:

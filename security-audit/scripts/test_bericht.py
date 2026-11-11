@@ -207,8 +207,9 @@ def test_kontext_bleibt_beim_ermittelten_sha_wenn_head_wandert_haertung_b3(tmp_p
         return echt(wurzel)
 
     monkeypatch.setattr(bericht, "_repo_name", wanderer)
-    k = bericht.kontext(str(r), "a", JETZT)
-    assert k["sha"] == sha1 and k["repo_konfiguration"] == []
+    k = bericht.kontext(str(r), "a", JETZT, repo_konfig_geprueft=True)
+    # Versioniert (im gemeldeten SHA) ist nichts; die vom Wanderer geschriebene `.mcp.json` liegt aber im Arbeitsbaum (R1-18).
+    assert k["sha"] == sha1 and k["repo_konfiguration"] == [".mcp.json (nur im Arbeitsbaum, nicht im geprüften Commit)"]
     assert not any("Symlink" in h for h in k["hinweise"]), k["hinweise"]
     assert roh(r, "rev-parse", "HEAD") != sha1
 
@@ -261,10 +262,56 @@ def test_ausgabe_ordner_standard_unter_home(tmp_path, monkeypatch):
 
 def test_repo_konfiguration_escaped_durchgereicht(tmp_path):
     r = neues_repo(tmp_path / "r", {".mcp.json": "{}", "sub/.claude/commands/x\ny.md": "x", "src/a.js": "x"})
-    k = bericht.kontext(str(r), None, JETZT)
+    k = bericht.kontext(str(r), None, JETZT, repo_konfig_geprueft=True)
     assert ".mcp.json" in k["repo_konfiguration"]
     assert "sub/.claude/commands/x\\ny.md" in k["repo_konfiguration"]
     assert all("\n" not in p for p in k["repo_konfiguration"])
+
+
+def test_repo_konfiguration_ohne_schalter_bricht_vor_der_reservierung_ab_r1_14(tmp_path):
+    """R1-14: kein `.reserviert` bleibt liegen, der Neustart mit Schalter bekommt den normalen Basisnamen (kein -2)."""
+    r = neues_repo(tmp_path / "kunde-portal", {".mcp.json": "{}", "src/a.js": "x"}, origin="https://github.com/a/kunde-portal.git")
+    with pytest.raises(bericht.KontextFehler) as e:
+        bericht.kontext(str(r), None, JETZT)
+    assert ".mcp.json" in str(e.value) and "repo-konfig-geprueft" in str(e.value)
+    ordner = os.path.join(str(tmp_path / "home"), ".claude", "security-reviews", "kunde-portal")
+    assert not [n for n in os.listdir(ordner) if n.endswith(".reserviert")] if os.path.isdir(ordner) else True
+    k = bericht.kontext(str(r), None, JETZT, repo_konfig_geprueft=True)
+    assert k["basisname"] == f"2026-11-09-{k['sha7']}"
+    assert k["repo_konfiguration"] == [".mcp.json"]
+
+
+def test_repo_konfiguration_im_arbeitsbaum_wird_gemeldet_r1_18(tmp_path):
+    """R1-18: ungetrackte/ignorierte Konfiguration lädt Claude Code trotzdem; sie wird ohne Inhaltszugriff gemeldet."""
+    r = neues_repo(tmp_path / "kunde-portal", {"src/a.js": "x", ".claude/settings.json": "{}"},
+                   origin="https://github.com/a/kunde-portal.git")
+    assert bericht.kontext(str(r), None, JETZT, repo_konfig_geprueft=True)["repo_konfiguration"] == [".claude/settings.json"]
+    (r / ".claude" / "settings.local.json").write_text("{}")
+    (r / ".mcp.json").write_text("{}")
+    (r / ".claude" / "commands").mkdir()
+    with pytest.raises(bericht.KontextFehler) as e:
+        bericht.kontext(str(r), None, JETZT)
+    for erwartet in (".claude/settings.json", ".claude/settings.local.json (nur im Arbeitsbaum, nicht im geprüften Commit)",
+                     ".mcp.json (nur im Arbeitsbaum, nicht im geprüften Commit)", ".claude/commands (nur im Arbeitsbaum, nicht im geprüften Commit)"):
+        assert erwartet in str(e.value), erwartet
+
+
+def test_arbeitsbaum_konfiguration_nur_unversioniertes_und_nie_inhalt_r1_18(tmp_path):
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.json").write_text("{}")
+    (tmp_path / ".claude" / "skills").mkdir()
+    (tmp_path / ".claude" / "settings.local.json").symlink_to(tmp_path / "gibt-es-nicht")     # lstat: kaputter Link zählt
+    assert bericht.gitkopie.arbeitsbaum_konfiguration(str(tmp_path), [".claude/settings.json", ".claude/skills/x/SKILL.md"]) == \
+        [".claude/settings.local.json"]
+    assert bericht.gitkopie.arbeitsbaum_konfiguration(str(tmp_path / "leer"), []) == []
+
+
+def test_repo_konfiguration_cli_exit_3_und_schalter_r1_14(tmp_path, capsys):
+    r = neues_repo(tmp_path / "kunde-portal", {".mcp.json": "{}"}, origin="https://github.com/a/kunde-portal.git")
+    assert bericht.main(["kontext", "--repo", str(r)]) == 3
+    assert "Gefunden: .mcp.json" in capsys.readouterr().err
+    assert bericht.main(["kontext", "--repo", str(r), "--repo-konfig-geprueft"]) == 0
+    assert json.loads(capsys.readouterr().out)["repo_konfiguration"] == [".mcp.json"]
 
 
 def test_hinweise_aus_repo_hinweise(tmp_path):

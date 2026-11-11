@@ -107,8 +107,10 @@ def _slug(teilpfad: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", teilpfad.lower()).strip("-") or "teil"
 
 
-def kontext(repo: str, teilpfad: str | None, jetzt: datetime | None = None) -> dict:
-    """Kontext des Repos unter dem Pfad `repo`; wirft KontextFehler (CLI: Exit 3)."""
+def kontext(repo: str, teilpfad: str | None, jetzt: datetime | None = None, repo_konfig_geprueft: bool = False) -> dict:
+    """Kontext des Repos unter dem Pfad `repo`; wirft KontextFehler (CLI: Exit 3). Bringt das Repo eigene Claude-Konfiguration
+    mit (`repo_konfiguration` nicht leer), bricht `kontext` ohne `repo_konfig_geprueft` vor der Namensreservierung ab: ein
+    späterer Aufruf mit dem Schalter bekommt denselben Basisnamen (kein `-2` durch den Abbruch)."""
     jetzt = jetzt or datetime.now()
     try:
         wurzel = os.fsdecode(git(repo, "rev-parse", "--show-toplevel").stdout).rstrip("\n")
@@ -123,11 +125,18 @@ def kontext(repo: str, teilpfad: str | None, jetzt: datetime | None = None) -> d
     slug = _slug(echt) if echt is not None else None
     # git-Teil vor der Reservierung: scheitert er (auch am Zeitbudget), bleibt keine `.reserviert`-Datei zurück
     try:
-        konfig = [_t(p) for p in gitkopie.repo_konfiguration(wurzel, sha)]
+        versioniert = gitkopie.repo_konfiguration(wurzel, sha)
+        konfig = [_t(p) for p in versioniert] + [f"{_t(p)} (nur im Arbeitsbaum, nicht im geprüften Commit)"
+                                                 for p in gitkopie.arbeitsbaum_konfiguration(wurzel, versioniert)]
     except ZeitbudgetFehler as e:
         raise KontextFehler(_zeitbudget_meldung(e)) from e
     except GitFehler as e:
         raise KontextFehler(f"Konfiguration in HEAD nicht lesbar: {_t(e)}") from e
+    if konfig and not repo_konfig_geprueft:
+        raise KontextFehler("Dieses Repo bringt eigene Claude-Konfiguration mit, die in dieser Session Code auf dem Host "
+                            "ausführen kann. Prüfe sie und starte die Session mit `claude --setting-sources user "
+                            "--strict-mcp-config`, dann `/security-audit … repo-konfig-geprueft`.\n"
+                            f"Gefunden: {', '.join(konfig)}")
     hinweise = gitkopie.repo_hinweise(wurzel, sha)      # git-Fehler werden dort zu Hinweisen; Zeitbudget unten geprüft
     if gitkopie.frist_erschoepft():
         raise KontextFehler(_zeitbudget_meldung(ZeitbudgetFehler("Prüfung des Repos nicht beendet")))
@@ -512,6 +521,7 @@ def main(argv: list[str]) -> int:
     k = sub.add_parser("kontext")
     k.add_argument("--teilpfad")
     k.add_argument("--repo", default=".")
+    k.add_argument("--repo-konfig-geprueft", action="store_true", dest="repo_konfig_geprueft")
     r = sub.add_parser("rendern")
     r.add_argument("json")
     args = ap.parse_args(_argv_mit_werten(argv))
@@ -519,7 +529,7 @@ def main(argv: list[str]) -> int:
         return _rendern(args.json)
     try:
         gitkopie.frist_setzen(time.monotonic() + _kontext_budget())
-        ergebnis = kontext(args.repo, args.teilpfad)
+        ergebnis = kontext(args.repo, args.teilpfad, repo_konfig_geprueft=args.repo_konfig_geprueft)
     except KontextFehler as e:
         print(str(e), file=sys.stderr)
         return 3
