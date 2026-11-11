@@ -2271,3 +2271,61 @@ def test_ordner_im_worktree_ist_der_hauptordner_r1_8(tmp_path):
     assert (k["repo"], k["ordner"]) == ("kundenshop", "kundenshop")
     assert k["wurzel"] == os.path.realpath(wt)                                  # die Wurzel bleibt der Worktree
     assert bericht.kontext(str(r), None, JETZT)["ordner"] == "kundenshop"
+
+
+# ------------------------------------------------------------------------------------ Review R1-10: überlebende Mutanten
+
+def test_regel_d_pfad_mit_schraegstrich_ohne_punkt_r1_10():
+    """`_d_allgemein` erkennt `Pfad:Zahl` auch ohne Punkt, wenn ein `/` im Pfad steht (`bin/start:12`)."""
+    assert regeln(kd(massnahme=KD_VORSPANN + "Siehe bin/start:12 im Projekt.", poc="x")) == ["d"]
+    assert "d" in [r for r, _ in bericht.text_verstoesse("Siehe bin/start:12 im Projekt.")]
+    assert regeln(kd(massnahme=KD_VORSPANN + "Gegen 14:30 Uhr geschah das.", poc="x")) == []
+
+
+def test_regel_a_token_nur_mit_dollarzeichen_r1_10():
+    """`$` allein macht ein Token aus dem `poc` zum Treffer (`$(whoami)`: weder `/` noch `\\w.\\w`)."""
+    d = kd(massnahme=KD_VORSPANN + "Der Aufruf $(whoami) wird ausgeführt.", poc="x $(whoami)")
+    assert [t[2:] for t in bericht.kunden_verstoesse(d)] == [("a", "$(whoami")]
+
+
+def test_kopf_regel_a_ist_unabhaengig_von_der_grossschreibung_r1_10():
+    d = kd(poc="x org_id")
+    assert bericht.kopf_verstoesse(d, {"projekt": "PORTAL ORG_ID"}) == [("projekt", "a", "Text aus einem poc")]
+
+
+def test_nfkc_in_poc_token_und_quellpfad_r1_10():
+    """Die Quellen der Regeln a und e zählen nach NFKC wie die geprüften Texte: `poc` und `datei` in Vollbreiten-Schreibweise treffen."""
+    d = kd(massnahme=KD_VORSPANN + "Betrifft org_id im Code.", poc="x ｏｒｇ＿ｉｄ")
+    assert regeln(d, "massnahme") == ["a"]
+    d = kd(massnahme=KD_VORSPANN + "Betrifft src/abc.ts im Code.", poc="x", datei="ｓｒｃ／ａｂｃ．ｔｓ", code_pfad=["x:1"])
+    assert "e" in regeln(d, "massnahme")
+
+
+def test_kundenfeld_aus_leerzeichen_und_kurztext_ist_zu_kurz_r1_10():
+    """Die Mindestlänge zählt ohne umgebenden Leerraum: „kurz“ mit Leerzeichen aufgefüllt ist keine 40 Zeichen lange Zusammenfassung."""
+    d = kd(zusammenfassung="kurz" + " " * 60)
+    assert any("kürzer als 40" in f for f in bericht.pruefe_schema(d)), bericht.pruefe_schema(d)
+    d = kd(massnahme="   kurz   " + " " * 20)
+    assert any("kürzer als 20" in f for f in bericht.pruefe_schema(d))
+
+
+def test_arbeitsbudget_ist_fuer_a_e_und_d_gemeinsam_r1_10(monkeypatch):
+    """Jede Gruppe allein bleibt unter der Grenze, zusammen überschreiten sie sie: fail-closed. Eine Prüfung mit eigenem Budget je Regel
+    ließe das durch."""
+    d = kd(poc=" ".join(f"api/orders/{j}" for j in range(10)), datei="x.ts", code_pfad=[f"src/abc/f{j}" for j in range(10)],
+           zusammenfassung="Die Stellen api/or und src/abc sind betroffen und brauchen die Aufmerksamkeit der Verantwortlichen.")
+    monkeypatch.setattr(bericht, "_MAX_SCHRITTE", 15)
+    assert {(t[2], t[3]) for t in bericht.kunden_verstoesse(d) if t[1] == "zusammenfassung"} == {("a", "zu viele Token zum Prüfen")}
+    monkeypatch.setattr(bericht, "_MAX_SCHRITTE", 20)
+    assert [t for t in bericht.kunden_verstoesse(d) if t[1] == "zusammenfassung"] == []
+
+
+def test_arbeitsbudget_ist_auch_fuer_d_gemeinsam_mit_a_r1_10(monkeypatch):
+    """Dasselbe für Regel d: Pfade ohne `/` (nur d-Nadeln) teilen das Budget mit den Token der Regel a."""
+    d = kd(poc=" ".join(f"api/orders/{j}" for j in range(10)), datei="x.ts", code_pfad=["x:1"],
+           zusammenfassung="Die Stellen api/or und abcdef sind betroffen und brauchen die Aufmerksamkeit der Verantwortlichen.")
+    d["befunde"] += [befund(id=f"S-{j + 2}", datei=f"abcdef{j}.ts", zeile=1, poc="x") for j in range(10)]
+    monkeypatch.setattr(bericht, "_MAX_SCHRITTE", 15)
+    assert {(t[2], t[3]) for t in bericht.kunden_verstoesse(d) if t[:2] == ("S-1", "zusammenfassung")} == {("a", "zu viele Token zum Prüfen")}
+    monkeypatch.setattr(bericht, "_MAX_SCHRITTE", 25)
+    assert [t for t in bericht.kunden_verstoesse(d) if t[:2] == ("S-1", "zusammenfassung")] == []
