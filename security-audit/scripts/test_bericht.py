@@ -658,7 +658,7 @@ def test_markdown_pakete_escaped_backticks_und_leere_advisories():
 # ------------------------------------------------------------------------------------ KI-Felder (TF3)
 
 def ki_befund(**kw):
-    return befund(owasp_ki=["ASI01", "LLM02"], annahme_modell=True, **kw)
+    return befund(owasp_ki=["ASI01", "LLM02"], annahme_modell=True, **{"klasse": "K1 Tool mit Wirkung", **kw})
 
 
 def test_schema_owasp_ki_gueltig():
@@ -704,8 +704,18 @@ def test_schema_annahme_modell_true_nur_mit_bestaetigt(status):
 
 def test_schema_annahme_modell_true_status_nfd_ist_bestaetigt():
     import unicodedata
-    b = befund(status=unicodedata.normalize("NFD", "bestätigt"), annahme_modell=True)
+    b = befund(status=unicodedata.normalize("NFD", "bestätigt"), annahme_modell=True, klasse="K1 Tool mit Wirkung")
     assert not any("annahme_modell" in x for x in bericht.pruefe_schema(mit(b)))
+
+
+@pytest.mark.parametrize("klasse", ["K3 Tool-Rechte", "K5 Geheimnisse im Prompt", "K6 Speicher über Mandanten", "K7 MCP-Herkunft",
+                                    "keine weiteren", "K10 x", "k1 x", "K1x", "x K1 y"])
+def test_schema_annahme_modell_true_nur_bei_k1_k2_k4_review_r1_9(klasse):
+    """Review R1-9: `annahme_modell: true` gehört nur an bestätigte K1-, K2- und K4-Befunde. Sonst zeigte der Bericht „bestätigt (Modell-Mock,
+    Annahme: Modell folgt)“ bei einem Befund ohne Modellentscheidung."""
+    f = bericht.pruefe_schema(mit(befund(klasse=klasse, annahme_modell=True)))
+    assert any("S-1" in x and "annahme_modell" in x and "K1, K2 oder K4" in x for x in f), f
+    assert bericht.pruefe_schema(mit(befund(klasse=klasse, annahme_modell=False))) == []
 
 
 @pytest.mark.parametrize("klasse", ["K1 Tool mit Wirkung nach fremd befülltem Kontext", "K2 Tool-Argumente in Senke", "K4 Modellausgabe in Senke",
@@ -762,7 +772,7 @@ def test_markdown_annahme_modell_statusanzeige():
 
 
 def test_markdown_ki_felder_lassen_befundliste_unveraendert():
-    basis = codeblock(bericht.markdown(mit(befund())))
+    basis = codeblock(bericht.markdown(mit(befund(klasse="K1 Tool mit Wirkung"))))
     mit_ki = codeblock(bericht.markdown(mit(ki_befund())))
     assert mit_ki == basis
     block = "\n".join(mit_ki)

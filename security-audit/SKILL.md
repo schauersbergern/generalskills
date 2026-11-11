@@ -227,6 +227,6 @@ Pfade von `.md` und `.json`, Zahl der Befunde je Stufe und Status, Zahl der Verw
 - `<MODELL_MOCK>` im Briefing nicht ersetzt oder „läuft“ geschrieben, obwohl `starten` ohne `--modell-mock` lief.
 - K1-, K2- oder K4-Befund `bestätigt` ohne Marker, ohne `wenn_enthaelt` im Antwort-Eintrag oder ohne Request-Nr., Pfad und `fundstelle` im `poc` (für K3, K5, K6 und K7 gilt das nicht, siehe Schritt 6): Der Mock gibt eine Antwort ohne `wenn_enthaelt` an irgendeinen Request, der Beleg ist dann wertlos, der Befund höchstens `unbestätigt`.
 - `neustart` nach `modell --antworten-datei` oder nach dem Befüllen der Quelle: Er leert Warteschlange und Protokoll und setzt die App auf den Seed zurück, Antwort und Quelle sind weg (Ablauf in Schritt 6).
-- `annahme_modell` für K3, K5, K6 oder K7 gesetzt, vom Prüfer statt von der Hauptsession, oder bei einem anderen Status als `bestätigt` (das Schema lehnt es ab).
+- `annahme_modell` für K3, K5, K6 oder K7 gesetzt, vom Prüfer statt von der Hauptsession, oder bei einem anderen Status als `bestätigt` (das Schema lehnt `true` bei K3, K5, K6, K7 und bei einem anderen Status als `bestätigt` ab; ob die Hauptsession oder der Prüfer es gesetzt hat, sieht es nicht).
 - Eine Modell-API als Ziel in einem Befehl oder Suchmuster: nie, als Modellziel gilt nur `llm`.
 - Aufräumen vergessen, wenn der Lauf vorher scheiterte.

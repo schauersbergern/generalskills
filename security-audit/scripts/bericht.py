@@ -360,6 +360,8 @@ def _befund_fehler(b: dict, label: str, teilpfad: str | None = None) -> list[str
             fehler("annahme_modell", "muss true oder false sein")
         elif b["annahme_modell"] and status != "bestätigt":
             fehler("annahme_modell", "true ist nur mit status bestätigt erlaubt")
+        elif b["annahme_modell"] and not (isinstance(b.get("klasse"), str) and _KLASSE_MODELL_MOCK.match(b["klasse"])):
+            fehler("annahme_modell", "true ist nur bei K1, K2 oder K4 erlaubt (nur dort hängt die Wirkung an einer Modellentscheidung)")
     if (status == "bestätigt" and isinstance(b.get("klasse"), str) and _KLASSE_MODELL_MOCK.match(b["klasse"])
             and b.get("annahme_modell") is not True and type(b.get("annahme_modell", False)) is bool):
         fehler("annahme_modell", "K1, K2 oder K4 mit status bestätigt beruht auf dem Modell-Mock und braucht annahme_modell true "
