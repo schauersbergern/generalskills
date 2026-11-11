@@ -15,6 +15,10 @@ Exit-Codes: 0 ok, 2 ungültige Argumente, 3 Docker fehlt oder Daemon nicht errei
 (erste stdout-Zeile `kategorie: <wert>`, danach höchstens die letzten 40 Zeilen der Docker-Ausgabe),
 1 sonstiger Fehler (Request fehlgeschlagen, Befehl im Container mit Exit ≠ 0, Aufräumen unvollständig).
 
+`starten --modell-mock openai,anthropic` startet vor der App den Modell-Mock `<netz>-llm` (Alias `llm`, Port 4010, nur im internen Netz)
+und setzt in der App die Variablen der gewählten APIs (Dummy-Schlüssel). `--env`: jeder Wert läuft durch die Netzregel (Exit 2 bei
+fremdem Host, die Meldung nennt nie den Wert); mit `--modell-mock` sind die vier Variablen des Mocks für `--env` reserviert.
+
 `SECURITY_AUDIT_OHNE` (kommagetrennt): `docker` lässt `pruefen`, `bauen`, `starten` und `neustart` mit Exit 3 `docker-fehlt` enden.
 `bauen` verlangt den Schwärzungs-Marker (`schwaerz_marker`, gesetzt von `lieferkette.py secrets`; `vorbereiten` löscht ihn),
 solange gitleaks im PATH liegt und nicht in `SECURITY_AUDIT_OHNE` steht: sonst Exit 4 `kategorie: nicht-geschwaerzt`. Der Marker
@@ -41,6 +45,7 @@ from typing import NamedTuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gitkopie  # noqa: E402
+import netzregel  # noqa: E402
 
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 DOCKER_DIR = os.path.join(SKILL_DIR, "docker")
@@ -59,6 +64,7 @@ SEED_TIMEOUT = 180
 PULL_TIMEOUT = 300
 EXEC_TIMEOUT = 120
 DB_WARTEN = 60
+MOCK_BEREIT = 30                 # höchstens so lange wartet starten/neustart auf die Bereitschaft des Modell-Mocks (nur verkürzbar)
 START_BUDGET = 440               # Gesamtzeit der Arbeitsphase von starten/neustart (Skill-Bash-Limit: 600 s, Aufräumen folgt)
 AUFRAEUMEN_BUDGET = 440          # Gesamtzeit der Docker-Aufrufe von aufraeumen
 VORBEREITEN_BUDGET = 480         # Gesamtzeit von vorbereiten: Entfernen der alten Kopie, git-Aufrufe, Kopieren (Skill-Bash-Limit: 600 s)
@@ -74,6 +80,15 @@ AUSGABE_MAX = 64 * 1024         # was anfrage/ausfuehren höchstens auf stdout a
 APP_PORT_DB = 5432
 POSTGRES_IMAGE = "postgres:16-alpine"
 DB_URL = "postgres://poc:poc@db:5432/poc"
+MOCK_PORT = 4010                 # API des Modell-Mocks im Netz der Rolle (Alias `llm`)
+MOCK_STEUER_PORT = 4011          # Steuerung: lauscht im Container nur auf 127.0.0.1
+MOCK_URL = f"http://llm:{MOCK_PORT}"
+# Modell-Mock je API: (Name, Wert) der Variablen, die `starten --modell-mock` im App-Container setzt (Dummy-Schlüssel, keine echten).
+MOCK_ENV = {
+    "openai": (("OPENAI_BASE_URL", f"{MOCK_URL}/v1"), ("OPENAI_API_KEY", "poc-dummy-openai")),
+    "anthropic": (("ANTHROPIC_BASE_URL", MOCK_URL), ("ANTHROPIC_API_KEY", "poc-dummy-anthropic")),
+}
+MOCK_RESERVIERT = frozenset(name for paare in MOCK_ENV.values() for name, _ in paare)   # mit --modell-mock kein --env dieser Namen
 
 # Hinweis-Kategorien, die `bauen` ausgeben kann (`hinweis: <kategorie>`); SKILL.md und bericht-format.md nennen jede.
 HINWEIS_KATEGORIEN = ("native-module", "prisma-engines", "lockfile-ohne-paketliste", "node-range-zu-lang",
@@ -90,6 +105,9 @@ DAEMON_WEG = ("cannot connect to the docker daemon", "error during connect", "is
 HAERTUNG_APP = ["--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--memory", "1g", "--pids-limit", "256"]
 # Kein --cap-drop: der Postgres-Entrypoint braucht chown und den Benutzerwechsel.
 HAERTUNG_DB = ["--security-opt", "no-new-privileges", "--memory", "512m", "--pids-limit", "256"]
+# Modell-Mock: eigener Satz (kleiner als HAERTUNG_APP, kein doppeltes --memory), Dateisystem nur lesbar, /tmp ohne exec.
+HAERTUNG_MOCK = ["--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--memory", "256m", "--pids-limit", "64",
+                 "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m"]
 
 
 class PocFehler(Exception):
@@ -227,13 +245,16 @@ def _lade_rolle(lauf: str, rolle: str) -> dict:
             z = json.load(f)
         port, befehl = z["port"], z["start_befehl"]
         env, dienst, seed = z.get("env", []), z.get("dienst"), z.get("seed")
+        mock = z.get("modell_mock", [])       # fehlt bei Dateien ohne Modell-Mock: Rolle ohne Mock
         if not (isinstance(port, int) and 0 < port < 65536 and isinstance(befehl, str) and befehl
                 and isinstance(env, list) and all(isinstance(e, str) and "=" in e for e in env)
-                and dienst in (None, "postgres") and (seed is None or isinstance(seed, str))):
+                and dienst in (None, "postgres") and (seed is None or isinstance(seed, str))
+                and isinstance(mock, list) and all(isinstance(m, str) and m in MOCK_ENV for m in mock)
+                and len(set(mock)) == len(mock)):
             raise ValueError("Zustandsdatei ungültig")
     except (OSError, ValueError, KeyError, TypeError):
         raise PocFehler(f"Rolle {rolle} nicht gestartet (oder Zustand unlesbar): erst `poc.py starten`") from None
-    return {"start_befehl": befehl, "port": port, "env": env, "dienst": dienst, "seed": seed}
+    return {"start_befehl": befehl, "port": port, "env": env, "dienst": dienst, "seed": seed, "modell_mock": mock}
 
 
 # ------------------------------------------------------------------------------------ docker-Aufruf
@@ -267,6 +288,15 @@ def _frist_setzen(umgebungsvariable: str, standard: int) -> None:
         sekunden = standard
     _BUDGET_SEKUNDEN = sekunden if sekunden > 0 else standard
     _ENDE = time.monotonic() + _BUDGET_SEKUNDEN
+
+
+def _mock_bereit_sekunden() -> int:
+    """Wartezeit auf den Modell-Mock: `MOCK_BEREIT`, über SECURITY_AUDIT_MOCK_BEREIT nur verkürzbar (nie verlängerbar)."""
+    try:
+        sekunden = int(os.environ.get("SECURITY_AUDIT_MOCK_BEREIT", ""))
+    except ValueError:
+        return MOCK_BEREIT
+    return sekunden if 0 < sekunden < MOCK_BEREIT else MOCK_BEREIT
 
 
 def _ohne_frist() -> None:
@@ -831,7 +861,7 @@ def cmd_bauen(a: argparse.Namespace) -> int:
 def _rolle_entfernen(lauf: str, rolle: str) -> None:
     netz = _netz(lauf, rolle)
     # `-v`: auch das anonyme Volume des Postgres-Images; sonst bliebe je neustart ein Volume liegen
-    _docker(["rm", "-f", "-v", f"{netz}-app", f"{netz}-db"], KURZ_TIMEOUT, budget=False)  # fehlende Container sind kein Fehler
+    _docker(["rm", "-f", "-v", f"{netz}-app", f"{netz}-db", f"{netz}-llm"], KURZ_TIMEOUT, budget=False)  # fehlende Container sind kein Fehler
 
 
 def _anfrage_container(lauf: str, rolle: str, argumente: list[str], daten: bytes, timeout: int) -> Ergebnis:
@@ -845,7 +875,8 @@ def _anfrage_container(lauf: str, rolle: str, argumente: list[str], daten: bytes
     return r
 
 
-def _start_fehler(lauf: str, rolle: str, text: str) -> int:
+def _start_fehler(lauf: str, rolle: str, text: str, container: str = "app") -> int:
+    """`container`: dessen Logs den Fehlertext ergänzen (`app`, bei einem Fehler des Modell-Mocks `llm`)."""
     try:
         _daemon_pruefen()  # Daemon-Störung ohne Marker im Text: docker-fehlt statt start-fehler
     except DockerFehlt:
@@ -854,11 +885,34 @@ def _start_fehler(lauf: str, rolle: str, text: str) -> int:
         except DockerFehlt:
             pass                           # Daemon wirklich weg: `poc.py aufraeumen` holt es später nach
         raise
-    logs = _docker(["logs", "--tail", str(TAIL_ZEILEN), f"{_netz(lauf, rolle)}-app"], KURZ_TIMEOUT, budget=False)
+    logs = _docker(["logs", "--tail", str(TAIL_ZEILEN), f"{_netz(lauf, rolle)}-{container}"], KURZ_TIMEOUT, budget=False)
     _rolle_entfernen(lauf, rolle)
     if _budget_erschoepft():
         text = f"Zeitbudget von {_BUDGET_SEKUNDEN} s erschöpft (Bash-Limit des Skills: 600 s). {text}"
     return _fehler_ende("start-fehler", "\n".join(t for t in (_tail(text), _tail(logs.text) if logs.ok else "") if t))
+
+
+def _mock_starten(lauf: str, rolle: str) -> str | None:
+    """Modell-Mock `<netz>-llm` im internen Netz der Rolle starten und auf seine Bereitschaft warten (`exec --bereit`: Exit 0
+    heißt bereit, Exit 1 nicht; bei festen Ports schreibt der Server nichts auf stdout). Gibt die Fehlerbeschreibung zurück,
+    None bei Erfolg. Jede Abfrage bekommt höchstens die Restzeit der Bereitschaftsfrist als Timeout."""
+    netz = _netz(lauf, rolle)
+    llm = f"{netz}-llm"
+    r = _docker(["run", "-d", "--pull", "never", "--name", llm, "--network", netz, "--network-alias", "llm", *HAERTUNG_MOCK,
+                 _image(lauf), "node", "/poc/llm-mock.mjs", "--server", "--port", str(MOCK_PORT),
+                 "--steuer-port", str(MOCK_STEUER_PORT)], 120)
+    if not r.ok:
+        return f"nicht gestartet: {r.text}"
+    frist = _mock_bereit_sekunden()
+    ende = time.monotonic() + frist
+    while True:
+        rest = ende - time.monotonic()
+        if rest <= 0 or _budget_erschoepft():
+            return f"nicht bereit nach {frist} s"
+        r = _docker(["exec", "-i", llm, "node", "/poc/llm-mock.mjs", "--bereit"], min(KURZ_TIMEOUT, max(1, int(rest))))
+        if r.ok:
+            return None
+        time.sleep(min(1, max(0, ende - time.monotonic())))
 
 
 def _starte(lauf: str, rolle: str, p: dict) -> int:
@@ -868,6 +922,10 @@ def _starte(lauf: str, rolle: str, p: dict) -> int:
     r = _docker(["network", "create", "--internal", netz], KURZ_TIMEOUT)
     if not r.ok and "already exists" not in r.text:
         return _start_fehler(lauf, rolle, f"Netz {netz} nicht erstellt: {r.text}")
+    if p["modell_mock"]:
+        fehler = _mock_starten(lauf, rolle)
+        if fehler is not None:
+            return _start_fehler(lauf, rolle, f"Modell-Mock: {fehler}", "llm")
     if p["dienst"] == "postgres":
         if not _docker(["image", "inspect", POSTGRES_IMAGE], KURZ_TIMEOUT).ok:
             r = _docker(["pull", POSTGRES_IMAGE], PULL_TIMEOUT)
@@ -890,6 +948,9 @@ def _starte(lauf: str, rolle: str, p: dict) -> int:
     umgebung = ["-e", "HOST=0.0.0.0", "-e", f"PORT={p['port']}"]
     for e in p["env"]:
         umgebung += ["-e", e]
+    for api in p["modell_mock"]:
+        for name, wert in MOCK_ENV[api]:
+            umgebung += ["-e", f"{name}={wert}"]
     r = _docker(["run", "-d", "--pull", "never", "--name", app, "--network", netz, "--network-alias", "app", *HAERTUNG_APP, *umgebung,
                  _image(lauf), "sh", "-c", p["start_befehl"]], 120)
     if not r.ok:
@@ -905,14 +966,32 @@ def _starte(lauf: str, rolle: str, p: dict) -> int:
     print(f"app: http://app:{p['port']} (Rolle {rolle}, Netz {netz})")
     if p["dienst"] == "postgres":
         print(f"db: {DB_URL}")
+    if p["modell_mock"]:
+        print(f"modell-mock: {MOCK_URL} ({', '.join(p['modell_mock'])})")
     return 0
 
 
+def _env_pruefen(env: list[str], modell_mock: list[str]) -> None:
+    """Regeln für `--env` (Exit 2, Meldungen nennen nur Namen und Host, nie den Wert): jeder Wert läuft durch die Netzregel
+    (`netzregel.verstoesse_poc`: nur app, db, llm, localhost und Loopback); mit `--modell-mock` sind die Namen in `MOCK_RESERVIERT`
+    (alle vier, auch die der nicht gewählten API) gesperrt, weil `starten` sie selbst setzt."""
+    for e in env:
+        name, _, wert = e.partition("=")
+        if modell_mock and name in MOCK_RESERVIERT:
+            raise PocFehler(f"--env {name}: reservierter Name bei --modell-mock")
+        fremd = netzregel.verstoesse_poc(wert)
+        if fremd:
+            raise PocFehler(f"--env {name}: nicht erlaubter Host {_entschaerfen(fremd[0])[:100]}")
+
+
 def cmd_starten(a: argparse.Namespace) -> int:
+    modell_mock = a.modell_mock or []
+    _env_pruefen(a.env or [], modell_mock)
     _daemon_pruefen()
     _frist_setzen("SECURITY_AUDIT_START_BUDGET", START_BUDGET)
     ordner = _ordner(a.lauf, anlegen=True)
-    p = {"start_befehl": a.start_befehl, "port": a.port, "env": a.env or [], "dienst": a.dienst, "seed": a.seed}
+    p = {"start_befehl": a.start_befehl, "port": a.port, "env": a.env or [], "dienst": a.dienst, "seed": a.seed,
+         "modell_mock": modell_mock}
     with _rollen_sperre(a.lauf, a.rolle, exklusiv=True):
         _schreibe_atomar(os.path.join(ordner, f"rolle-{a.rolle}.json"), {"lauf": a.lauf, "rolle": a.rolle, **p})
         return _starte(a.lauf, a.rolle, p)
@@ -1094,6 +1173,13 @@ def _typ_env(s: str) -> str:
     return s
 
 
+def _typ_modell_mock(s: str) -> list[str]:
+    apis = s.split(",")
+    if not all(api in MOCK_ENV for api in apis) or len(set(apis)) != len(apis):
+        raise argparse.ArgumentTypeError("--modell-mock: Liste aus openai und anthropic ohne Duplikate erwartet (openai,anthropic)")
+    return apis
+
+
 def _typ_text(s: str) -> str:
     if not s.strip() or "\x00" in s:
         raise argparse.ArgumentTypeError("leerer Wert oder NUL-Zeichen")
@@ -1142,6 +1228,8 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--env", action="append", type=_typ_env)
     s.add_argument("--dienst", choices=["postgres"])
     s.add_argument("--seed", type=_typ_text)
+    s.add_argument("--modell-mock", type=_typ_modell_mock,
+                   help="Modell-Mock `llm` im Netz der Rolle starten: openai, anthropic oder openai,anthropic")
     neu("neustart", cmd_neustart, rolle=True)
     neu("ausfuehren", cmd_ausfuehren, rolle=True)
     s = neu("anfrage", cmd_anfrage, rolle=True)

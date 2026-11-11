@@ -868,7 +868,7 @@ def test_starten_fehler(umg, tmp_path):
     assert r.stdout.splitlines()[0] == "kategorie: start-fehler"
     assert "boom" in r.stdout
     aufrufe = [a["args"] for a in umg.aufrufe()]
-    assert ["rm", "-f", "-v", f"security-audit-{LAUF}-p1-app", f"security-audit-{LAUF}-p1-db"] in aufrufe  # eigene Reste
+    assert ["rm", "-f", "-v", f"security-audit-{LAUF}-p1-app", f"security-audit-{LAUF}-p1-db", f"security-audit-{LAUF}-p1-llm"] in aufrufe  # eigene Reste
 
 
 def test_starten_app_nicht_erreichbar(umg, tmp_path):
@@ -891,13 +891,282 @@ def test_starten_vorhandene_container_werden_ersetzt(umg, tmp_path):
     gestartet(umg)
     aufrufe = [a["args"] for a in umg.aufrufe()]
     erster_run = next(i for i, a in enumerate(aufrufe) if a[0] == "run")
-    assert ["rm", "-f", "-v", f"security-audit-{LAUF}-p1-app", f"security-audit-{LAUF}-p1-db"] in aufrufe[:erster_run]
+    assert ["rm", "-f", "-v", f"security-audit-{LAUF}-p1-app", f"security-audit-{LAUF}-p1-db", f"security-audit-{LAUF}-p1-llm"] in aufrufe[:erster_run]
 
 
 def test_starten_netz_existiert_schon(umg, tmp_path):
     vorbereitet(umg, tmp_path)
     umg.konfig({"network create": {"rc": 1, "stderr": "Error response from daemon: network with name x already exists"}})
     assert umg.poc("starten", "--lauf", LAUF, "--rolle", "p1", "--start-befehl", "x", "--port", "1").returncode == 0
+
+
+# ------------------------------------------------------------------------------------ TF3: Modell-Mock und Env-Regeln
+
+MOCK_NAMEN = ("OPENAI_BASE_URL", "OPENAI_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY")
+LLM = f"security-audit-{LAUF}-p1-llm"
+APP = f"security-audit-{LAUF}-p1-app"
+
+
+def starten(umg, *extra, rolle="p1", env=None):
+    return umg.poc("starten", "--lauf", LAUF, "--rolle", rolle, "--start-befehl", "node server.js", "--port", "3000",
+                   *extra, env=env)
+
+
+def run_mit_name(umg, name):
+    return [a for a in laeufe(umg) if wert(a, "--name") == [name]]
+
+
+@pytest.mark.parametrize("name", MOCK_NAMEN)
+def test_env_regeln_reservierte_namen_nur_mit_mock(umg, tmp_path, name):
+    vorbereitet(umg, tmp_path)
+    r = starten(umg, "--modell-mock", "openai,anthropic", "--env", f"{name}=http://llm:4010")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert name in r.stderr
+    assert not any(a["args"][0] in ("run", "network") for a in umg.aufrufe())       # vor jedem Docker-Aufruf abgelehnt
+    umg.log_datei.unlink(missing_ok=True)
+    r = starten(umg, "--env", f"{name}=http://llm:4010")                              # ohne Mock bleibt der Name frei
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"{name}=http://llm:4010" in wert(run_mit_name(umg, APP)[0], "-e")
+
+
+@pytest.mark.parametrize("gewaehlt", ["openai", "anthropic"])
+@pytest.mark.parametrize("name", MOCK_NAMEN)
+def test_env_regeln_reserviert_auch_fuer_nicht_gewaehlte_api(umg, tmp_path, gewaehlt, name):
+    """K3: Mit --modell-mock sind alle vier Namen reserviert, auch die der nicht gewählten API."""
+    vorbereitet(umg, tmp_path)
+    r = starten(umg, "--modell-mock", gewaehlt, "--env", f"{name}=x")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert not any(a["args"][0] == "run" for a in umg.aufrufe())
+
+
+@pytest.mark.parametrize("mock", [[], ["--modell-mock", "openai"]])
+@pytest.mark.parametrize("wert_", ["http://poc-fremd.invalid/x", "https://192.0.2.1:9/", "HTTP://POC-FREMD.INVALID/",
+                                   "redis://:pw@cache.invalid:6379"])
+def test_env_regeln_fremder_host_exit2(umg, tmp_path, mock, wert_):
+    vorbereitet(umg, tmp_path)
+    r = starten(umg, *mock, "--env", f"EXTERN_URL={wert_}")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "--env EXTERN_URL: nicht erlaubter Host" in r.stderr
+    assert not any(a["args"][0] in ("run", "network") for a in umg.aufrufe())
+
+
+@pytest.mark.parametrize("mock", [[], ["--modell-mock", "openai,anthropic"]])
+def test_env_regeln_db_und_localhost_erlaubt(umg, tmp_path, mock):
+    vorbereitet(umg, tmp_path)
+    r = starten(umg, *mock, "--env", "DATABASE_URL=postgres://poc:poc@db:5432/poc", "--env", "SELBST=http://localhost:3000",
+                "--env", "MOCK=http://llm:4010/v1", "--env", "OHNE_URL=abc")
+    assert r.returncode == 0, r.stdout + r.stderr
+    env = wert(run_mit_name(umg, APP)[0], "-e")
+    assert "DATABASE_URL=postgres://poc:poc@db:5432/poc" in env and "SELBST=http://localhost:3000" in env
+
+
+def test_env_regeln_meldung_ohne_wert(umg, tmp_path):
+    """W2-neu: Die Meldung nennt Namen und Host, nie den Wert (auch nicht Pfad, Query oder Zugangsdaten)."""
+    vorbereitet(umg, tmp_path)
+    geheim = "poc-dummy-geheim-4711"
+    r = starten(umg, "--env", f"EXTERN_URL=https://nutzer:{geheim}@poc-fremd.invalid/pfad-{geheim}?k={geheim}")
+    assert r.returncode == 2
+    assert r.stderr.strip().endswith("--env EXTERN_URL: nicht erlaubter Host poc-fremd.invalid"), r.stderr
+    assert geheim not in r.stdout + r.stderr
+    r = starten(umg, "--modell-mock", "openai", "--env", f"OPENAI_API_KEY={geheim}")
+    assert r.returncode == 2 and geheim not in r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("wert_", ["", "gemini", "openai,gemini", "openai,openai", "openai,", ",openai", "OpenAI", "openai anthropic"])
+def test_modell_mock_argument_ungueltig_exit2(umg, tmp_path, wert_):
+    vorbereitet(umg, tmp_path)
+    r = starten(umg, "--modell-mock", wert_)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert not any(a["args"][0] in ("run", "network") for a in umg.aufrufe())
+
+
+def test_modell_mock_env_gesetzt(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    r = starten(umg, "--modell-mock", "openai,anthropic", "--env", "A=1")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "modell-mock: http://llm:4010 (openai, anthropic)" in r.stdout.splitlines()
+    app = run_mit_name(umg, APP)[0]
+    env = wert(app, "-e")
+    assert "OPENAI_BASE_URL=http://llm:4010/v1" in env and "OPENAI_API_KEY=poc-dummy-openai" in env
+    assert "ANTHROPIC_BASE_URL=http://llm:4010" in env and "ANTHROPIC_API_KEY=poc-dummy-anthropic" in env
+    assert "A=1" in env and "PORT=3000" in env
+    mock = run_mit_name(umg, LLM)[0]
+    assert wert(mock, "--network") == [f"security-audit-{LAUF}-p1"] and wert(mock, "--network-alias") == ["llm"]
+    assert mock[mock.index(f"security-audit-{LAUF}-app"):] == [f"security-audit-{LAUF}-app", "node", "/poc/llm-mock.mjs",
+                                                                "--server", "--port", "4010", "--steuer-port", "4011"]
+    aufrufe = [a["args"] for a in umg.aufrufe()]
+    bereit = ["exec", "-i", LLM, "node", "/poc/llm-mock.mjs", "--bereit"]
+    assert bereit in aufrufe
+    i_mock = aufrufe.index(mock)
+    assert i_mock < aufrufe.index(bereit) < aufrufe.index(app)                        # Mock, Bereitschaft, dann die App
+    with open(os.path.join(umg.zustand(), "rolle-p1.json")) as f:
+        z = json.load(f)
+    assert z["modell_mock"] == ["openai", "anthropic"]
+    assert z["env"] == ["A=1"]                                                         # Mock-Variablen gehören nicht in `env`
+
+
+def test_modell_mock_env_nur_gewaehlte_api(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    r = starten(umg, "--modell-mock", "anthropic")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "modell-mock: http://llm:4010 (anthropic)" in r.stdout.splitlines()
+    env = wert(run_mit_name(umg, APP)[0], "-e")
+    assert "ANTHROPIC_BASE_URL=http://llm:4010" in env and "ANTHROPIC_API_KEY=poc-dummy-anthropic" in env
+    assert not any(e.startswith("OPENAI_") for e in env)
+
+
+def test_ohne_modell_mock_kein_mock_container(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    gestartet(umg)
+    assert run_mit_name(umg, LLM) == []
+    assert not any("--bereit" in a["args"] for a in umg.aufrufe())
+    z = json.load(open(os.path.join(umg.zustand(), "rolle-p1.json")))
+    assert z["modell_mock"] == []
+
+
+def test_modell_mock_bereit_timeout(umg, tmp_path):
+    """K2: Die Bereitschaft dauert höchstens SECURITY_AUDIT_MOCK_BEREIT s (nur verkürzend); jeder `exec --bereit` bekommt
+    höchstens die Restzeit als Timeout. Scheitert sie, endet starten als start-fehler mit `Modell-Mock`; die App startet nicht."""
+    vorbereitet(umg, tmp_path)
+    umg.konfig({"exec -i": {"rc": 1}, "logs": {"stdout": "Modell-Mock-Log-Zeile\n"}})
+    t0 = time.monotonic()
+    r = starten(umg, "--modell-mock", "openai", env=umg.env(SECURITY_AUDIT_MOCK_BEREIT="2"))
+    assert 1.5 < time.monotonic() - t0 < 8
+    assert r.returncode == 4 and r.stdout.splitlines()[0] == "kategorie: start-fehler"
+    assert "Modell-Mock" in r.stdout and "nicht bereit" in r.stdout
+    assert run_mit_name(umg, APP) == []
+    assert sum(1 for a in umg.aufrufe() if "--bereit" in a["args"]) >= 2             # es wurde wiederholt abgefragt
+
+
+def test_modell_mock_bereit_exec_hoechstens_restzeit(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    umg.konfig({"exec -i": {"rc": 1, "sleep": 20}})
+    t0 = time.monotonic()
+    r = starten(umg, "--modell-mock", "openai", env=umg.env(SECURITY_AUDIT_MOCK_BEREIT="2"))
+    assert time.monotonic() - t0 < 10, "ein hängender exec darf die Bereitschaftsfrist nicht überschreiten"
+    assert r.returncode == 4 and "Modell-Mock" in r.stdout
+
+
+def test_modell_mock_bereit_frist_nur_verkuerzend(monkeypatch):
+    for gesetzt, erwartet in (("", 30), ("5", 5), ("29", 29), ("30", 30), ("100", 30), ("0", 30), ("-3", 30), ("x", 30)):
+        monkeypatch.setenv("SECURITY_AUDIT_MOCK_BEREIT", gesetzt)
+        assert poc._mock_bereit_sekunden() == erwartet, gesetzt
+    monkeypatch.delenv("SECURITY_AUDIT_MOCK_BEREIT")
+    assert poc.MOCK_BEREIT == 30 and poc._mock_bereit_sekunden() == 30
+
+
+def test_modell_mock_start_fehler_ohne_bereitschaft_bei_run_fehler(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    umg.konfig({"run": {"rc": 125, "stderr": "docker: Error response from daemon: mock-boom\n"}})
+    r = starten(umg, "--modell-mock", "openai")
+    assert r.returncode == 4 and "Modell-Mock" in r.stdout and "mock-boom" in r.stdout
+    assert not any("--bereit" in a["args"] for a in umg.aufrufe())
+
+
+def test_mock_container_haertung(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    assert starten(umg, "--modell-mock", "openai").returncode == 0
+    a = run_mit_name(umg, LLM)[0]
+    assert a[:3] == ["run", "-d", "--pull"] and wert(a, "--pull") == ["never"]
+    assert wert(a, "--cap-drop") == ["ALL"]
+    assert wert(a, "--security-opt") == ["no-new-privileges"]
+    assert wert(a, "--memory") == ["256m"]                                             # kein doppeltes --memory
+    assert wert(a, "--pids-limit") == ["64"]
+    assert "--read-only" in a
+    assert wert(a, "--tmpfs") == ["/tmp:rw,noexec,nosuid,size=16m"]
+    for verboten in ("-p", "--publish", "-P", "-v", "--volume", "--mount", "--privileged", "--dns", "-e", "--env"):
+        assert verboten not in a, verboten
+    assert wert(a, "--network") == [f"security-audit-{LAUF}-p1"]
+    assert poc.HAERTUNG_MOCK == ["--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--memory", "256m",
+                                 "--pids-limit", "64", "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m"]
+
+
+def test_neustart_mit_mock(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    assert starten(umg, "--modell-mock", "openai,anthropic", "--env", "A=1").returncode == 0
+    vorher = open(os.path.join(umg.zustand(), "rolle-p1.json")).read()
+    umg.log_datei.unlink()
+    r = umg.poc("neustart", "--lauf", LAUF, "--rolle", "p1")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "modell-mock: http://llm:4010 (openai, anthropic)" in r.stdout.splitlines()
+    aufrufe = [a["args"] for a in umg.aufrufe()]
+    assert aufrufe[1] == ["rm", "-f", "-v", APP, f"security-audit-{LAUF}-p1-db", LLM]         # alter Mock mit entfernt
+    mock = run_mit_name(umg, LLM)
+    assert len(mock) == 1 and ["exec", "-i", LLM, "node", "/poc/llm-mock.mjs", "--bereit"] in aufrufe
+    assert aufrufe.index(mock[0]) < aufrufe.index(run_mit_name(umg, APP)[0])
+    env = wert(run_mit_name(umg, APP)[0], "-e")
+    assert "OPENAI_API_KEY=poc-dummy-openai" in env and "ANTHROPIC_BASE_URL=http://llm:4010" in env and "A=1" in env
+    assert open(os.path.join(umg.zustand(), "rolle-p1.json")).read() == vorher
+
+
+def test_neustart_ohne_mock_startet_keinen(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    gestartet(umg)
+    umg.log_datei.unlink()
+    assert umg.poc("neustart", "--lauf", LAUF, "--rolle", "p1").returncode == 0
+    assert run_mit_name(umg, LLM) == []
+
+
+def test_rolle_entfernen_nennt_llm(temp_ordner, monkeypatch):
+    aufrufe = []
+    monkeypatch.setattr(poc, "_docker", lambda args, timeout, **kw: aufrufe.append(args) or poc.Ergebnis(0, b"", b""))
+    poc._rolle_entfernen(LAUF, "p2")
+    n = f"security-audit-{LAUF}-p2"
+    assert aufrufe == [["rm", "-f", "-v", f"{n}-app", f"{n}-db", f"{n}-llm"]]
+
+
+def test_aufraeumen_erfasst_llm_ueber_praefix(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    umg.konfig({"ps": {"stdout": f"{LLM}\nsecurity-audit-{ANDERER_LAUF}-p1-llm\n"}})
+    assert umg.poc("aufraeumen", "--lauf", LAUF).returncode == 0
+    rm = [a["args"] for a in umg.aufrufe() if a["args"][:3] == ["rm", "-f", "-v"]]
+    assert rm == [["rm", "-f", "-v", LLM]]                                             # nur der eigene Mock
+
+
+def test_lade_rolle_ohne_modell_mock_kompatibel(umg, tmp_path, temp_ordner):
+    """K1: Rollendateien ohne `modell_mock` (älterer Stand) gelten als ohne Mock; ein ungültiges Feld macht die Datei ungültig."""
+    ordner = poc._ordner(LAUF, anlegen=True)
+    basis = {"lauf": LAUF, "rolle": "p1", "start_befehl": "node s.js", "port": 3000, "env": ["A=1"], "dienst": None, "seed": None}
+    with open(os.path.join(ordner, "rolle-p1.json"), "w") as f:
+        json.dump(basis, f)
+    z = poc._lade_rolle(LAUF, "p1")
+    assert z["modell_mock"] == [] and z["port"] == 3000 and z["env"] == ["A=1"]
+    for gut in (["openai"], ["anthropic"], ["anthropic", "openai"], []):
+        _schreibe = {**basis, "modell_mock": gut}
+        with open(os.path.join(ordner, "rolle-p1.json"), "w") as f:
+            json.dump(_schreibe, f)
+        assert poc._lade_rolle(LAUF, "p1")["modell_mock"] == gut
+    for schlecht in ("openai", None, ["gemini"], ["openai", "openai"], [1], {"openai": 1}, True):
+        with open(os.path.join(ordner, "rolle-p1.json"), "w") as f:
+            json.dump({**basis, "modell_mock": schlecht}, f)
+        with pytest.raises(poc.PocFehler) as e:
+            poc._lade_rolle(LAUF, "p1")
+        assert e.value.code == 2
+
+
+def test_neustart_alte_rollendatei_ohne_modell_mock(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    gestartet(umg)
+    pfad = os.path.join(umg.zustand(), "rolle-p1.json")
+    z = json.load(open(pfad))
+    del z["modell_mock"]
+    json.dump(z, open(pfad, "w"))
+    umg.log_datei.unlink()
+    assert umg.poc("neustart", "--lauf", LAUF, "--rolle", "p1").returncode == 0
+    assert run_mit_name(umg, LLM) == []
+
+
+def test_start_fehler_mock_liest_llm_logs(umg, tmp_path):
+    """Scheitert der Mock-Start, stehen die Logs von `-llm` (nicht von `-app`) im Fehlertext."""
+    vorbereitet(umg, tmp_path)
+    umg.konfig({"exec -i": {"rc": 1}, "logs": {"stdout": "mock-log: EADDRINUSE 4010\n"}})
+    r = starten(umg, "--modell-mock", "openai", env=umg.env(SECURITY_AUDIT_MOCK_BEREIT="1"))
+    assert r.returncode == 4 and r.stdout.splitlines()[0] == "kategorie: start-fehler"
+    assert "mock-log: EADDRINUSE 4010" in r.stdout
+    logs = [a["args"] for a in umg.aufrufe() if a["args"][0] == "logs"]
+    assert logs == [["logs", "--tail", "40", LLM]]
+    aufrufe = [a["args"] for a in umg.aufrufe()]
+    assert ["rm", "-f", "-v", APP, f"security-audit-{LAUF}-p1-db", LLM] == aufrufe[-1]          # auch der Mock wird entfernt
 
 
 # ------------------------------------------------------------------------------------ neustart / ausfuehren
@@ -912,7 +1181,7 @@ def test_neustart(umg, tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     aufrufe = [a["args"] for a in umg.aufrufe()]
     assert aufrufe[0][0] == "version"
-    assert aufrufe[1] == ["rm", "-f", "-v", f"security-audit-{LAUF}-p1-app", f"security-audit-{LAUF}-p1-db"]
+    assert aufrufe[1] == ["rm", "-f", "-v", f"security-audit-{LAUF}-p1-app", f"security-audit-{LAUF}-p1-db", f"security-audit-{LAUF}-p1-llm"]
     app = [a for a in laeufe(umg) if wert(a, "--name") == [f"security-audit-{LAUF}-p1-app"]][0]
     assert "PORT=3007" in wert(app, "-e") and "A=1" in wert(app, "-e")
     assert ["exec", f"security-audit-{LAUF}-p1-app", "sh", "-c", "node seed.js"] in aufrufe
@@ -1178,6 +1447,9 @@ def test_dockerfile_und_ignore():
     assert any("npm ci --ignore-scripts --registry=https://registry.npmjs.org/" in z for z in zeilen)
     assert 'RUN --network=none sh -c "$BUILD_BEFEHL"' in zeilen
     assert "COPY --from=poc --chown=root:root anfrage.mjs /poc/anfrage.mjs" in zeilen
+    mock = "COPY --from=poc --chown=root:root llm-mock.mjs /poc/llm-mock.mjs"
+    assert mock in zeilen                                  # K4: wie anfrage.mjs root-eigen, nach dem Kunden-Build
+    assert zeilen.index(mock) > zeilen.index('RUN --network=none sh -c "$BUILD_BEFEHL"')
     assert not any("chown -R" in z for z in zeilen)
     assert zeilen[-1] != "USER root" and "USER root" not in zeilen
     ignore = open(os.path.join(docker, "Dockerfile.poc.dockerignore"), encoding="utf-8").read().split()
@@ -1391,7 +1663,7 @@ def test_starten_fehler_mit_daemon_stoerung_entfernt_rollen_container_haertung_a
     r = umg.poc("starten", "--lauf", LAUF, "--rolle", "p1", "--start-befehl", "x", "--port", "1")
     assert r.returncode == 3
     aufrufe = [a["args"] for a in umg.aufrufe()]
-    rm = ["rm", "-f", "-v", f"security-audit-{LAUF}-p1-app", f"security-audit-{LAUF}-p1-db"]
+    rm = ["rm", "-f", "-v", f"security-audit-{LAUF}-p1-app", f"security-audit-{LAUF}-p1-db", f"security-audit-{LAUF}-p1-llm"]
     letzter_run = max(i for i, a in enumerate(aufrufe) if a[0] == "run")
     assert any(a == rm for a in aufrufe[letzter_run + 1:]), aufrufe
 
