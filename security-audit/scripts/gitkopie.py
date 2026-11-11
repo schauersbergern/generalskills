@@ -128,9 +128,15 @@ class _Batch:
                                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=_umgebung())
         except OSError as e:
             raise GitFehler(f"git nicht startbar: {e}") from e
-        self.timer = threading.Timer(BATCH_TIMEOUT if rest is None else min(BATCH_TIMEOUT, rest), self.proc.kill)
+        self.zeitgeber_abgelaufen = False
+        self.timer = threading.Timer(BATCH_TIMEOUT if rest is None else min(BATCH_TIMEOUT, rest), self._zeit_abgelaufen)
         self.timer.daemon = True
         self.timer.start()
+
+    def _zeit_abgelaufen(self) -> None:
+        """Zeitgeber: merkt den Ablauf und beendet den eigenen cat-file-Prozess (wie bisher `proc.kill`)."""
+        self.zeitgeber_abgelaufen = True
+        self.proc.kill()
 
     def lies(self, sha: str) -> bytes | None:
         """Inhalt des Blobs oder None, wenn das Objekt fehlt (z. B. Partial Clone ohne Lazy Fetch). Ein Abbruch nach Ablauf
@@ -140,7 +146,7 @@ class _Batch:
         except ZeitbudgetFehler:
             raise
         except GitFehler as e:
-            if frist_erschoepft():
+            if frist_erschoepft() or self.zeitgeber_abgelaufen:      # Gesamtfrist oder eigener Zeitgeber (BATCH_TIMEOUT)
                 raise ZeitbudgetFehler(f"git cat-file --batch: Zeitbudget erschöpft ({e})") from e
             raise
 

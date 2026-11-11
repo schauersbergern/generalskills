@@ -1093,6 +1093,30 @@ def test_frist_kuerzt_den_timeout_und_meldet_zeitbudget_haertung_i3(tmp_path, mo
     assert not isinstance(e.value, gitkopie.ZeitbudgetFehler) and gesehen["timeout"] == 60
 
 
+def test_abbruch_durch_den_eigenen_zeitgeber_ist_zeitbudget_r1_15(tmp_path, monkeypatch):
+    """R1-15: Der Zeitgeber des cat-file-Prozesses (BATCH_TIMEOUT) beendet git auch bei noch nicht erschöpfter Gesamtfrist;
+    das ist ein Zeitbudget-Abbruch („Zeitbudget“ in der Meldung, wie SKILL.md zusagt), kein „Broken pipe“."""
+    repo = repo_mit(tmp_path, {"a.txt": b"a\n"})
+    sha = gitkopie.git(str(repo), "rev-parse", "HEAD:a.txt").stdout.decode().strip()
+    monkeypatch.setattr(gitkopie, "BATCH_TIMEOUT", 0.05)
+    gitkopie.frist_setzen(time.monotonic() + 600)             # Gesamtfrist weit weg
+    try:
+        with gitkopie._Batch(str(repo)) as batch:
+            time.sleep(0.4)
+            with pytest.raises(gitkopie.ZeitbudgetFehler, match="Zeitbudget"):
+                batch.lies(sha)
+        assert not gitkopie.frist_erschoepft()
+    finally:
+        gitkopie.frist_setzen(None)
+
+
+def test_batch_ohne_ablauf_des_zeitgebers_liest_normal_r1_15(tmp_path):
+    repo = repo_mit(tmp_path, {"a.txt": b"a\n"})
+    sha = gitkopie.git(str(repo), "rev-parse", "HEAD:a.txt").stdout.decode().strip()
+    with gitkopie._Batch(str(repo)) as batch:
+        assert batch.lies(sha) == b"a\n"
+
+
 def test_arbeitskopie_bricht_bei_erschoepfter_frist_ab_haertung_i3(tmp_path, monkeypatch):
     repo = repo_mit(tmp_path, {"a.txt": b"a\n", "b.txt": b"b\n"})
     monkeypatch.setattr(gitkopie, "frist_erschoepft", lambda: True)
