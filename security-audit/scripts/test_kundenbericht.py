@@ -1777,6 +1777,66 @@ def test_pdf_altes_ziel_bleibt_nicht_liegen(tmp_path, bericht_pfad):
     assert not os.path.exists(ziel)
 
 
+# ------------------------------------------------------------------------------------ TF4 Härtung: Fehlerpfade
+
+def test_pruefung_scheitert_exit1_intern_ohne_dateien_haertung(tmp_path, monkeypatch, capsys):
+    """Eine Ausnahme in der Inhaltsprüfung (früher als „keine Verstöße“ verschluckt) endet mit Exit 1 `intern`: kein Markdown, kein PDF."""
+    def kaputt(*_a, **_k):
+        raise RuntimeError("geheimer Text")
+    monkeypatch.setattr(bericht, "_regex_treffer", kaputt)
+    pfad = schreibe(tmp_path / "out", bericht_daten())
+    assert kundenbericht.main(["erstellen", "--json", str(pfad)]) == 1
+    aus = capsys.readouterr()
+    assert aus.out.splitlines() == ["kategorie: intern", "Unerwarteter Fehler (RuntimeError)."] and "geheimer Text" not in aus.out + aus.err
+    assert inhalt(tmp_path / "out") == [BASIS + ".json"]
+
+
+def test_pdf_ueber_der_grenze_exit4_nicht_abgeschnitten_haertung(tmp_path, monkeypatch, capsys, bericht_pfad):
+    """Ein PDF über der Lesegrenze wurde bisher still auf die Grenze gekürzt und als beschädigtes PDF abgelegt; jetzt Exit 4."""
+    env, _ = attrappen(tmp_path, **beide())
+    monkeypatch.setenv("SECURITY_AUDIT_OHNE", "")
+    monkeypatch.setenv("PATH", env["PATH"])
+    assert kundenbericht._PDF_MAX == 256 * 1024 * 1024
+    monkeypatch.setattr(kundenbericht, "_PDF_MAX", len(PDF_OK))
+    assert kundenbericht.main(["erstellen", "--json", str(bericht_pfad)]) == 0                  # genau die Grenze: abgelegt, vollständig
+    assert open(kunde_pfad(bericht_pfad, "pdf"), "rb").read() == PDF_OK.encode()
+    capsys.readouterr()
+    monkeypatch.setattr(kundenbericht, "_PDF_MAX", len(PDF_OK) - 1)
+    assert kundenbericht.main(["erstellen", "--json", str(bericht_pfad)]) == 4
+    aus = capsys.readouterr().out.splitlines()
+    assert aus[:2] == ["kategorie: pdf-fehler", "kunde-md: " + kunde_pfad(bericht_pfad, "md")] and aus[2:] == ["weasyprint hat ein zu großes PDF geschrieben."]
+    assert inhalt(tmp_path / "out") == [BASIS + "-kunde.md", BASIS + ".json"]
+
+
+def test_html_pruefung_meldungen_hoechstens_10_review3_m41(tmp_path, bericht_pfad):
+    """TF4 Review 3 (M41): jede Meldung ist ein anderer verbotener Tag; die Prüfung nennt höchstens 10 (mehr hilft nicht, es gibt keine Korrektur)."""
+    body = "".join(f"<tag{i:02d}>x</tag{i:02d}>" for i in range(15))
+    env, _ = attrappen(tmp_path, pandoc={"body": body}, weasyprint={})
+    p = lauf(bericht_pfad, env=env)
+    assert p.returncode == 4, p.stdout + p.stderr
+    assert zeilen(p)[2:] == [f"Tag nicht erlaubt: tag{i:02d}" for i in range(10)]
+
+
+def test_html_pruefung_parserfehler_ist_nicht_pruefbar_review3_m55(monkeypatch):
+    """TF4 Review 3 (M55): wirft der Parser, gilt das HTML als nicht prüfbar (nie als in Ordnung)."""
+    def kaputt(self, daten):
+        raise RuntimeError("Parser kaputt")
+    monkeypatch.setattr(kundenbericht._HtmlPruefer, "feed", kaputt)
+    assert kundenbericht.html_pruefen(html_mit("<p>x</p>")) == ["HTML nicht prüfbar"]
+
+
+def test_pandoc_bekommt_den_absoluten_pfad_des_markdowns_review3_m43(tmp_path, monkeypatch):
+    """TF4 Review 3 (M43): `pdf_erstellen` ist öffentlich; pandoc läuft im eigenen Temp-Ordner, ein relativer Pfad liefe ins Leere."""
+    env, log = attrappen(tmp_path, **beide())
+    monkeypatch.setenv("SECURITY_AUDIT_OHNE", "")
+    monkeypatch.setenv("PATH", env["PATH"])
+    md, pdf = md_datei(tmp_path)
+    monkeypatch.chdir(os.path.dirname(md))
+    assert kundenbericht.pdf_erstellen("x-kunde.md", "x-kunde.pdf", "T", time.monotonic() + 30) == (0, None, [])
+    argv = aufruf(log, "pandoc")["argv"]
+    assert os.path.isabs(argv[-1]) and argv[-1] == os.path.join(os.getcwd(), "x-kunde.md")
+
+
 # ------------------------------------------------------------------------------------ Opt-in: echte Werkzeuge (SECURITY_AUDIT_PDF=1)
 
 nur_echt = pytest.mark.skipif(os.environ.get("SECURITY_AUDIT_PDF") != "1", reason="echte pandoc und weasyprint nur mit SECURITY_AUDIT_PDF=1")

@@ -7,17 +7,19 @@ Exit-Codes (bei Exit != 0 ist die erste Zeile auf stdout `kategorie: <wert>`; da
 Zeilengrenze: höchstens 30 Meldungszeilen, ohne `kategorie:`, `kunde-md:` und `kunde-pdf:`; jede weitere Meldung ersetzt die Zeile
 `… und <n> weitere` (sie kommt zu den 30 hinzu und fehlt bei genau 30 Meldungen).
   0  Markdown und PDF erstellt (stdout: `kunde-md: <pfad>`, `kunde-pdf: <pfad>`)
-  1  `intern`            unerwarteter Fehler (eine Zeile ohne Traceback); liegt das Markdown schon, steht `kunde-md:` davor
+  1  `intern`            unerwarteter Fehler (eine Zeile ohne Traceback; auch eine gescheiterte Inhaltsprüfung, nie „keine Verstöße“);
+                         liegt das Markdown schon, steht `kunde-md:` davor
   2  `inhalt`            Kundenfelder fehlen oder verstoßen gegen die Inhaltsregeln; mit Feldkorrektur behebbar; keine Kundendateien
   3  `pdf-werkzeug-fehlt` pandoc oder weasyprint fehlt oder ist nicht startbar; nur das Markdown liegt (zweite Zeile `kunde-md:`)
-  4  `pdf-fehler`        PDF-Kette gescheitert (HTML-Prüfung, stderr, leere Datei, Timeout); nur das Markdown liegt
+  4  `pdf-fehler`        PDF-Kette gescheitert (HTML-Prüfung, stderr, leere oder zu große Datei, Timeout); nur das Markdown liegt
   5  `eingabe`           Argumente, Eingabedatei, Kollision, Ziel, Schema außerhalb der Kundenfelder (nur ID und Feld, nie ein Wert), Schreiben;
                          keine Korrektur
 
 Die Meldungen zu Exit 2 haben die Form `<id> <feld>: Regel <regel>[ (<detail>)]` und nennen nie den Treffertext; ausgenommen sind
-das Du-Wort und das Token bei Regel a (siehe bericht.kunden_verstoesse); bei mehr als 200000 Token in den `poc`-Feldern meldet jedes
-geprüfte Feld Regel a mit dem festen Detail „zu viele Token zum Prüfen“ (fail-closed). Alle Meldungen stehen auf stdout, stderr bleibt
-für Argumentfehler (Usage). Nur Standardbibliothek.
+das Du-Wort und das Token bei Regel a (siehe bericht.kunden_verstoesse); bei mehr als 200000 Token in den `poc`-Feldern, einem `poc`
+über 10**6 Zeichen oder einem verbrauchten Arbeitsbudget der Teilstring-Prüfung (sehr viele Token oder Pfade mit gleichem Anfang) meldet
+jedes geprüfte Feld Regel a mit dem festen Detail „zu viele Token zum Prüfen“ (fail-closed). Alle Meldungen stehen auf stdout, stderr
+bleibt für Argumentfehler (Usage). Nur Standardbibliothek.
 """
 import argparse
 import json
@@ -455,6 +457,7 @@ _HTML_TAGS = frozenset("html head meta title style body header main section foot
 _HTML_ATTRIBUTE = {"": frozenset({"class", "id"}), "meta": frozenset({"class", "id", "charset", "name", "content"}), "html": frozenset({"class", "id", "lang"})}
 _FEHLER_IN_STDERR = ("disallowed protocol", "failed to load", "error")      # ohne Beachtung der Schreibweise (R2-K-3)
 _HTML_MAX = 16 * 1024 * 1024
+_PDF_MAX = 256 * 1024 * 1024         # größer als das, was weasyprint für einen Bericht je schreibt; ein größeres PDF ist ein Fehler, nie gekürzt
 
 
 def _template_style() -> str:
@@ -618,9 +621,11 @@ def _pdf_kette(md_pfad: str, pdf_pfad: str, titel: str, ende: float, pandoc: str
     fehler = erg.err.decode("utf-8", "replace").casefold()
     if any(muster in fehler for muster in _FEHLER_IN_STDERR):
         raise Abbruch(4, "pdf-fehler", ["weasyprint meldete einen Fehler (Ladefehler oder gesperrtes Protokoll)."])
-    pdf = _datei_lesen(tmp_pdf, 256 * 1024 * 1024)
+    pdf = _datei_lesen(tmp_pdf, _PDF_MAX)
     if not pdf or not pdf.startswith(b"%PDF"):
         raise Abbruch(4, "pdf-fehler", ["weasyprint hat kein PDF geschrieben."])
+    if len(pdf) > _PDF_MAX:             # `_datei_lesen` liest die Grenze plus ein Byte: das ist der Beleg für „zu groß“
+        raise Abbruch(4, "pdf-fehler", ["weasyprint hat ein zu großes PDF geschrieben."])
     _pdf_ablegen(pdf, pdf_pfad)
 
 
