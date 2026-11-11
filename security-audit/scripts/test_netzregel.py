@@ -184,7 +184,14 @@ def test_netzregel_api_hosts_verstoss(url):
     host = url.split("//")[1].split("/")[0]
     assert netzregel.verstoesse_poc(f"POST {url}") == [host]
     assert len(netzregel.verstoesse_bash(f"{POC} anfrage --pfad {url}", [])) == 1
-    assert len(netzregel.verstoesse_bash(f"curl {url}", [])) >= 1
+
+
+@pytest.mark.parametrize("url", ["http://llm.evil.example/", "http://llm:x@evil.example/", "http://llm@evil.example/",
+                                 "http://llm.:4010/", "http://xllm:4010/", "http://llm-evil:4010/", "http://llm.internal/"])
+def test_netzregel_llm_doppelgaenger_verstoss(url):
+    """Task-1-Review Minor 1: nur genau der Host `llm` ist erlaubt, keine Doppelgänger."""
+    assert netzregel.verstoesse_poc(f"POST {url}") != []
+    assert len(netzregel.verstoesse_bash(f"{POC} anfrage --pfad {url}", [])) == 1
 
 
 def test_bash_poc_mit_option_hosts_pruefen():
