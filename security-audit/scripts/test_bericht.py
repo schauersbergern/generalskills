@@ -2244,3 +2244,17 @@ def test_kopf_verstoesse_pruefen_den_ganzen_wert_r1_3():
     assert bericht.kopf_verstoesse(d, {"projekt": lang}) == []
     # Befundfelder bleiben bei 5000 Zeichen gekappt (ihre Ausgabe ist begrenzt)
     assert regeln(kd(massnahme=KD_VORSPANN + " " * 5000 + "/api/orders/9")) == []
+
+
+# ------------------------------------------------------------------------------------ Review R1-5: Regel d über den Basename
+
+def test_regel_d_basename_ohne_punkt_aus_unterordner_r1_5():
+    """R1-5: `datei: docker/Dockerfile`, Text „Siehe Dockerfile:6“: der Basename hat keinen Punkt, nur die Nadel aus `_quellen` erkennt ihn."""
+    d = kd(massnahme=KD_VORSPANN + "Siehe Dockerfile:6 im Projekt.", datei="docker/Dockerfile", poc="x", code_pfad=["x:1"])
+    assert regeln(d, "massnahme") == ["d"]
+    d = kd(massnahme=KD_VORSPANN + "Siehe Dockerfile, Zeile 6 im Projekt.", datei="docker/Dockerfile", poc="x", code_pfad=["x:1"])
+    assert regeln(d, "massnahme") == ["d"]
+    d = kd(massnahme=KD_VORSPANN + "Siehe Makefile:6 im Projekt.", datei="docker/Dockerfile", poc="x", code_pfad=["x:1"])
+    assert regeln(d, "massnahme") == []                                           # anderer Name: kein Treffer
+    d = kd(massnahme=KD_VORSPANN + "Das Dockerfile wird ergänzt.", datei="docker/Dockerfile", poc="x", code_pfad=["x:1"])
+    assert regeln(d, "massnahme") == []                                           # ohne Zeilenangabe ist der Name allein erlaubt
