@@ -1705,7 +1705,8 @@ def test_vertrag_fremde_umgebungsvariable_exit4(tmp_path, schluessel, modus):
 
 def test_vertrag_node_optionen_exit4(tmp_path):
     vertrag_dateien_kopieren(tmp_path)
-    for optionen in (["--no-warnings"], ["--require", "./waechter.mjs"], ["--max-old-space-size=512"]):
+    (tmp_path / "leer.cjs").write_text("")             # CommonJS: --require geht auf jeder Node-Version (Re-Review 3c M-3)
+    for optionen in (["--no-warnings"], ["--require", "./leer.cjs"], ["--max-old-space-size=512"]):
         r = node_lauf("vertrag.mjs", tmp_path, vertrag_umgebung(tmp_path, 1), ["--faelle"], node_args=optionen)
         assert r.returncode == 4, (optionen, r.returncode, r.stdout, r.stderr)
         assert r.stdout == b""
