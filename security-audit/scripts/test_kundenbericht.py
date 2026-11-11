@@ -1977,6 +1977,64 @@ def test_sperre_nicht_moeglich_exit5_haertung(tmp_path, monkeypatch, capsys):
     assert inhalt(tmp_path / "out") == [BASIS + ".json"]
 
 
+def test_sperre_ist_exklusiv_auch_gegen_geteilte_sperre_r1_4(tmp_path):
+    """R1-4: Hält ein anderer Lauf die Datei nur geteilt (LOCK_SH), muss `erstellen` trotzdem mit Exit 5 enden. Mit LOCK_SH statt LOCK_EX
+    im Skript kämen zwei Läufe sich nicht in die Quere; der frühere Test hielt selbst LOCK_EX und bemerkte das nicht."""
+    import fcntl
+    pfad = schreibe(tmp_path / "out", bericht_daten())
+    fd = os.open(pfad, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        p = lauf(pfad)
+        assert p.returncode == 5, p.stdout + p.stderr
+        assert zeilen(p) == ["kategorie: eingabe", "Ein anderer Lauf von erstellen bearbeitet diese Datei gerade."]
+        assert inhalt(tmp_path / "out") == [BASIS + ".json"]
+    finally:
+        os.close(fd)
+
+
+def test_sperre_json_nach_dem_sperren_ersetzt_exit5_nichts_geschrieben_r1_4(tmp_path, monkeypatch, capsys):
+    """R1-4: Die Sperre hängt an der Inode. Wird die JSON zwischen Öffnen und Sperren atomar ersetzt, sperrt ein anderer Lauf die neue
+    Inode ohne Konflikt; darum Exit 5, wenn der Pfad nicht mehr auf die gesperrte Inode zeigt."""
+    import fcntl
+    pfad = schreibe(tmp_path / "out", bericht_daten())
+    for endung in ("md", "pdf"):
+        open(kunde_pfad(pfad, endung), "w").write("Stand des anderen Laufs")
+    echt = fcntl.flock
+
+    def sperren_und_ersetzen(fd, art):
+        echt(fd, art)
+        neu = tmp_path / "out" / "neu.tmp"
+        neu.write_text(pfad.read_text(encoding="utf-8"), encoding="utf-8")
+        os.replace(neu, pfad)
+    monkeypatch.setattr(fcntl, "flock", sperren_und_ersetzen)
+    assert kundenbericht.main(["erstellen", "--json", str(pfad)]) == 5
+    assert capsys.readouterr().out.splitlines() == ["kategorie: eingabe", "Die Eingabedatei wurde während des Laufs ersetzt oder entfernt."]
+    assert [open(kunde_pfad(pfad, e)).read() for e in ("md", "pdf")] == ["Stand des anderen Laufs"] * 2     # nichts entfernt
+    assert inhalt(tmp_path / "out") == [BASIS + "-kunde.md", BASIS + "-kunde.pdf", BASIS + ".json"]
+
+
+def test_json_wird_ueber_den_gesperrten_deskriptor_gelesen_r1_4(tmp_path, monkeypatch):
+    """R1-4: Wird der Pfad nach dem Sperren durch eine andere Datei ersetzt, steht im Bericht dennoch der Inhalt der gesperrten (und der
+    Lauf endet mit Exit 5, weil sich der Pfad geändert hat; vor dem Schreiben)."""
+    pfad = schreibe(tmp_path / "out", bericht_daten(befund(1, titel="Titel der gesperrten Datei")))
+    echt = kundenbericht._alte_dateien_entfernen
+
+    def entfernen_und_ersetzen(md, pdf):
+        echt(md, pdf)
+        andere = tmp_path / "out" / "andere.tmp"
+        andere.write_text(json.dumps(bericht_daten(befund(1, titel="Titel der Ersatzdatei")), ensure_ascii=False), encoding="utf-8")
+        os.replace(andere, pfad)
+    gelesen = []
+    echt_lesen = kundenbericht._lesen
+    monkeypatch.setattr(kundenbericht, "_alte_dateien_entfernen", entfernen_und_ersetzen)
+    monkeypatch.setattr(kundenbericht, "_lesen", lambda p: gelesen.append(echt_lesen(p)) or gelesen[-1])
+    code, kategorie, _z = kundenbericht._erstellen(str(pfad), time.monotonic() + 60)
+    assert (code, kategorie) == (5, "eingabe")
+    assert isinstance(gelesen[0]["befunde"][0]["titel"], str) and gelesen[0]["befunde"][0]["titel"] == "Titel der gesperrten Datei"
+    assert not os.path.exists(kunde_pfad(pfad, "md"))
+
+
 # ------------------------------------------------------------------------------------ TF4 Härtung: Mutationsproben (Lücken geschlossen)
 
 @pytest.mark.parametrize("abkuerzung", ["--js", "--jso"])

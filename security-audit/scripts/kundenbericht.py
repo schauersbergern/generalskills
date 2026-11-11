@@ -112,16 +112,21 @@ def _alte_dateien_entfernen(md: str, pdf: str) -> None:
                 raise Abbruch(5, "eingabe", [f"{_t(os.path.basename(ziel))} konnte nicht entfernt werden."]) from None
 
 
-def _lesen(pfad: str) -> object:
-    """JSON lesen (höchstens `bericht.MAX_JSON_BYTES`); kein Symlink, reguläre Datei."""
-    try:
-        fd = os.open(pfad, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
-    except OSError:
-        raise Abbruch(5, "eingabe", ["Die Eingabedatei ist nicht lesbar."]) from None
+def _lesen(pfad: str | int) -> object:
+    """JSON lesen (höchstens `bericht.MAX_JSON_BYTES`); kein Symlink, reguläre Datei. Ein int ist ein schon offener (gesperrter)
+    Deskriptor: er wird von vorn gelesen und bleibt offen (R1-4: nie neu über den Pfad öffnen, der inzwischen eine andere Datei sein kann)."""
+    if isinstance(pfad, int):
+        fd = os.dup(pfad)
+    else:
+        try:
+            fd = os.open(pfad, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+        except OSError:
+            raise Abbruch(5, "eingabe", ["Die Eingabedatei ist nicht lesbar."]) from None
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise Abbruch(5, "eingabe", ["Die Eingabedatei muss eine reguläre Datei sein (kein Symlink)."])
         grenze = bericht.MAX_JSON_BYTES
+        os.lseek(fd, 0, os.SEEK_SET)
         with os.fdopen(fd, "rb") as fh:
             fd = -1
             roh = fh.read(grenze + 1)
@@ -704,25 +709,38 @@ def _sperre(pfad: str):
             if ex.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
                 raise Abbruch(5, "eingabe", ["Ein anderer Lauf von erstellen bearbeitet diese Datei gerade."]) from None
             raise Abbruch(5, "eingabe", ["Die Eingabedatei lässt sich nicht sperren."]) from None
-        yield
+        _ist_noch_diese_datei(fd, pfad)
+        yield fd
     finally:
         os.close(fd)
+
+
+def _ist_noch_diese_datei(fd: int, pfad: str) -> None:
+    """Die Sperre hängt an der Inode, nicht am Pfad: wurde die JSON atomar ersetzt (Schreiben per rename), sperrt ein anderer Lauf die neue
+    Inode ohne Konflikt und entfernt unsere Kundendateien (R1-4). Darum muss der Pfad noch auf die gesperrte Inode zeigen, sonst Exit 5."""
+    try:
+        gesperrt, jetzt = os.fstat(fd), os.lstat(pfad)
+    except OSError:
+        raise Abbruch(5, "eingabe", ["Die Eingabedatei wurde während des Laufs ersetzt oder entfernt."]) from None
+    if (gesperrt.st_dev, gesperrt.st_ino) != (jetzt.st_dev, jetzt.st_ino):
+        raise Abbruch(5, "eingabe", ["Die Eingabedatei wurde während des Laufs ersetzt oder entfernt."])
 
 
 def _erstellen(pfad: str, ende: float) -> tuple[int, str | None, list[str]]:
     pfad = os.path.abspath(pfad)
     try:
         md, pdf = _pfade_pruefen(pfad)
-        with _sperre(pfad):
-            return _erstellen_gesperrt(pfad, md, pdf, ende)
+        with _sperre(pfad) as fd:
+            return _erstellen_gesperrt(pfad, md, pdf, ende, fd)
     except Abbruch as a:
         return a.code, a.kategorie, a.zeilen
 
 
-def _erstellen_gesperrt(pfad: str, md: str, pdf: str, ende: float) -> tuple[int, str | None, list[str]]:
+def _erstellen_gesperrt(pfad: str, md: str, pdf: str, ende: float, fd: int) -> tuple[int, str | None, list[str]]:
     _alte_dateien_entfernen(md, pdf)
-    daten = _lesen(pfad)
+    daten = _lesen(fd)
     _pruefen(daten)
+    _ist_noch_diese_datei(fd, pfad)
     _ablegen(md, markdown_erzeugen(daten))
     zeilen = [f"kunde-md: {_t(md, 4096)}"]
     try:
