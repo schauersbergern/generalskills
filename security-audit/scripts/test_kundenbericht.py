@@ -1424,11 +1424,14 @@ def test_nul_im_titel_exit4(tmp_path, monkeypatch):
     env, log = attrappen(tmp_path, **beide())
     monkeypatch.setenv("SECURITY_AUDIT_OHNE", "")
     monkeypatch.setenv("PATH", env["PATH"])
+    eigener_tmp = tmp_path / "eigener-tmp"                                       # R1-10: nicht im gemeinsamen Temp-Ordner suchen (parallele Läufe)
+    eigener_tmp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(eigener_tmp))
     md, pdf = md_datei(tmp_path)
     code, kategorie, meldungen = kundenbericht.pdf_erstellen(md, pdf, "Ti\x00tel", time.monotonic() + 30)
     assert (code, kategorie) == (4, "pdf-fehler") and meldungen == ["Werkzeug nicht aufrufbar: pandoc"], (code, kategorie, meldungen)
     assert protokoll(log) == [] and not os.path.exists(pdf)
-    assert not [n for n in os.listdir(tempfile.gettempdir()) if n.startswith("kunde-pdf-") and os.path.getmtime(os.path.join(tempfile.gettempdir(), n)) > time.time() - 30]
+    assert os.listdir(eigener_tmp) == []
 
 
 @pytest.mark.parametrize("name", ["kunde.html", "kunde.pdf"])
@@ -1572,7 +1575,27 @@ def test_html_pruefung_style_inhalt_geaendert():
 
 def test_html_pruefung_ohne_style():
     html = re.sub(r"<style>.*?</style>", "", html_mit("<p>a</p>"), flags=re.S)
-    assert any("style" in z for z in kundenbericht.html_pruefen(html))
+    assert "style: genau ein Element erlaubt" in kundenbericht.html_pruefen(html)
+
+
+def test_html_pruefung_zwei_style_elemente_r1_10():
+    """R1-10: genau ein `<style>`; null und zwei melden dasselbe (nicht nur „Inhalt weicht ab“ bei null)."""
+    doppelt = html_mit("<p>a</p>").replace("</head>", "<style>p{}</style></head>")
+    assert "style: genau ein Element erlaubt" in kundenbericht.html_pruefen(doppelt)
+    assert not any("genau ein Element" in z for z in kundenbericht.html_pruefen(html_mit("<p>a</p>")))
+
+
+def test_datei_lesen_nur_regulaere_dateien_r1_10(tmp_path):
+    """R1-10: `_datei_lesen` liefert für Ordner, Symlinks und fehlende Dateien None; ohne die Prüfung würde ein Symlink gelesen und ein Ordner
+    ein Exit 4 („nicht lesbar“)."""
+    ziel = tmp_path / "echt.html"
+    ziel.write_bytes(b"inhalt")
+    (tmp_path / "ordner.html").mkdir()
+    os.symlink(ziel, tmp_path / "link.html")
+    assert kundenbericht._datei_lesen(str(ziel), 100) == b"inhalt"
+    assert kundenbericht._datei_lesen(str(tmp_path / "ordner.html"), 100) is None
+    assert kundenbericht._datei_lesen(str(tmp_path / "link.html"), 100) is None
+    assert kundenbericht._datei_lesen(str(tmp_path / "fehlt.html"), 100) is None
 
 
 def test_html_pruefung_kommentar():
@@ -1681,6 +1704,7 @@ def test_pandoc_timeout_exit4(tmp_path, bericht_pfad):
     assert time.monotonic() - vorher < 25
     assert [e["name"] for e in protokoll(log)] == ["pandoc"], "nach dem Timeout startet weasyprint nicht"
     assert not os.path.exists(kunde_pfad(bericht_pfad, "pdf"))
+    assert "Zeitüberschreitung bei pandoc." in zeilen(p)                    # R1-10: die Meldung, nicht nur der Exit-Code
 
 
 # ------------------------------------------------------------------------------------ Budget (kein Kindprozess: werkzeug_ausfuehren ist ersetzt)
