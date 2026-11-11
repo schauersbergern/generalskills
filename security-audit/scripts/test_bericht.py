@@ -1974,3 +1974,137 @@ def test_befund_fehler_behaelt_signatur_und_prueft_kundenfelder():
     b = befund(zusammenfassung="kurz")
     assert "S-1: zusammenfassung kürzer als 40 Zeichen" in bericht._befund_fehler(b, "S-1")
     assert bericht._befund_fehler(befund(), "S-1") == []
+
+
+# ------------------------------------------------------------------------------------ TF4 Härtung: Kundenprüfung
+
+def test_kunden_verstoesse_interner_fehler_wird_nicht_verschluckt_haertung(monkeypatch):
+    """Eine Ausnahme in der Prüfung darf nie als „keine Verstöße“ enden (früher `except Exception: return []`, fail-open)."""
+    def kaputt(*_a, **_k):
+        raise RuntimeError("Fehler in der Prüfung")
+    monkeypatch.setattr(bericht, "_regex_treffer", kaputt)
+    with pytest.raises(RuntimeError):
+        bericht.kunden_verstoesse(kd())
+    with pytest.raises(RuntimeError):
+        bericht.text_verstoesse("Ein Satz.")
+
+
+def test_rendern_interner_fehler_der_kundenpruefung_ist_sichtbar_haertung(tmp_path, monkeypatch, capsys):
+    def kaputt(*_a, **_k):
+        raise RuntimeError("geheimer Text")
+    monkeypatch.setattr(bericht, "_regex_treffer", kaputt)
+    pfad = tmp_path / "x.json"
+    pfad.write_text(json.dumps(kd()))
+    assert bericht.main(["rendern", str(pfad)]) == 0
+    aus = capsys.readouterr()
+    assert (tmp_path / "x.md").exists()
+    assert "Kundenbericht-Prüfung nicht möglich (RuntimeError)" in aus.err
+    assert "geheimer Text" not in aus.err and "Traceback" not in aus.err
+
+
+def _poc_mit_ende(laenge, ende):
+    return ("wort " * (laenge // 5))[:laenge - len(ende)] + ende
+
+
+def test_poc_ueber_1_mio_zeichen_ist_fail_closed_review2_n5_3():
+    """TF4 Review 2 (N5-3): `poc[:10**6]` schnitt still ab, ein Leck hinter der Grenze blieb unbemerkt."""
+    leck = " /api/geheim/pfad"
+    d = kd(massnahme=KD_VORSPANN + "Die Stelle /api/geheim/pfad wird geändert.", poc=_poc_mit_ende(10**6, leck))
+    assert [t[1:] for t in bericht.kunden_verstoesse(d)] == [("massnahme", "a", "/api/geheim/pfad")]          # genau an der Grenze: geprüft
+    d = kd(massnahme=KD_VORSPANN + "Ein harmloser Satz ohne Spuren.", poc=_poc_mit_ende(10**6 + 1, leck))
+    assert [t[1:] for t in bericht.kunden_verstoesse(d)] == [("zusammenfassung", "a", "zu viele Token zum Prüfen"),
+                                                              ("massnahme", "a", "zu viele Token zum Prüfen"),
+                                                              ("titel", "a", "zu viele Token zum Prüfen")]
+
+
+def test_poc_ueber_1_mio_zeichen_nur_gelistete_befunde_und_jedes_poc_review2_n5_3():
+    d = kd(poc=_poc_mit_ende(10**6 + 1, " x"))
+    d["befunde"][0]["status"] = "verworfen"
+    d["befunde"][0]["grund"] = "Kein Fehler"
+    assert bericht.kunden_verstoesse(d) == []                                                                # Status entscheidet, nicht die Quelle
+    d = kd(poc="kurz")
+    d["befunde"].append(befund(id="S-2", status="verworfen", grund="Kein Fehler", poc=_poc_mit_ende(10**6 + 1, " x")))
+    assert {(t[1], t[2]) for t in bericht.kunden_verstoesse(d)} == {("zusammenfassung", "a"), ("massnahme", "a"), ("titel", "a")}
+
+
+def test_tausenderzahl_ist_kein_poc_token_review2_n5_2():
+    """TF4 Review 2 (N5-2): `1.200.000` im poc und im Kundentext ist kein Treffer (Zahl mit Tausenderpunkten, kein Exploit-Text)."""
+    poc = KD_POC + " Gesamtwert 1.200.000 und 3.450.000,75 Euro"
+    assert bericht._poc_token(poc) == bericht._poc_token(KD_POC)
+    assert regeln(kd(massnahme=KD_VORSPANN + "Der Schaden liegt bei 1.200.000 Euro.", poc=poc)) == []
+    assert regeln(kd(zusammenfassung=KD_ZUSAMMENFASSUNG + " Das sind 3.450.000,75 Euro.", poc=poc)) == []
+
+
+@pytest.mark.parametrize("titel", ["JWT mit schwachem Algorithmus (alg=none) akzeptiert", "Rolle über role=admin setzbar", "Fehler bei 1=1"])
+def test_titel_gleichheitszeichen_bleibt_verboten_review2_n5_1(titel):
+    """TF4 Review 2 (N5-1), abgelehnt: `=` zwischen Wortzeichen ist die Form von Request-Parametern (`id=1`, `role=admin`, `1=1`) und
+    nicht von Exploit-Text zu unterscheiden; Regel a deckt nur exakte poc-Token ab. Die Kosten sind eine Korrektur des Titels
+    („Algorithmus none“), die SKILL.md in der Schreibregel für Titel nennt."""
+    assert regeln(kd(titel=titel), "titel") == ["c"]
+    assert regeln(kd(titel="JWT mit schwachem Algorithmus none akzeptiert"), "titel") == []
+
+
+def _poc_mit_praefix(n_befunde, tokens_je_poc):
+    d = kd(poc="x")
+    d["befunde"] = [befund(id=f"S-{i}", datei=f"src/api/o{i}.ts", poc=" ".join(f"/api/orders/{i}/{j}" for j in range(tokens_je_poc)),
+                           zusammenfassung=("Die Seite /api/o ist betroffen. " * 20)[:590], massnahme=("Die Seite /api/o ist betroffen. " * 20)[:390],
+                           titel=f"Fehler Nummer {i}", code_pfad=[f"src/api/o{i}.ts:1", "src/l.ts:2"]) for i in range(1, n_befunde + 1)]
+    return d
+
+
+def test_gemeinsames_praefix_vieler_token_ist_begrenzt_review1_n3():
+    """TF4 Re-Review 1 (N-3): 190000 Token mit gemeinsamem 6-Zeichen-Präfix `/api/o`, das auch im Kundentext steht, kosteten
+    17 s (jede Nadel der Gruppe wurde je Feld einzeln geprüft). Jetzt hat die Prüfung ein Arbeitsbudget; ist es verbraucht, gilt
+    jedes geprüfte Feld als Verstoß gegen Regel a (fail-closed, wie bei zu vielen Token)."""
+    d = _poc_mit_praefix(200, 950)
+    t0 = time.monotonic()
+    treffer = bericht.kunden_verstoesse(d)
+    assert time.monotonic() - t0 < 5
+    assert {(t[2], t[3]) for t in treffer} == {("a", "zu viele Token zum Prüfen")}
+    assert len(treffer) == 3 * 200
+
+
+def test_arbeitsbudget_greift_erst_bei_vielen_pruefschritten_review1_n3(monkeypatch):
+    """Ein Schritt ist eine Teilstring-Prüfung: 20 Token mit gleichem Anfang, der im Text steht, kosten genau 20 Schritte."""
+    d = kd(poc=" ".join(f"/api/orders/{j}" for j in range(20)), datei="a.ts", code_pfad=["a.ts:1", "b.ts:2"],
+           zusammenfassung="Die Seite /api/o ist betroffen und braucht Aufmerksamkeit der Verantwortlichen.")
+    assert bericht.kunden_verstoesse(d) == []                                                     # gewöhnliche Berichte: nie betroffen
+    monkeypatch.setattr(bericht, "_MAX_SCHRITTE", 20)
+    assert bericht.kunden_verstoesse(d) == []                                                     # genau verbraucht: noch geprüft
+    monkeypatch.setattr(bericht, "_MAX_SCHRITTE", 19)
+    assert {(t[2], t[3]) for t in bericht.kunden_verstoesse(d)} == {("a", "zu viele Token zum Prüfen")}
+    assert len(bericht.kunden_verstoesse(d)) == 3
+    monkeypatch.undo()
+    assert bericht._MAX_SCHRITTE >= 1_000_000
+
+
+def test_arbeitsbudget_bei_pfaden_mit_gemeinsamem_praefix_review1_n3(monkeypatch):
+    d = kd(poc="x")
+    d["befunde"] = [befund(id=f"S-{i}", datei=f"aaaaaa/xxxxxx/f{i}.ts", poc="x", zusammenfassung=KD_ZUSAMMENFASSUNG + " Siehe aaaaaa und xxxxxx.",
+                           massnahme=KD_MASSNAHME, titel=f"Fehler Nummer {i}", code_pfad=[f"aaaaaa/xxxxxx/f{i}.ts:1", "src/l.ts:2"])
+                    for i in range(1, 31)]
+    assert bericht.kunden_verstoesse(d) == []
+    monkeypatch.setattr(bericht, "_MAX_SCHRITTE", 50)
+    assert {(t[2], t[3]) for t in bericht.kunden_verstoesse(d)} >= {("a", "zu viele Token zum Prüfen")}
+
+
+def test_kunden_verstoesse_zufallsdokumente_werfen_nie_haertung():
+    """Ohne den früheren Auffangschutz (`except Exception`) muss die Prüfung selbst robust sein: 400 zufällige Dokumente
+    mit allen Typen in allen Feldern."""
+    import random
+    zufall = random.Random(20261111)
+    werte = [None, 0, 7, 3.5, True, "", " ", "du", "GET /x", "a/b_c", "x" * 300, "ǅ ﬁ Σ ς İ", "\ud800", "\x00", [], ["a"], [None, 3, "a/b:4"], {}, {"a": 1},
+             "src/a.ts:5", "Zeile 4", "a@b.de", "https://x.de", "S-1", "bestätigt", "unbestätigt"]
+    felder = ["id", "status", "poc", "code_pfad", "datei", "titel", "zusammenfassung", "massnahme", "werkzeug"]
+    for _ in range(400):
+        befunde = []
+        for _n in range(zufall.randint(0, 4)):
+            b = {f: zufall.choice(werte) for f in felder if zufall.random() < 0.8}
+            if zufall.random() < 0.7:
+                b["id"], b["status"] = f"S-{zufall.randint(1, 4)}", zufall.choice(["bestätigt", "unbestätigt", "verworfen"])
+            befunde.append(b if zufall.random() < 0.9 else zufall.choice(werte))
+        wurzel = {"befunde": befunde} if zufall.random() < 0.9 else zufall.choice(werte)
+        ergebnis = bericht.kunden_verstoesse(wurzel)
+        assert isinstance(ergebnis, list) and all(isinstance(x, tuple) and len(x) == 4 for x in ergebnis)
+        for wert in (zufall.choice(werte), zufall.choice(werte)):
+            assert isinstance(bericht.text_verstoesse(wert), list)

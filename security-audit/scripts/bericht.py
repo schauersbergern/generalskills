@@ -497,6 +497,8 @@ _A_RAND = ".,;:()\"'"
 _A_VERSION = re.compile(r"v?\d+(?:\.\d+){1,2}")                 # `4.17.1`, `v4.17`; vier Teile (`10.0.0.5`) sind eine Adresse und bleiben Token
 _A_DATEINAME = re.compile(r"[A-Za-z][\w-]*\.(?:js|ts|mjs|cjs|json|md|html|css)", re.IGNORECASE)   # `Node.js`, `package.json` (ohne / = ? & %)
 _MAX_TOKEN = 200000      # Token aus `poc` je Bericht; darüber ist jedes geprüfte Feld ein Verstoß gegen Regel a (fail-closed)
+_MAX_POC = 10**6         # Zeichen je `poc`; ein längerer `poc` zählt wie zu viele Token (fail-closed, nie still abgeschnitten)
+_MAX_SCHRITTE = 5_000_000  # Teilstring-Prüfungen der Regeln a, d und e je Bericht (~1 s); danach wie zu viele Token (fail-closed)
 _ZU_VIELE_TOKEN = "zu viele Token zum Prüfen"
 _KUNDEN_DETAIL = {                                   # fester Text je Regel (außer `du` und `a`), nie Treffertext
     "b": "HTTP-Methode mit Pfad", "c": "Sonderzeichen oder Backtick", "d": "Datei mit Zeilenangabe",
@@ -548,12 +550,10 @@ def _treffer_liste(t: dict[str, list[str]], regeln: tuple[str, ...]) -> list[tup
 
 def text_verstoesse(text: str) -> list[tuple[str, str]]:
     """Treffer der textbezogenen Kundenregeln `du`, `b`, `c`, `d` (ohne Pfadteile), `url`, `email` als (regel, detail);
-    `detail` ist bei `du` das gefundene Wort, sonst ein fester Text. Ohne Bezug zum JSON (für feste Bausteine); wirft nie."""
-    try:
-        roh = _pruef_text(text)
-        return [] if roh is None else _treffer_liste(_regex_treffer(roh), ("du", "b", "c", "d", "url", "email"))
-    except Exception:  # noqa: BLE001 - die Prüfung darf nie scheitern
-        return []
+    `detail` ist bei `du` das gefundene Wort, sonst ein fester Text. Ohne Bezug zum JSON (für feste Bausteine). Wirft bei jedem Typ
+    von `text` nicht; eine Ausnahme aus der Prüfung selbst wird nicht verschluckt (ein Fehler dort ist kein „keine Verstöße“)."""
+    roh = _pruef_text(text)
+    return [] if roh is None else _treffer_liste(_regex_treffer(roh), ("du", "b", "c", "d", "url", "email"))
 
 
 def _poc_token(poc: str) -> list[str]:
@@ -562,9 +562,9 @@ def _poc_token(poc: str) -> list[str]:
     Bewusste Abweichung von R2-B-1 (Review 1, I-1; enger gefasst in Review 2, N-2): Versionsnummern mit zwei oder drei Teilen
     (`4.17.1`, `v4.17`; vier Teile wie `10.0.0.5` sind Adressen und bleiben Token), `Wort.endung` ohne `/ = ? & %` nur mit der Endung
     js, ts, mjs, cjs, json, md, html oder css (`Node.js`, `package.json`; `admin.php`, `poc.py`, `evil.com` bleiben Token) und
-    `und/oder` zählen nie; sie sind im Kundentext legitim."""
+    `und/oder` zählen nie; sie sind im Kundentext legitim. Schneidet nie ab: `_quellen` lässt nur `poc` bis `_MAX_POC` Zeichen herein."""
     aus: dict[str, None] = {}
-    for roh in unicodedata.normalize("NFC", poc[:10**6]).split():
+    for roh in unicodedata.normalize("NFC", poc).split():
         tok = roh.strip(_A_RAND)
         if (len(tok) >= 6 and (_A_ZEICHEN.intersection(tok) or _A_PUNKT.search(tok)) and not _TAUSENDER.fullmatch(tok)
                 and not _A_VERSION.fullmatch(tok) and not _A_DATEINAME.fullmatch(tok) and tok.casefold() != "und/oder"):
@@ -579,8 +579,8 @@ def _kuerzen60(token: str) -> str:
 
 def _quellen(befunde: list) -> tuple[list[str], list[str], list[str], bool]:
     """(Token aus allen `poc`, Pfadangaben mit `/` bzw. volle `code_pfad`-Einträge für e, alle Pfade und Basenames für d, zu viele
-    Token) über alle Befunde, unabhängig vom Status. Mehr als `_MAX_TOKEN` Token: die Token-Liste bleibt leer, das Flag ist gesetzt
-    (der Aufrufer meldet dann jedes geprüfte Feld als Verstoß gegen Regel a)."""
+    Token) über alle Befunde, unabhängig vom Status. Mehr als `_MAX_TOKEN` Token oder ein `poc` über `_MAX_POC` Zeichen: die
+    Token-Liste bleibt leer, das Flag ist gesetzt (der Aufrufer meldet dann jedes geprüfte Feld als Verstoß gegen Regel a)."""
     token: dict[str, None] = {}
     e: dict[str, None] = {}
     d: dict[str, None] = {}
@@ -599,9 +599,12 @@ def _quellen(befunde: list) -> tuple[list[str], list[str], list[str], bool]:
         if not isinstance(b, dict):
             continue
         if isinstance(b.get("poc"), str) and not zu_viele:
-            token.update(dict.fromkeys(_poc_token(b["poc"])))
-            if len(token) > _MAX_TOKEN:
+            if len(b["poc"]) > _MAX_POC:
                 zu_viele = True
+            else:
+                token.update(dict.fromkeys(_poc_token(b["poc"])))
+                zu_viele = len(token) > _MAX_TOKEN
+            if zu_viele:
                 token.clear()
         if isinstance(b.get("datei"), str):
             pfad(b["datei"])
@@ -620,11 +623,19 @@ def _pfad_zeile(pfad: str) -> re.Pattern:
     return re.compile(r"(?<![\w./-])" + re.escape(pfad) + r"(?:\s*:\s*\d+|,?\s*(?:Zeile|Z\.)\s*\d+)", re.IGNORECASE)
 
 
+class _ZuVieleSchritte(Exception):
+    """Das Arbeitsbudget (`_MAX_SCHRITTE`) der Teilstring-Prüfungen ist verbraucht."""
+
+
 class _Nadeln:
     """Teilstring-Suche vieler Nadeln (klein geschrieben) in einem Text: je Nadellänge (höchstens 6) wird nur der Anfang der Nadel
-    als n-Gramm des Textes nachgeschlagen, erst dann der ganze Teilstring geprüft. Laufzeit je Text ~ Textlänge statt Nadelzahl."""
+    als n-Gramm des Textes nachgeschlagen, erst dann der ganze Teilstring geprüft. Laufzeit je Text ~ Textlänge statt Nadelzahl,
+    solange wenige Nadeln dasselbe n-Gramm als Anfang haben. Haben sehr viele Nadeln denselben Anfang, der auch im Text steht,
+    wäre jede einzeln zu prüfen (TF4 Re-Review 1, N-3: 17 s bei 190000 Token); `arbeit` (eine Liste mit dem Rest, von mehreren
+    Instanzen geteilt) begrenzt das: ist er verbraucht, wirft `finde` `_ZuVieleSchritte`."""
 
-    def __init__(self, nadeln: list[tuple[str, object]]):
+    def __init__(self, nadeln: list[tuple[str, object]], arbeit: list[int] | None = None):
+        self._arbeit = [_MAX_SCHRITTE] if arbeit is None else arbeit
         self._nach_laenge: dict[int, dict[str, list[tuple[int, str, object]]]] = {}
         for i, (klein, nutzlast) in enumerate(nadeln):
             if klein:
@@ -636,12 +647,44 @@ class _Nadeln:
         treffer: dict[int, object] = {}
         for n, tabelle in self._nach_laenge.items():
             for gramm in {klein[i:i + n] for i in range(len(klein) - n + 1)}.intersection(tabelle):
-                treffer.update((i, nutzlast) for (i, nadel, nutzlast) in tabelle[gramm] if nadel in klein)
+                kandidaten = tabelle[gramm]
+                self._arbeit[0] -= len(kandidaten)
+                if self._arbeit[0] < 0:
+                    raise _ZuVieleSchritte
+                treffer.update((i, nutzlast) for (i, nadel, nutzlast) in kandidaten if nadel in klein)
         return [treffer[i] for i in sorted(treffer)]
 
 
+def _felder_pruefen(befunde: list, zu_viele: bool, nadeln_a: "_Nadeln | None", nadeln_e: "_Nadeln | None",
+                    nadeln_d: "_Nadeln | None") -> list[tuple[str, str, str, str]]:
+    """Die Feldprüfung von `kunden_verstoesse`; ohne Nadeln (`zu_viele`) gelten nur die Regex-Regeln und a als Verstoß je Feld."""
+    aus: list[tuple[str, str, str, str]] = []
+    for b in befunde:
+        if not (isinstance(b, dict) and isinstance(b.get("id"), str) and _ID.fullmatch(b["id"])):
+            continue
+        status = unicodedata.normalize("NFC", b["status"]) if isinstance(b.get("status"), str) else None
+        if status not in IN_LISTE:
+            continue
+        for feld, regeln in _KUNDEN_FELDER:
+            text = _pruef_text(b.get(feld))
+            if text is None:
+                continue
+            klein = text.lower()
+            t = _regex_treffer(text, titel=feld == "titel")
+            if "a" in regeln and zu_viele:
+                t["a"] = [_ZU_VIELE_TOKEN]
+            elif "a" in regeln and nadeln_a is not None and (hits := nadeln_a.finde(klein)):
+                t["a"] = [_kuerzen60(k) for k in hits]
+            if "e" in regeln and nadeln_e is not None and nadeln_e.finde(klein):
+                t["e"] = [_KUNDEN_DETAIL["e"]]
+            if "d" not in t and nadeln_d is not None and any(_pfad_zeile(p).search(text) for p in nadeln_d.finde(klein)):
+                t["d"] = [_KUNDEN_DETAIL["d"]]
+            aus.extend((b["id"], feld, regel, detail) for regel, detail in _treffer_liste(t, regeln))
+    return aus
+
+
 def kunden_verstoesse(daten: object) -> list[tuple[str, str, str, str]]:
-    """Verstöße der Kundenfelder gegen die Inhaltsregeln als (id, feld, regel, detail); wirft nie, egal welche Typen im JSON stehen.
+    """Verstöße der Kundenfelder gegen die Inhaltsregeln als (id, feld, regel, detail); wirft bei keinem Typ im JSON.
 
     Geprüft werden Befunde mit Status bestätigt/unbestätigt (NFC) und je Feld einzeln, was vorhanden und Text ist:
     `zusammenfassung`, `massnahme` (alle Regeln) und `titel` (alle außer `du`; bei `c` ohne `<` und `>`). Fehlende Felder meldet erst
@@ -651,42 +694,24 @@ def kunden_verstoesse(daten: object) -> list[tuple[str, str, str, str]]:
     `Zeile <n>`, `e` Dateipfad oder `code_pfad`-Eintrag eines Befunds (ohne Ausnahme, auch die eigene `datei`), `url` Webadresse,
     `email` E-Mail-Adresse. Quellen für a, d und e sind alle Befunde unabhängig vom Status.
     `detail` ist bei b, c, d, e, url und email ein fester Text ohne Treffertext (die Exit-2-Zeile von kundenbericht.py darf ihn
-    ausgeben), bei `du` das Wort, bei `a` das Token. Mehr als 200000 Token in den `poc`-Feldern: fail-closed, jedes geprüfte Feld
-    (`zusammenfassung`, `massnahme`, `titel`) meldet Regel a mit dem festen Detail „zu viele Token zum Prüfen“. Die Funktion hat
-    keine Seiteneffekte (keine Ausgabe auf stderr)."""
-    try:
-        if not isinstance(daten, dict) or not isinstance(daten.get("befunde"), list):
-            return []
-        befunde = daten["befunde"]
-        token, pfade_e, pfade_d, zu_viele = _quellen(befunde)
-        nadeln_a = _Nadeln([(k.lower(), k) for k in token])            # einmal vorab klein schreiben und indizieren (Laufzeit)
-        nadeln_e = _Nadeln([(p.lower(), p) for p in pfade_e])
-        nadeln_d = _Nadeln([(p.lower(), p) for p in pfade_d])
-        aus: list[tuple[str, str, str, str]] = []
-        for b in befunde:
-            if not (isinstance(b, dict) and isinstance(b.get("id"), str) and _ID.fullmatch(b["id"])):
-                continue
-            status = unicodedata.normalize("NFC", b["status"]) if isinstance(b.get("status"), str) else None
-            if status not in IN_LISTE:
-                continue
-            for feld, regeln in _KUNDEN_FELDER:
-                text = _pruef_text(b.get(feld))
-                if text is None:
-                    continue
-                klein = text.lower()
-                t = _regex_treffer(text, titel=feld == "titel")
-                if "a" in regeln and zu_viele:
-                    t["a"] = [_ZU_VIELE_TOKEN]
-                elif "a" in regeln and (hits := nadeln_a.finde(klein)):
-                    t["a"] = [_kuerzen60(k) for k in hits]
-                if "e" in regeln and nadeln_e.finde(klein):
-                    t["e"] = [_KUNDEN_DETAIL["e"]]
-                if "d" not in t and any(_pfad_zeile(p).search(text) for p in nadeln_d.finde(klein)):
-                    t["d"] = [_KUNDEN_DETAIL["d"]]
-                aus.extend((b["id"], feld, regel, detail) for regel, detail in _treffer_liste(t, regeln))
-        return aus
-    except Exception:  # noqa: BLE001 - die Prüfung darf nie scheitern (kein Traceback für rendern und den Eval)
+    ausgeben), bei `du` das Wort, bei `a` das Token.
+    Fail-closed mit festem Detail „zu viele Token zum Prüfen“ (Regel a bei jedem geprüften Feld: `zusammenfassung`, `massnahme`,
+    `titel`): mehr als 200000 Token in den `poc`-Feldern, ein `poc` über 10**6 Zeichen oder mehr als 5 Mio. Teilstring-Prüfungen
+    (nur bei sehr vielen Token oder Pfaden mit gleichem Anfang; gewöhnliche Berichte brauchen einen Bruchteil). Die Funktion hat
+    keine Seiteneffekte (keine Ausgabe auf stderr). Eine Ausnahme aus der Prüfung selbst wird nicht verschluckt: Aufrufer
+    behandeln sie als „Prüfung nicht möglich“, nie als „keine Verstöße“."""
+    if not isinstance(daten, dict) or not isinstance(daten.get("befunde"), list):
         return []
+    befunde = daten["befunde"]
+    token, pfade_e, pfade_d, zu_viele = _quellen(befunde)
+    arbeit = [_MAX_SCHRITTE]
+    nadeln_a = _Nadeln([(k.lower(), k) for k in token], arbeit)            # einmal vorab klein schreiben und indizieren (Laufzeit)
+    nadeln_e = _Nadeln([(p.lower(), p) for p in pfade_e], arbeit)
+    nadeln_d = _Nadeln([(p.lower(), p) for p in pfade_d], arbeit)
+    try:
+        return _felder_pruefen(befunde, zu_viele, nadeln_a, nadeln_e, nadeln_d)
+    except _ZuVieleSchritte:
+        return _felder_pruefen(befunde, True, None, None, None)
 
 
 # ------------------------------------------------------------------------------------ Markdown
@@ -788,8 +813,13 @@ def _reservierung_abweichungen(marker: str, daten: dict) -> list[str]:
 
 def _kundenwarnung(daten: dict) -> None:
     """Treffer von `kunden_verstoesse` nur als Warnung auf stderr (ID, Feld, Regel; nie Wort, Token oder Treffertext): `rendern`
-    scheitert nie an Kundenregeln, `kundenbericht.py` entscheidet."""
-    treffer = kunden_verstoesse(daten)
+    scheitert nie an Kundenregeln, `kundenbericht.py` entscheidet. Scheitert die Prüfung selbst, steht das ebenfalls auf stderr
+    (nur der Ausnahmetyp, nie ihr Text): „keine Warnung“ hieße sonst fälschlich „keine Verstöße“."""
+    try:
+        treffer = kunden_verstoesse(daten)
+    except Exception as ex:  # noqa: BLE001 - `rendern` scheitert nie an der Kundenprüfung; sichtbar machen statt schweigen
+        print(f"Kundenbericht-Prüfung nicht möglich ({type(ex).__name__}); kundenbericht.py meldet den Fehler.", file=sys.stderr)
+        return
     if not treffer:
         return
     zeilen = list(dict.fromkeys(f"{i} {feld}: Regel {regel}" for (i, feld, regel, _d) in treffer))
