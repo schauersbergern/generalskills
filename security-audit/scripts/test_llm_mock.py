@@ -4,6 +4,8 @@ Aufruf: python3 -m pytest security-audit/scripts/test_llm_mock.py -q
 Der Mock läuft lokal mit Node auf 127.0.0.1 (Port 0, Ports aus der bereit-Zeile) als eigene Prozessgruppe
 (`start_new_session=True`). Beendet wird nur diese Gruppe, und nur solange der eigene Popen noch läuft.
 Requests gehen per `http.client` ausschließlich an 127.0.0.1.
+Ab "SDK-Vertragstest" laufen die echten SDKs (Node >= 22, Opt-in `SECURITY_AUDIT_SDK_VERTRAG=1`) gegen den Mock, mit Wächter
+und Umgebungs-Whitelist; `npm ci` ist dort die einzige Netzaktion (nur die npm-Registry).
 """
 import base64
 import http.client
@@ -24,7 +26,15 @@ SKILL = os.path.dirname(HIER)
 MOCK = os.path.join(SKILL, "docker", "llm-mock.mjs")
 NODE = shutil.which("node")
 
-pytestmark = pytest.mark.skipif(NODE is None, reason="node fehlt")
+# Ohne node entfallen alle Tests außer diesen (reine Dateiprüfungen des SDK-Vertragstests, siehe unten).
+OHNE_NODE = {"test_vertrag_umgebung_ohne_fremde_variablen", "test_sdk_vertrag_lockfile_nur_registry",
+             "test_sdk_vertrag_dateien_ohne_modell_api_hosts"}
+
+
+@pytest.fixture(autouse=True)
+def _node_noetig(request):
+    if NODE is None and request.node.originalname not in OHNE_NODE:
+        pytest.skip("node fehlt")
 
 BEREIT = re.compile(r"^bereit api=(\d+) steuer=(\d+)$")
 BODY_GRENZE = 8192
@@ -1087,3 +1097,368 @@ def test_mock_protokoll_mit_fundstellen_bleibt_unter_64kib(mock):
     p = json.loads(r.stdout)
     assert p["gekuerzt"] > 0 and p["gekuerzt"] + len(p["eintraege"]) == 8
     assert all(marker in e["fundstelle"] for e in p["eintraege"])
+
+
+# --- SDK-Vertragstest (TF3 Task 3c) ---------------------------------------------------------------------------
+# Die echten SDKs laufen auf dem Host gegen den lokalen Mock (nur 127.0.0.1). Davor installiert `waechter.mjs` einen
+# Wächter, der jede Verbindung zu einem anderen Ziel abweist. Die Umgebung der Node-Prozesse kommt aus einer Whitelist.
+# Netz nur für `npm ci` (nur die npm-Registry) im Opt-in-Test. Fremde Ziele der Tests: nur poc-fremd.invalid und 192.0.2.1.
+
+VERTRAG = os.path.join(SKILL, "evals", "sdk-vertrag")
+REGISTRY = "https://registry.npmjs.org/"
+VERTRAG_PAKETE = ("@ai-sdk/anthropic", "@ai-sdk/openai", "@anthropic-ai/sdk", "ai", "openai")
+VERTRAG_OPTIN = os.environ.get("SECURITY_AUDIT_SDK_VERTRAG") == "1"
+FREMDE_ZIELE = ("poc-fremd.invalid", "192.0.2.1")
+
+FAELLE = [
+    (paket, weg, stream, art)
+    for paket, weg in (
+        ("openai", "chat"), ("openai", "responses"), ("@anthropic-ai/sdk", "messages"),
+        ("ai+@ai-sdk/openai", "responses"), ("ai+@ai-sdk/openai", "chat"), ("ai+@ai-sdk/anthropic", "messages"),
+    )
+    for stream in (False, True)
+    for art in ("text", "tool")
+] + [("openai", "embeddings", False, "embedding")]
+
+
+def fall_id(f):
+    paket, weg, stream, art = f
+    return f"{paket}-{weg}-{'stream' if stream else 'ohne'}-{art}"
+
+
+def vertrag_umgebung(home, port):
+    """Umgebung für Node-Prozesse des Vertragstests: Whitelist, nichts wird aus der Umgebung des Testlaufs geerbt."""
+    return {
+        "PATH": os.environ.get("PATH") or "/usr/bin:/bin",
+        "HOME": str(home),
+        "TMPDIR": str(home),
+        "LANG": os.environ.get("LANG") or "C.UTF-8",
+        "OPENAI_BASE_URL": f"http://127.0.0.1:{port}/v1",
+        "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{port}",
+        "OPENAI_API_KEY": "poc-dummy-openai",
+        "ANTHROPIC_API_KEY": "poc-dummy-anthropic",
+    }
+
+
+def test_vertrag_umgebung_ohne_fremde_variablen(monkeypatch, tmp_path):
+    fremd = {
+        "OPENAI_ORG_ID": "org-fremd", "OPENAI_PROJECT_ID": "proj-fremd", "OPENAI_API_BASE": "http://poc-fremd.invalid/v1",
+        "OPENAI_BASE_URL": "http://poc-fremd.invalid/v1", "ANTHROPIC_BASE_URL": "http://poc-fremd.invalid",
+        "ANTHROPIC_AUTH_TOKEN": "poc-fremd-token", "ANTHROPIC_API_KEY": "echt-wirkender-schluessel",
+        "AZURE_OPENAI_ENDPOINT": "http://poc-fremd.invalid", "AZURE_OPENAI_API_KEY": "azure-fremd",
+        "HTTPS_PROXY": "http://poc-fremd.invalid:3128", "HTTP_PROXY": "http://poc-fremd.invalid:3128",
+        "https_proxy": "http://poc-fremd.invalid:3128", "ALL_PROXY": "http://poc-fremd.invalid:3128",
+        "NO_PROXY": "", "NODE_OPTIONS": "--require /fremd.js", "NODE_EXTRA_CA_CERTS": "/fremd.pem",
+        "NPM_CONFIG_REGISTRY": "http://poc-fremd.invalid/", "GOOGLE_API_KEY": "g-fremd", "AWS_ACCESS_KEY_ID": "aws-fremd",
+    }
+    for k, v in fremd.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("OPENAI_API_KEY", "echt-wirkender-schluessel")
+    env = vertrag_umgebung(tmp_path, 4242)
+    assert set(env) == {"PATH", "HOME", "TMPDIR", "LANG", "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL",
+                        "OPENAI_API_KEY", "ANTHROPIC_API_KEY"}
+    assert env["HOME"] == env["TMPDIR"] == str(tmp_path)
+    assert env["OPENAI_BASE_URL"] == "http://127.0.0.1:4242/v1"
+    assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:4242"
+    assert env["OPENAI_API_KEY"] == "poc-dummy-openai" and env["ANTHROPIC_API_KEY"] == "poc-dummy-anthropic"
+    werte = "\n".join(env.values())
+    for v in fremd.values():
+        if v:
+            assert v not in werte
+    assert "echt-wirkender-schluessel" not in werte
+
+
+def test_sdk_vertrag_lockfile_nur_registry():
+    with open(os.path.join(VERTRAG, "package.json.tmpl"), encoding="utf-8") as f:
+        paket = json.load(f)
+    with open(os.path.join(VERTRAG, "package-lock.json.tmpl"), encoding="utf-8") as f:
+        roh = f.read()
+    lock = json.loads(roh)
+    assert not os.path.exists(os.path.join(VERTRAG, "package.json")), "Manifest nur als .tmpl ablegen"
+    assert not os.path.exists(os.path.join(VERTRAG, "package-lock.json")), "Lockfile nur als .tmpl ablegen"
+    assert not os.path.exists(os.path.join(VERTRAG, "node_modules"))
+    for name in ("preinstall", "install", "postinstall", "prepare"):
+        assert name not in paket.get("scripts", {})
+    # gepinnt: genau diese Pakete, jeweils eine feste Version ohne Bereich
+    assert sorted(paket["dependencies"]) == sorted(VERTRAG_PAKETE)
+    for name, version in paket["dependencies"].items():
+        assert re.fullmatch(r"\d+\.\d+\.\d+", version), (name, version)
+    assert lock["lockfileVersion"] == 3
+    assert lock["packages"][""]["dependencies"] == paket["dependencies"]
+    for name in VERTRAG_PAKETE:
+        assert lock["packages"][f"node_modules/{name}"]["version"] == paket["dependencies"][name]
+    pakete = {k: v for k, v in lock["packages"].items() if k}
+    assert len(pakete) > len(VERTRAG_PAKETE)
+    for name, daten in pakete.items():
+        assert not daten.get("hasInstallScript"), name
+        assert not daten.get("link"), name
+        assert daten.get("resolved", "").startswith(REGISTRY), name
+        assert daten.get("integrity", "").startswith("sha512-"), name
+    # keine andere URL als die Registry; `funding` ist reine Metadaten-Angabe (Spendenlink) und wird nie abgerufen
+    for daten in pakete.values():
+        daten.pop("funding", None)
+    rest = json.dumps(pakete)
+    hosts = set(re.findall(r"[a-z][a-z0-9+.-]*://([^/\s\"']+)", rest))
+    assert hosts == {"registry.npmjs.org"}, hosts
+    assert not re.search(r"git\+|github:|file:|\"http://", rest)
+
+
+def test_sdk_vertrag_dateien_ohne_modell_api_hosts():
+    """Kein Vertragsskript und kein Test nennt einen echten Modell-API-Host als Ziel (hier nur zusammengesetzt)."""
+    muster = re.compile("api" + r"\.(?:" + "openai" + "|" + "anthropic" + r")\.com")
+    dateien = [os.path.join(VERTRAG, n) for n in sorted(os.listdir(VERTRAG))] + [os.path.join(HIER, "test_llm_mock.py")]
+    assert any(d.endswith("vertrag.mjs") for d in dateien) and any(d.endswith("waechter.mjs") for d in dateien)
+    for d in dateien:
+        with open(d, encoding="utf-8") as f:
+            assert not muster.search(f.read()), d
+
+
+WAECHTER_PROBE = r"""
+import "./waechter.mjs";
+import { treffer } from "./waechter.mjs";
+import http, { request as httpRequestBenannt } from "node:http";
+import https from "node:https";
+import net from "node:net";
+import tls from "node:tls";
+
+const FREMD = ["poc-fremd.invalid", "192.0.2.1"];
+const ergebnisse = {};
+
+async function versuch(name, f) {
+  try {
+    const r = await f();
+    if (r && typeof r.destroy === "function") r.destroy();
+    ergebnisse[name] = "erlaubt";
+  } catch (e) {
+    ergebnisse[name] = /waechter/i.test(String(e && e.message)) ? "blockiert" : "anderer fehler: " + String(e && e.message);
+  }
+}
+
+// Lokaler Listener (127.0.0.1, Port 0): hier muss alles durchgehen.
+const server = http.createServer((req, res) => res.end("ok"));
+await new Promise((ok) => server.listen(0, "127.0.0.1", ok));
+const port = server.address().port;
+const lokal = (fn) => () => new Promise((ok, fehler) => fn(ok, fehler));
+
+await versuch("lokal.fetch", async () => { const r = await fetch(`http://127.0.0.1:${port}/`); await r.text(); });
+await versuch("lokal.http.get", lokal((ok, fehler) => {
+  http.get({ host: "127.0.0.1", port, path: "/" }, (res) => { res.resume(); res.on("end", ok); }).on("error", fehler);
+}));
+await versuch("lokal.http.request", lokal((ok, fehler) => {
+  const r = http.request(`http://127.0.0.1:${port}/`, (res) => { res.resume(); res.on("end", ok); });
+  r.on("error", fehler); r.end();
+}));
+await versuch("lokal.net.connect", lokal((ok, fehler) => {
+  const s = net.connect({ host: "127.0.0.1", port }, () => { s.destroy(); ok(); }); s.on("error", fehler);
+}));
+await versuch("lokal.net.createConnection", lokal((ok, fehler) => {
+  const s = net.createConnection(port, "127.0.0.1", () => { s.destroy(); ok(); }); s.on("error", fehler);
+}));
+server.close();
+
+// Der benannte Import muss nach syncBuiltinESMExports() dieselbe Sperre sehen wie http.request selbst (nicht erst die Socket-Schicht).
+{
+  const n = treffer.length;
+  await versuch("benannt.http.request", () => httpRequestBenannt({ hostname: "poc-fremd.invalid" }));
+  ergebnisse["benannt.art"] = treffer.length === n + 1 ? treffer[n].art : "kein Treffer";
+}
+
+for (const ziel of FREMD) {
+  const url = ziel === "192.0.2.1" ? "http://192.0.2.1:9/" : "http://poc-fremd.invalid/";
+  const surl = url.replace("http:", "https:");
+  await versuch(`${ziel}.fetch`, () => fetch(url, { signal: AbortSignal.timeout(2000) }));
+  await versuch(`${ziel}.fetch.request`, () => fetch(new Request(url), { signal: AbortSignal.timeout(2000) }));
+  await versuch(`${ziel}.http.request`, () => http.request({ host: ziel, port: 9, path: "/" }));
+  await versuch(`${ziel}.http.request.url`, () => http.request(url));
+  await versuch(`${ziel}.http.get`, () => http.get(url));
+  await versuch(`${ziel}.http.benannt`, () => httpRequestBenannt({ hostname: ziel }));
+  await versuch(`${ziel}.https.request`, () => https.request(surl));
+  await versuch(`${ziel}.https.get`, () => https.get({ hostname: ziel, port: 9 }));
+  await versuch(`${ziel}.net.connect`, () => net.connect({ host: ziel, port: 9 }));
+  await versuch(`${ziel}.net.connect.args`, () => net.connect(9, ziel));
+  await versuch(`${ziel}.net.createConnection`, () => net.createConnection({ host: ziel, port: 9 }));
+  await versuch(`${ziel}.tls.connect`, () => tls.connect({ host: ziel, port: 9 }));
+  await versuch(`${ziel}.socket.connect`, () => new net.Socket().connect(9, ziel));
+}
+// Ohne Host gilt localhost, nicht 127.0.0.1: ebenfalls abgewiesen. Tricks mit dem Hostnamen ebenso.
+await versuch("ohne_host.http.request", () => http.request({ port: 9 }));
+await versuch("trick.userinfo", () => fetch("http://127.0.0.1@poc-fremd.invalid/", { signal: AbortSignal.timeout(2000) }));
+await versuch("trick.praefix", () => fetch("http://127.0.0.1.poc-fremd.invalid/", { signal: AbortSignal.timeout(2000) }));
+{
+  const n = treffer.length;
+  await versuch("trick.ipc", () => net.connect({ path: "/tmp/poc-nicht-vorhanden.sock" }));
+  ergebnisse["ipc.ziel"] = treffer.length === n + 1 ? treffer[n].ziel : "kein Treffer";
+}
+
+// Ein SDK, das den Fehler fängt, ändert nichts an der Liste.
+const vorher = treffer.length;
+try { await fetch("http://poc-fremd.invalid/", { signal: AbortSignal.timeout(2000) }); } catch {}
+ergebnisse["liste.waechst_trotz_fang"] = treffer.length === vorher + 1 ? "ja" : "nein";
+
+process.stdout.write(JSON.stringify({ ergebnisse, treffer }) + "\n");
+"""
+
+
+def vertrag_dateien_kopieren(ziel, namen=("vertrag.mjs", "waechter.mjs")):
+    for n in namen:
+        shutil.copy(os.path.join(VERTRAG, n), os.path.join(str(ziel), n))
+
+
+def node_lauf(skript, cwd, env, args=(), timeout=60):
+    return subprocess.run([NODE, skript, *args], cwd=str(cwd), env=env, capture_output=True, timeout=timeout)
+
+
+def test_vertrag_waechter_blockiert_fremden_host(tmp_path):
+    vertrag_dateien_kopieren(tmp_path, ("waechter.mjs",))
+    (tmp_path / "probe.mjs").write_text(WAECHTER_PROBE, encoding="utf-8")
+    r = node_lauf("probe.mjs", tmp_path, vertrag_umgebung(tmp_path, 1))
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    daten = json.loads(r.stdout)
+    erg = daten["ergebnisse"]
+    for name, wert in erg.items():
+        if name.startswith("lokal."):
+            assert wert == "erlaubt", (name, wert)
+        elif name == "liste.waechst_trotz_fang":
+            assert wert == "ja"
+        elif name == "benannt.art":
+            assert wert == "http.request", wert
+        elif name == "ipc.ziel":
+            assert wert.startswith("ipc:"), wert
+        else:
+            assert wert == "blockiert", (name, wert)
+    assert len([n for n in erg if n.startswith("lokal.")]) == 5
+    for ziel in FREMDE_ZIELE:
+        assert sum(1 for n in erg if n.startswith(ziel + ".")) == 13, ziel
+    # jeder Treffer steht in der Liste, mit Art und Ziel (nur Host, ohne Pfad und Query)
+    arten = {t["art"] for t in daten["treffer"]}
+    assert arten >= {"fetch", "http.request", "http.get", "https.request", "https.get", "net.connect",
+                     "net.createConnection", "tls.connect", "socket.connect"}, arten
+    for t in daten["treffer"]:
+        assert set(t) == {"art", "ziel"}, t
+        if not t["ziel"].startswith("ipc:"):  # Socket-Pfade (ipc:) sind keine Hosts
+            assert "/" not in t["ziel"] and "?" not in t["ziel"] and "@" not in t["ziel"], t
+    ziele = {t["ziel"] for t in daten["treffer"]}
+    assert set(FREMDE_ZIELE) <= ziele
+    assert not any(t["ziel"] == "127.0.0.1" for t in daten["treffer"])
+
+
+def test_vertrag_faelle_stimmen_mit_dem_skript(tmp_path):
+    vertrag_dateien_kopieren(tmp_path)
+    r = node_lauf("vertrag.mjs", tmp_path, vertrag_umgebung(tmp_path, 1), ["--faelle"])
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert r.stdout.isascii()
+    ist = [(z["paket"], z["weg"], z["stream"], z["art"]) for z in json.loads(r.stdout)]
+    assert sorted(ist) == sorted(FAELLE)
+
+
+def test_vertrag_antworten_je_fall_mit_eigenem_marker(tmp_path, mock):
+    vertrag_dateien_kopieren(tmp_path)
+    r = node_lauf("vertrag.mjs", tmp_path, vertrag_umgebung(tmp_path, mock.api), ["--antworten"])
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    liste = json.loads(r.stdout)
+    assert len(liste) == sum(1 for f in FAELLE if f[3] in ("text", "tool"))  # Embeddings brauchen keine Antwort
+    marker = [e["wenn_enthaelt"] for e in liste]
+    assert len(set(marker)) == len(marker)
+    assert all(re.fullmatch(r"POCMARKER-vertrag-\d\d", m) for m in marker)
+    assert any("text" in e for e in liste) and any("werkzeug" in e for e in liste)
+    setzen(mock, liste)  # der Mock nimmt die Liste an
+
+
+def test_vertrag_ohne_wirksamen_waechter_exit3_und_kein_sdk(tmp_path):
+    # Attrappe statt Wächter: lässt alles scheinbar durch, ohne dass ein Request das Netz erreicht.
+    (tmp_path / "waechter.mjs").write_text(
+        'import http from "node:http";\n'
+        'import module from "node:module";\n'
+        'export const treffer = [];\n'
+        'globalThis.fetch = async () => new Response("x");\n'
+        'http.request = () => ({ on() { return this; }, end() {}, destroy() {} });\n'
+        'module.syncBuiltinESMExports();\n', encoding="utf-8")
+    vertrag_dateien_kopieren(tmp_path, ("vertrag.mjs",))
+    r = node_lauf("vertrag.mjs", tmp_path, vertrag_umgebung(tmp_path, 1))
+    assert r.returncode == 3, (r.returncode, r.stdout, r.stderr)
+    assert r.stdout == b""  # keine Ergebniszeile: kein SDK wurde importiert (es gibt hier auch kein node_modules)
+    assert b"Selbsttest" in r.stderr
+
+
+@pytest.mark.parametrize("fehlt", ["OPENAI_BASE_URL", "ANTHROPIC_BASE_URL"])
+def test_vertrag_ohne_basis_url_in_der_umgebung_exit4(tmp_path, fehlt):
+    vertrag_dateien_kopieren(tmp_path)
+    env = vertrag_umgebung(tmp_path, 1)
+    del env[fehlt]
+    r = node_lauf("vertrag.mjs", tmp_path, env)
+    assert r.returncode == 4, (r.returncode, r.stdout, r.stderr)
+    assert r.stdout == b""
+
+
+@pytest.mark.parametrize("url", ["http://poc-fremd.invalid/v1", "http://192.0.2.1:9/v1", "http://localhost:1/v1"])
+def test_vertrag_basis_url_nicht_loopback_exit4(tmp_path, url):
+    vertrag_dateien_kopieren(tmp_path)
+    env = vertrag_umgebung(tmp_path, 1)
+    env["OPENAI_BASE_URL"] = url
+    r = node_lauf("vertrag.mjs", tmp_path, env)
+    assert r.returncode == 4, (r.returncode, r.stdout, r.stderr)
+    assert r.stdout == b""
+
+
+# Opt-in: SECURITY_AUDIT_SDK_VERTRAG=1 (braucht npm, Node >= 22 und Netz zur npm-Registry). Node >= 22 verlangen die
+# aktuellen SDKs; ein anderes node wählt SECURITY_AUDIT_SDK_NODE=<pfad>.
+
+def _node_major(pfad):
+    r = subprocess.run([pfad, "--version"], capture_output=True, timeout=20)
+    m = re.match(rb"v(\d+)\.", r.stdout)
+    return int(m.group(1)) if m else 0
+
+
+@pytest.fixture(scope="module")
+def vertrag_zeilen(tmp_path_factory):
+    if not VERTRAG_OPTIN:
+        pytest.skip("Opt-in: SECURITY_AUDIT_SDK_VERTRAG=1")
+    npm = shutil.which("npm")
+    node = os.environ.get("SECURITY_AUDIT_SDK_NODE") or NODE
+    if npm is None or node is None:
+        pytest.skip("npm oder node fehlt")
+    if _node_major(node) < 22:
+        pytest.skip("Node >= 22 nötig (SECURITY_AUDIT_SDK_NODE=<pfad>)")
+    arbeit = tmp_path_factory.mktemp("sdk-vertrag")
+    shutil.copy(os.path.join(VERTRAG, "package.json.tmpl"), arbeit / "package.json")
+    shutil.copy(os.path.join(VERTRAG, "package-lock.json.tmpl"), arbeit / "package-lock.json")
+    vorher = (arbeit / "package-lock.json").read_bytes()
+    # einzige Netzaktion: npm ci gegen die npm-Registry (ausdrücklich per Flag, ohne Skripte)
+    i = subprocess.run([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--registry", REGISTRY],
+                       cwd=str(arbeit), capture_output=True, timeout=300)
+    assert i.returncode == 0, i.stderr.decode("utf-8", "replace")[-2000:]
+    assert (arbeit / "package-lock.json").read_bytes() == vorher
+    vertrag_dateien_kopieren(arbeit)
+    m = Mock()
+    try:
+        home = tmp_path_factory.mktemp("sdk-vertrag-home")
+        env = vertrag_umgebung(home, m.api)
+        env["PATH"] = os.path.dirname(node) + os.pathsep + env["PATH"]
+        a = subprocess.run([node, "vertrag.mjs", "--antworten"], cwd=str(arbeit), env=env, capture_output=True, timeout=60)
+        assert a.returncode == 0, a.stderr
+        setzen(m, json.loads(a.stdout))
+        r = subprocess.run([node, "vertrag.mjs"], cwd=str(arbeit), env=env, capture_output=True, timeout=600)
+    finally:
+        m.beenden()
+    assert r.returncode == 0, (r.returncode, r.stdout.decode("utf-8", "replace")[-2000:], r.stderr.decode("utf-8", "replace")[-2000:])
+    ausgabe = os.environ.get("SECURITY_AUDIT_SDK_VERTRAG_AUSGABE")
+    if ausgabe:
+        with open(ausgabe, "wb") as f:
+            f.write(r.stdout)
+    zeilen = {}
+    for z in r.stdout.decode("utf-8").splitlines():
+        d = json.loads(z)
+        assert set(d) == {"paket", "weg", "stream", "art", "ergebnis", "waechter"}, d
+        zeilen[(d["paket"], d["weg"], d["stream"], d["art"])] = d
+    return zeilen
+
+
+def test_vertrag_sdk_vollstaendig(vertrag_zeilen):
+    assert sorted(vertrag_zeilen) == sorted(FAELLE)
+
+
+@pytest.mark.parametrize("fall", FAELLE, ids=fall_id)
+def test_vertrag_sdk(vertrag_zeilen, fall):
+    z = vertrag_zeilen[fall]
+    assert z["ergebnis"] == "gruen", z  # sonst "rot: <Grund>" oder "liest Env nicht" (Wächter hat ausgelöst)
+    assert z["waechter"] == [], z
