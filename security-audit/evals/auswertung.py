@@ -303,6 +303,23 @@ def _command_werte(zeile: str) -> list[str]:
     return [_json_text(m.group(1)) for m in _COMMAND_WERT.finditer(zeile)]
 
 
+_LAUF_ARG = re.compile(r"--lauf[ =]([0-9a-f]{8})(?![0-9A-Za-z])")
+
+
+def lauf_ids(stream: list[dict], letzte_zeile: str = "") -> set[str]:
+    """Lauf-IDs (8 Hex-Zeichen), die in `--lauf <id>` eines Befehls (`command`) im Stream vorkommen, auch von Subagenten
+    und aus den `command`-Werten einer abgeschnittenen letzten Zeile. Nur diese Läufe gehören zum Eval (R1-3)."""
+    ids: set[str] = set()
+    for block, _ in _tool_uses(stream):
+        eingabe = block.get("input")
+        befehl = eingabe.get("command") if isinstance(eingabe, dict) else None
+        if isinstance(befehl, str):
+            ids.update(_LAUF_ARG.findall(befehl))
+    for befehl in _command_werte(letzte_zeile or ""):
+        ids.update(_LAUF_ARG.findall(befehl))
+    return ids
+
+
 def pruefe_netz(stream: list[dict], bericht: dict | None, verbotene_muster: list[str],
                 letzte_zeile: str = "") -> list[str]:
     """TF1-D5 (fail-closed): Netzregel (`netzregel.verstoesse_bash`) auf jedes `tool_use` mit `command`-Eingabe

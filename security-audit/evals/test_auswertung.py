@@ -742,9 +742,15 @@ def docker_rest():
     zustand["container"] += ["security-audit-0a1b2c3d-p1-app", "fremder-container"]
     zustand["netze"] += ["security-audit-0a1b2c3d-p1"]
     zustand["images"] += [["security-audit-0a1b2c3d-app", "latest"]]
+    if os.environ.get("FAKE_CLAUDE_FREMD"):                      # parallel laufendes echtes Audit (R1-3)
+        zustand["container"] += ["security-audit-ffffffff-p1-app"]
+        zustand["netze"] += ["security-audit-ffffffff-p1"]
+        zustand["images"] += [["security-audit-ffffffff-app", "latest"]]
     with open(os.environ["FAKE_DOCKER_STATE"], "w") as f:
         json.dump(zustand, f)
 if modus == "haengt":
+    print(json.dumps({{"type": "assistant", "parent_tool_use_id": None, "message": {{"content": [
+        {{"type": "tool_use", "id": "h1", "name": "Bash", "input": {{"command": "python3 /skill/scripts/poc.py starten --lauf 0a1b2c3d --rolle p1"}}}}]}}}}), flush=True)
     if os.environ.get("FAKE_CLAUDE_DOCKER_REST"):
         docker_rest()
     kind = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
@@ -1195,6 +1201,44 @@ def test_docker_rest_wird_gemeldet_und_aufgeraeumt(ev, capsys):
     assert "rmi -f security-audit-0a1b2c3d-app:latest" in befehle
 
 
+def test_aufraeumen_entfernt_nur_ressourcen_der_eigenen_laeufe_r1_3(ev, capsys, monkeypatch):
+    """R1-3: Ein parallel gestartetes echtes Audit (anderer Lauf) darf das Eval-Ende nicht abräumen; auch D7 sieht es nicht."""
+    monkeypatch.setenv("FAKE_CLAUDE_FREMD", "1")
+    ev.modus("docker_rest")
+    assert run_eval.main(["--fixture", "fixture-web"]) == 1
+    ergebnis = json.loads(capsys.readouterr().out)
+    d7 = ergebnis["dod"]["TF1-D7"]
+    assert d7["ok"] is False and any("security-audit-0a1b2c3d-p1-app" in x for x in d7["details"])
+    assert not any("ffffffff" in x for x in d7["details"])
+    zustand = json.loads(ev.docker_state.read_text())
+    assert zustand == {"container": ["fremder-container", "security-audit-ffffffff-p1-app"],
+                       "netze": ["security-audit-ffffffff-p1"], "images": [["security-audit-ffffffff-app", "latest"]]}
+    loeschen = [" ".join(c) for c in ev.docker() if c[:1] in (["rm"], ["rmi"]) or c[:2] == ["network", "rm"]]
+    assert loeschen and not any("ffffffff" in b or "fremder" in b for b in loeschen)
+
+
+def test_eigene_filtert_nach_lauf_ids_r1_3():
+    namen = ["security-audit-0a1b2c3d-p1-app", "security-audit-0a1b2c3d", "security-audit-0a1b2c3d9-x",
+             "security-audit-ffffffff-p1", "security-audit-0a1b2c3d-app", "andere"]
+    assert run_eval._eigene(namen, {"0a1b2c3d"}) == ["security-audit-0a1b2c3d-p1-app", "security-audit-0a1b2c3d",
+                                                    "security-audit-0a1b2c3d-app"]
+    assert run_eval._eigene(namen, set()) == []
+    assert len(run_eval._eigene(namen)) == 5                          # ohne Filter: alles mit Präfix (Vorprüfung)
+
+
+def test_aufraeumen_ohne_bekannte_laeufe_loescht_nichts_r1_3(ev):
+    ev.docker_state.write_text(json.dumps({"container": ["security-audit-ffffffff-p1-app"], "netze": [], "images": []}))
+    assert run_eval.docker_aufraeumen(set()) is True
+    assert [c for c in ev.docker() if c[:1] == ["rm"]] == []
+
+
+def test_lauf_ids_aus_befehlen_r1_3(stream):
+    s = list(stream) + [bash("x1", "python3 /s/scripts/poc.py neu"), bash("x2", "python3 poc.py aufraeumen --lauf deadbeef"),
+                        bash("x3", "python3 poc.py anfrage --lauf nichthex --rolle p1"), tool_use("x4", "Grep", {"pattern": "--lauf cafebabe"})]
+    assert auswertung.lauf_ids(s) == {"0a1b2c3d", "deadbeef"}
+    assert auswertung.lauf_ids(s, '{"type":"assistant","message":{"content":[{"type":"tool_use","input":{"command":"python3 poc.py starten --lauf 12345678 --ro') == {"0a1b2c3d", "deadbeef", "12345678"}
+
+
 def test_fixture_unbekannt(ev):
     assert run_eval.main(["--fixture", "gibt-es-nicht"]) == 2
     assert ev.aufrufe() == []
@@ -1617,12 +1661,12 @@ def test_start_fehler_im_lauf_bleibt_der_urspruengliche_fehler_haertung_a7(tmp_p
 def test_docker_aufraeumen_meldet_nicht_lesbare_listen_haertung_b5(ev, capsys):
     """Nicht lesbares Docker ist nicht „nichts übrig“: Rückgabe False und eine Meldung."""
     ev.docker_state.write_text(json.dumps({"kaputt": True, "container": [], "netze": [], "images": []}))
-    assert run_eval.docker_aufraeumen() is False
+    assert run_eval.docker_aufraeumen({"0a1b2c3d"}) is False
     assert "nicht lesbar" in capsys.readouterr().err
 
 
 def test_docker_aufraeumen_sauber_bleibt_true_haertung_b5(ev):
-    assert run_eval.docker_aufraeumen() is True
+    assert run_eval.docker_aufraeumen({"0a1b2c3d"}) is True
 
 
 def test_opus_md_lesen_nennt_die_quelle_haertung_b5(tmp_path, monkeypatch, capsys):
