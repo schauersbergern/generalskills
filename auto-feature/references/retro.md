@@ -2,7 +2,7 @@
 
 Am Ende eines Laufs macht die Hauptsession eine Retro. Sie arbeitet selbst, ohne Subagent. Aus den Befunden des Laufs leitet sie Kandidaten für neue Prüfpunkte ab, legt sie mit Status `offen` ab und nennt sie im Abschlussbericht. Übernommen wird nichts automatisch. Ändern darf eine Session einen Prüfpunkt erst, wenn der User „übernimm K-<n>“ sagt.
 
-- **Kandidatendatei:** `~/Projects/tools/agentic_engineering/werkzeuge/fehlerklassen-kandidaten.md`
+- **Kandidatendatei:** `~/.claude/fehlerklassen/kandidaten.md`, eine Datei für alle Repos (wie die Agent-Statistik unter `~/.claude/`). Mehrere Sessions dürfen gleichzeitig schreiben, das Skript sperrt über den aufgelösten Pfad.
 - **Werkzeug:** `python3 ~/.claude/skills/auto-feature/scripts/fehlerklassen.py` mit `liste`, `zeige`, `neu`, `beleg` und `status`. Die schreibenden Befehle sperren die Datei, damit parallele Review-Threads keine ID doppelt vergeben. `neu` lehnt einen Block mit fehlendem Feld, leerem Wert, Zaunzeile oder fremder Zeile ab und schreibt dann nichts, auch bei mehreren Blöcken. `beleg` überspringt einen Beleg, den der Kandidat schon hat (gleiche Quelle und Befund-ID), meldet ihn auf stderr und schreibt die übrigen, auch aus einem Aufruf mit mehreren Belegen; ohne neuen Beleg endet es mit Exit 1. Jeden Beleg an einen verworfenen Kandidaten lehnt es ab. Nur ein offener Kandidat wechselt den Status.
 
 ## Material
