@@ -770,7 +770,12 @@ def _secrets_mit_sperre(a: argparse.Namespace, repo: str, quelle: str, lk: str, 
         return _secrets(a, repo, quelle, lk, marker, kopie, start, teil, ende)
     finally:
         gitkopie.frist_setzen(None)
-        _aufraeumen(lk)
+        try:
+            _aufraeumen(lk)
+        except PocFehler as e:
+            if not os.path.lexists(marker):       # ohne Marker bleibt es Exit 1 (Rest könnte in eine neue Kopie hineinragen)
+                raise
+            print(f"lieferkette.py: Aufräumen unvollständig, Marker gültig: {_t(e, 200)}", file=sys.stderr)
 
 
 def _secrets(a: argparse.Namespace, repo: str, quelle: str, lk: str, marker: str, kopie: str, start: float, teil: float,
@@ -814,7 +819,10 @@ def _secrets(a: argparse.Namespace, repo: str, quelle: str, lk: str, marker: str
         hinweise.append(f"{lang} Secret-Fundstellen der Historie mit überlangem Dateipfad (über {PFAD_MAX} Zeichen) nicht "
                         f"ausgegeben: Historie von Hand prüfen")
     befunde = [b for b in befunde if _pfad_problem(b["datei"]) is None]
-    _aufraeumen(lk)                               # vor der Ausgabe: scheitert das Löschen, endet der Befehl mit Exit 1
+    try:
+        _aufraeumen(lk)                           # vor der Ausgabe; der Marker ist gesetzt, die Kopie geschwärzt
+    except PocFehler as e:                        # kein Abbruch: SKILL.md liest jedes Exit ≠ 0 als „nicht geschwärzt“
+        hinweise.append(f"Aufräumen der Arbeitsdateien unvollständig ({_t(e, 200)}): {_t(lk)} von Hand löschen")
     _ausgabe({"befunde_roh": [{"regel": b["regel"], "datei": b["datei"], "zeile": b["zeile"],
                                "commits": b["commits"], "in_head": b["in_head"]} for b in befunde],
               "hinweise": hinweise, "geschwaerzt": anzahl})

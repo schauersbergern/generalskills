@@ -1751,3 +1751,34 @@ def test_secrets_ohne_unbrauchbare_pfade_kein_pfad_hinweis_r1_6(umg):
     out = ausgabe(secrets(umg, v))
     assert [b["datei"] for b in out["befunde_roh"]] == ["src/mit leerzeichen.js"]
     assert not [h for h in out["hinweise"] if "Dateipfad" in h]
+
+
+def test_aufraeumfehler_nach_gesetztem_marker_ist_ein_hinweis_kein_abbruch_r1_9(umg, monkeypatch, capsys):
+    """Kopie ist geschwärzt, Marker gültig: scheitert danach das Löschen der Arbeitsdateien, endet `secrets` mit Exit 0 und JSON
+    (SKILL.md 1b liest jedes Exit ≠ 0 als „Arbeitskopie nicht geschwärzt“)."""
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    echt = lieferkette._aufraeumen
+
+    def kaputt(lk):
+        if os.path.exists(umg.marker()):
+            raise lieferkette.PocFehler(f"{lk}/spiegel.git nicht vollständig entfernt (Rechte)", code=1)
+        echt(lk)
+    monkeypatch.setattr(lieferkette, "_aufraeumen", kaputt)
+    rc, aus = inproc_secrets(umg, v, monkeypatch, capsys)
+    assert rc == 0, aus.out + aus.err
+    out = json.loads(aus.out)
+    assert any(h.startswith("Aufräumen der Arbeitsdateien unvollständig") for h in out["hinweise"])
+    assert os.path.isfile(umg.marker())
+    assert "Aufräumen" in aus.err                                                # Warnung auch auf stderr (zweiter Versuch im finally)
+
+
+def test_aufraeumfehler_ohne_marker_bleibt_exit_1_r1_9(umg, monkeypatch, capsys):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+
+    def kaputt(lk):
+        raise lieferkette.PocFehler(f"{lk}/spiegel.git nicht vollständig entfernt (Rechte)", code=1)
+    monkeypatch.setattr(lieferkette, "_aufraeumen", kaputt)
+    rc, aus = inproc_secrets(umg, v, monkeypatch, capsys)
+    assert rc == 1 and not os.path.lexists(umg.marker())
