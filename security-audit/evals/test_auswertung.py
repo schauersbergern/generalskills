@@ -2988,3 +2988,14 @@ def test_auswertung_tf3_regression_tf2_erwartungen_unveraendert(bericht, erw_dep
     """TF2: fixture-deps und fixture-web-ohne behalten ihre Schlüsselmengen (kein TF3-Schlüssel)."""
     for erw in (erw_deps, erw_ohne):
         assert not any(k.startswith("TF3-") for k in alles(ohne_bericht(copy.deepcopy(bericht)), erw, stream)["dod"])
+
+
+def test_ungekoppelter_werkzeugbefund_zaehlt_nie_als_luecke_r1_10d(bericht, erwartung):
+    """Ein Werkzeugbefund (hier osv-scanner ohne `pakete`, also ungekoppelt) auf der Lücken-Datei mit passender Kategorie ist
+    keine Lücke: Lücken erkennt nur der Prüf-Ablauf, nie ein Werkzeug."""
+    s1 = next(b for b in bericht["befunde"] if b["id"] == "S-1")
+    assert not auswertung._gekoppelt(dict(s1, werkzeug="osv-scanner"))                 # Voraussetzung: wirklich ungekoppelt
+    extra = dict(copy.deepcopy(s1), id="S-99", werkzeug="osv-scanner")
+    bericht["befunde"].append(extra)
+    z = auswertung.befunde_zuordnen(bericht, erwartung)
+    assert [b["id"] for b in z["L1"]] == ["S-1"]
