@@ -3331,3 +3331,31 @@ def test_run_eval_projekt_ungueltig(ev, capsys, name):
 @pytest.mark.parametrize("name", ["a", "Testportal", "Mein Projekt 2.0", "a-b_c.d", "A" + "b" * 59, "9x"])
 def test_run_eval_projekt_gueltig(name):
     assert run_eval._projekt_arg(name) == name
+
+
+# ------------------------------------------------------------------------------------ Review R1-10: Mutanten in pruefe_kundenbericht
+
+def test_auswertung_tf4_d6_md_abgeschnitten_fehlt_oder_none_ist_rot_r1_10(bericht, erwartung, stream):
+    """`md_abgeschnitten` ist nur dann in Ordnung, wenn es `False` ist; fehlt es oder ist es `None`, ist die Vollständigkeit unbekannt."""
+    kunde = _kunde()
+    del kunde["md_abgeschnitten"]
+    for k in (kunde, _kunde(md_abgeschnitten=None)):
+        d = alles(bericht, erwartung, stream, kunde=k)["dod"]["TF4-D6"]
+        assert d["ok"] is False and any("nicht vollständig geprüft" in x for x in d["details"]), k
+
+
+def test_auswertung_tf4_d6_md_kein_text_ist_ungueltig_r1_10(bericht, erwartung, stream):
+    for md in (b"# Manibase", 123, ["# Manibase"]):
+        d = alles(bericht, erwartung, stream, kunde=_kunde(md=md))["dod"]["TF4-D6"]
+        assert d["ok"] is False and "Kundenbericht (Markdown) ungültig" in d["details"], md
+
+
+def test_auswertung_tf4_d6_kopf_nfc_und_zeilenende_r1_10(bericht, erwartung, stream):
+    """Der Kopf zählt nach NFC (zerlegtes „ü“) und mit CRLF am Zeilenende; `projekt` ebenso."""
+    zerlegt = "# Manibase · Sicherheitsprüfung Projekt\n\n**Datum:** 2026-11-10\n"
+    assert alles(bericht, erwartung, stream, kunde=_kunde(md=zerlegt))["dod"]["TF4-D6"]["ok"] is True
+    crlf = "# Manibase · Sicherheitsprüfung Testportal\r\n\r\n**Datum:** 2026-11-10\r\n"
+    assert alles(bericht, erwartung, stream, kunde=_kunde(md=crlf, projekt="Testportal"))["dod"]["TF4-D6"]["ok"] is True
+    mueller = "# Manibase · Sicherheitsprüfung Müller\n"
+    for md, projekt in ((mueller, "Müller"), (mueller.replace("ü", "ü"), "Müller")):
+        assert alles(bericht, erwartung, stream, kunde=_kunde(md=md, projekt=projekt))["dod"]["TF4-D6"]["ok"] is True, (md, projekt)

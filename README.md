@@ -335,7 +335,7 @@ SECURITY_AUDIT_DOCKER=1 python3 -m pytest security-audit/scripts/test_poc_docker
 # Modell-Mock gegen die echten SDKs (braucht npm, Netz zur npm-Registry und Node ≥ 22)
 SECURITY_AUDIT_SDK_VERTRAG=1 SECURITY_AUDIT_SDK_NODE=<node ≥ 22> python3 -m pytest security-audit/scripts/test_llm_mock.py -k vertrag -q
 # Abnahme-Eval: startet `claude -p` mit Opus und bis zu 8 Subagenten,
-# grob 0,5–1 Mio. Tokens je Lauf; braucht Docker
+# grob 0,5–1 Mio. Tokens je Lauf; braucht Docker sowie pandoc und weasyprint (ohne sie ist TF4-D6 rot: das PDF fehlt)
 SECURITY_AUDIT_EVAL=1 python3 -m pytest security-audit/evals -q
 # Kundenbericht mit den echten Werkzeugen pandoc und weasyprint (ohne Docker, ohne Netz; die Standard-Suite stubbt sie)
 SECURITY_AUDIT_PDF=1 python3 -m pytest security-audit/scripts/test_kundenbericht.py -q
