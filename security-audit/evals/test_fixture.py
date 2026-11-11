@@ -931,3 +931,11 @@ def test_ki_l4_systemprompt_enthaelt_den_schluessel_maskiert(app_ki):
     maskiert = app_ki.mock.protokoll(marker, [("CRM_API_KEY", KI_DUMMY["CRM_API_KEY"])])
     assert "<ENV:CRM_API_KEY>" in maskiert and KI_DUMMY["CRM_API_KEY"] not in maskiert
     assert json.loads(maskiert)["eintraege"]
+
+
+def test_ki_fixture_auth_ohne_prototyp_umgehung():
+    """6a/6b-Review M2: Tokens wie `constructor` oder `__proto__` dürfen die Anmeldung der Test-App nicht bestehen
+    (sonst eine unbeabsichtigte Auth-Lücke neben L1–L4)."""
+    with open(os.path.join(FIXTURE_KI, "src", "auth.js"), encoding="utf-8") as f:
+        quelle = f.read()
+    assert "Object.hasOwn(" in quelle

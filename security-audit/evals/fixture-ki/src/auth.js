@@ -4,7 +4,8 @@ const MITARBEITER = {
 };
 
 function mitarbeiter(req, res, next) {
-  const eintrag = MITARBEITER[req.get("x-token")];
+  const token = req.get("x-token");
+  const eintrag = typeof token === "string" && Object.hasOwn(MITARBEITER, token) ? MITARBEITER[token] : undefined;
   if (!eintrag) return res.status(401).json({ fehler: "nicht angemeldet" });
   req.mitarbeiter = eintrag;
   next();

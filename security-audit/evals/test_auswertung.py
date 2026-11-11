@@ -2876,6 +2876,14 @@ def test_auswertung_tf3_d4_ok(ki_bericht, erw_ki, bericht, erwartung, stream):
     assert auswertung.pruefe_ki_hinweis(ki_bericht, erw_ki) == []                       # Teilstring, NFC
 
 
+def test_auswertung_tf3_d4_angewendet_ohne_klammer_rot(ki_bericht, erw_ki, stream):
+    """6a/6b-Review M1 (A14): „angewendet“ nur mit der Paketliste in Klammern, wie ki.py sie schreibt."""
+    ki_bericht["hinweise"] = ["KI-Prüfpunkte: angewendet"]
+    assert alles(ki_bericht, erw_ki, stream)["dod"]["TF3-D4"]["ok"] is False
+    ki_bericht["hinweise"] = ["KI-Prüfpunkte: angewendet (openai)"]
+    assert alles(ki_bericht, erw_ki, stream)["dod"]["TF3-D4"]["ok"] is True
+
+
 def test_auswertung_tf3_d4_fehlender_hinweis_rot(bericht, erwartung, ki_bericht, erw_ki, stream):
     bericht["hinweise"] = []
     e = alles(bericht, erwartung, stream)
