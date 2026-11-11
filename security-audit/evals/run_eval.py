@@ -7,8 +7,8 @@ Erwartung TF2-D1 bis TF2-D4, TF3-D1 bis TF3-D4 und TF4-D6).
         [--timeout 5400] [--behalten] [--prompt-art slash|text] [--projekt NAME]
 
 `--projekt` hängt `projekt="<NAME>"` an den Prompt (`[A-Za-z0-9][A-Za-z0-9 ._-]{0,59}`); der Skill setzt es als Projektname
-des Kundenberichts. Nach dem Lauf liest `run_eval.py` `<Bericht>-kunde.md` und die ersten 8 Bytes von `<Bericht>-kunde.pdf`
-für TF4-D6 (Erwartung mit `kundenbericht: true`).
+des Kundenberichts. Nach dem Lauf liest `run_eval.py` `<Bericht>-kunde.md` und von `<Bericht>-kunde.pdf` die ersten 8 Bytes, die Größe und die
+letzten 1024 Bytes für TF4-D6 (Erwartung mit `kundenbericht: true`).
 `--erwartung` wählt die Erwartung (Standard `expected/<fixture>.json`); ihr Feld `fixture` muss zur Test-App passen.
 Mit `secret: true` in der Erwartung committet der Lauf vor dem Start ein Fake-Secret (`config/keys.js`) und löscht es
 im nächsten Commit; der Wert existiert nur im Speicher, die Auswertung bekommt nur `sha256`, Commit und Länge.

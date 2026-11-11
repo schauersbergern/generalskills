@@ -726,8 +726,8 @@ def auswerten(bericht: dict | None, erwartung: dict, stream: list[dict], porcela
     bestimmt die Erwartung (`_dod_schluessel`): TF1-D3 bis D7 immer; TF1-D1 und D2 je nach Einträgen; `TF2-Dn` für jedes
     `dod` der `werkzeug`-Einträge, TF2-D2 zusätzlich bei `secret`, TF2-D4 zusätzlich bei `werkzeug_hinweise` oder
     `alle_unbestaetigt`. `ok` heißt: alle vorhandenen Schlüssel ok. `secret_info` (`sha256`, `commit`, `laenge`) und
-    `geheim_quellen` (Name → Text) stammen aus `run_eval.py`; der Wert selbst kommt nie hierher. `kunde` (`md`, `pdf_anfang`,
-    `projekt`) ebenso; bei `kundenbericht: true` in der Erwartung gilt TF4-D6 (`pruefe_kundenbericht`), und `kunde=None` ist dann
+    `geheim_quellen` (Name → Text) stammen aus `run_eval.py`; der Wert selbst kommt nie hierher. `kunde` (`md`, `md_abgeschnitten`,
+    `pdf_anfang`, `pdf_groesse`, `pdf_ende`, `projekt`) ebenso; bei `kundenbericht: true` in der Erwartung gilt TF4-D6 (`pruefe_kundenbericht`), und `kunde=None` ist dann
     rot („keine Kundendaten“), ein fehlender Bericht ebenso („kein Bericht“).
     Fehlt der Bericht (`None`), sind D1 bis D3, D5 und alle TF2-Schlüssel nicht ok mit dem Detail „kein Bericht“ (D5
     meldet zusätzlich Verstöße aus dem Stream; die Wert-Suche in TF2-D2 läuft trotzdem). D3 prüft zuerst das
