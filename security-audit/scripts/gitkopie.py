@@ -116,7 +116,10 @@ def _gruppe_beenden(proc: subprocess.Popen) -> tuple[bytes, bytes]:
         except subprocess.TimeoutExpired:
             continue
     proc.kill()                                       # letzte Rückfallebene: nur das eigene direkte Kind
-    return proc.communicate()
+    try:
+        return proc.communicate(timeout=10)
+    except subprocess.TimeoutExpired:                 # Kind hängt im Kernel oder ein Enkel hält Ströme: nicht ewig blockieren
+        return b"", b""
 
 
 def _anfang_lesen(datei, grenze: int) -> tuple[bytes, bool]:

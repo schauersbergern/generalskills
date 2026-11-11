@@ -1122,3 +1122,25 @@ def test_arbeitskopie_bricht_bei_erschoepfter_frist_ab_haertung_i3(tmp_path, mon
     meldungen = gitkopie.arbeitskopie(str(repo), str(ziel))
     assert any("Arbeitskopie unvollständig" in m and "Zeitbudget" in m for m in meldungen), meldungen
     assert not (ziel / "a.txt").exists() and not (ziel / "b.txt").exists()
+
+
+def test_gruppe_beenden_blockiert_nie_ohne_ende(monkeypatch):
+    """Entscheidung 2026-11-11 (PR #12): auch das letzte Einsammeln nach `proc.kill()` hat ein Zeitlimit. Attrappe statt
+    echtem Prozess; `os.killpg` ist ersetzt, es geht kein Signal an irgendeinen Prozess."""
+    import subprocess as sp
+    signale, getoetet, wartezeiten = [], [], []
+
+    class Attrappe:
+        pid = 999_999_999                              # nie benutzt: killpg ist ersetzt
+
+        def communicate(self, timeout=None):
+            wartezeiten.append(timeout)
+            raise sp.TimeoutExpired("attrappe", timeout)
+
+        def kill(self):
+            getoetet.append(True)
+
+    monkeypatch.setattr(gitkopie.os, "killpg", lambda pid, sig: signale.append((pid, sig)))
+    assert gitkopie._gruppe_beenden(Attrappe()) == (b"", b"")
+    assert [pid for pid, _ in signale] == [999_999_999, 999_999_999] and getoetet == [True]
+    assert None not in wartezeiten and len(wartezeiten) == 3
