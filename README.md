@@ -17,7 +17,8 @@ Der aktuelle Stand des Repos umfasst neun produktiv nutzbare Skills plus drei Ag
 | `fix-findings` | Fixer-Thread (Effort high, von `pr-review-loop` mit Sonnet gestartet): prueft eingefuegte Review-Befunde, setzt angenommene per Test → Fix → Commit um, vor dem Push nur Typecheck und abhaengige Tests (ganze Suite in der CI, ohne CI einmal vor dem Push), pusht, liefert Entscheidungstabelle; Merge/Deploy nur auf Befehlswort | `fix-findings/SKILL.md` |
 | `auto-feature` | Autonomer Feature-Workflow aus einem Feature-File ohne Zwischenhalt: Spec (Opus 5.5) → Opus-Review max. 2 → Plan (Opus 5.5) → Opus-Review max. 2 → Sonnet-5.5-Umsetzung → Haertung → PRs → harter Stopp (HITL); Effort xhigh, nur Re-Reviews, lesende Refactor-/UI-Reviews und mechanische Tasks mit `sonnet-high`; ganze Suite einmal je TF; Agent-Statistik Pflicht (Format gilt fuer alle Skills, Skript `scripts/agent-stats.py` fuer Eintrag, Auswertung (auch je Skill-Stand), Thread-Tokens aus Transkripten und den Stempel `Skills: generalskills@<sha>` im Kopf jeder Statistik); kein PR-Review-Loop, kein Merge; Format des Feature-Files mit DoD-IDs und Nachweis-Art in `references/feature-file.md`; Retro am Laufende (auch in `pr-review-loop` und `fix-findings`) legt Fehlerklassen-Kandidaten zur Freigabe ab, Rezept `references/retro.md`, Ablage per `scripts/fehlerklassen.py` | `auto-feature/SKILL.md`, `auto-feature/references/feature-file.md`, `auto-feature/references/retro.md`, `auto-feature/scripts/agent-stats.py`, `auto-feature/scripts/fehlerklassen.py` |
 | `feature-file` | Macht aus Kundenwunsch, Call-Notiz oder Idee ein Feature-File fuer `auto-feature`: Ist-Stand im Code zuerst, Interview nur fuer Entscheidungen von User oder Kunde, Recherche nur als Default mit Quelle, Builder-Check durch einen frischen `opus-xhigh`, Freigabe-Zeile erst nach OK | `feature-file/SKILL.md` |
-| `agents/opus-xhigh`, `agents/sonnet-xhigh`, `agents/sonnet-high` | Subagent-Definitionen mit `effort: xhigh` fuer Reviews bzw. Umsetzung, genutzt von `pr-review-loop`, `auto-feature` und `feature-file` (Builder-Check); `sonnet-high` (`effort: high`) fuer die Delta-Reviews in `pr-review-loop` und die Abschlaege nach der Effort-Regel in `auto-feature` | `agents/*.md` |
+| `architektur-rat` | **Forschung und Entwicklung, in keinen Workflow eingebunden, nur auf ausdruecklichen Wunsch.** Zwei unabhaengige `sonnet-high`-Voten (Pragmatiker, Risiko) zu einer offenen, schwer umkehrbaren Code-/Betriebsentscheidung; Hauptsession entscheidet und dokumentiert beide Voten. Test 2026-11-09: keine bessere Entscheidung als ohne Rat, ~360k Sonnet-Input-Aequivalent je Runde; nicht nach `~/.claude/skills/` verlinkt, fuer einen Versuch `ln -sfn ~/Projects/skillz/nikskills/architektur-rat ~/.claude/skills/architektur-rat` | `architektur-rat/SKILL.md` |
+| `agents/opus-xhigh`, `agents/sonnet-xhigh`, `agents/sonnet-high` | Subagent-Definitionen mit `effort: xhigh` fuer Reviews bzw. Umsetzung, genutzt von `pr-review-loop`, `auto-feature` und `feature-file` (Builder-Check); `sonnet-high` (`effort: high`) fuer die Delta-Reviews in `pr-review-loop`, die Abschlaege nach der Effort-Regel in `auto-feature` und die Voten im F&E-Skill `architektur-rat` | `agents/*.md` |
 
 ## Repository-Struktur
 
@@ -68,6 +69,8 @@ nikskills/
       fehlerklassen.py
       test_fehlerklassen.py
   feature-file/
+    SKILL.md
+  architektur-rat/
     SKILL.md
   agents/
     opus-xhigh.md
