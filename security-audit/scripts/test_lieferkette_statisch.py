@@ -1191,3 +1191,27 @@ def test_minor_oserror_aus_dem_verzeichnislauf_wird_hinweis(umg, monkeypatch, ca
     monkeypatch.setattr(os, "walk", kaputt)
     out = _inproc(umg, monkeypatch, capsys)
     assert any("Verzeichnissuche abgebrochen (OSError)" in h for h in out["hinweise"]) and out["entwuerfe"] == []
+
+
+# ------------------------------------------------------------------------------------ Review R1-2: Titel ohne Pfad
+
+def test_titel_der_entwuerfe_tragen_keinen_pfad_und_bestehen_die_kundenpruefung_r1_2(umg):
+    """R1-2: Liegt die Datei in einem Unterordner, darf der Titel sie nicht nennen (Regel e der Kundenprüfung); der Pfad steht unter
+    „Betroffene Datei“. Alle drei Titelstellen: lockfile-fehlt, installation-ohne-lockfile-treue, install-skripte-offen."""
+    umg.schreibe("apps/web/package.json", PKG)
+    umg.schreibe(".github/workflows/ci.yml", WORKFLOW.format(befehl="npm install"))
+    umg.schreibe("services/api/package-lock.json", npm_lock_mit_skripten(["fsevents"]))
+    entwuerfe = umg.entwuerfe()
+    assert {e["klasse"] for e in entwuerfe} >= {"lockfile-fehlt", "installation-ohne-lockfile-treue", "install-skripte-offen"}
+    for e in entwuerfe:
+        assert "/" in e["datei"] and e["datei"] not in e["titel"], e["titel"]
+        gefunden = [t for t in bericht.kunden_verstoesse({"befunde": [{**e, "id": "S-1"}]}) if t[1] == "titel"]
+        assert gefunden == [], (e["klasse"], e["titel"], gefunden)
+
+
+@pytest.mark.parametrize("titel", ["Verwundbare Abhängigkeit @babel/core@7.21.0", "Verwundbare Abhängigkeit lodash@4.17.21",
+                                   "Secret in der Git-Historie (generic-api-key)"])
+def test_feste_werkzeugtitel_aus_schritt_5b_bestehen_die_kundenpruefung_r1_2(titel):
+    """R1-2 (Klasse): die festen Titel der Werkzeugbefunde (osv: `name@version`, gitleaks: Regelname) tragen keinen Pfad."""
+    daten = {"befunde": [{"id": "S-1", "status": "bestätigt", "titel": titel, "datei": "package-lock.json", "poc": "x"}]}
+    assert [t for t in bericht.kunden_verstoesse(daten) if t[1] == "titel"] == []

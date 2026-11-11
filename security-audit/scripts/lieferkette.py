@@ -2036,7 +2036,7 @@ def _statisch(quelle: str, ende: float, s: _Sammler) -> None:
         gesehen.add((rel, aufruf.zeile))
         befehl = aufruf.label
         s.entwurf(_entwurf(
-            "installation-ohne-lockfile-treue", "P2", rel, aufruf.zeile, f"Installation ohne Lockfile-Treue in {rel}",
+            "installation-ohne-lockfile-treue", "P2", rel, aufruf.zeile, "Installation ohne Lockfile-Treue",
             f"In {rel}:{aufruf.zeile} installiert {befehl} die Abhängigkeiten, ohne an das Lockfile gebunden zu sein.",
             "Builds und Deployments ziehen beim Installieren neue, ungeprüfte Versionen; ein kompromittiertes oder "
             "manipuliertes Paket gelangt so unbemerkt in Build und Betrieb, und Builds sind nicht reproduzierbar.",
@@ -2070,7 +2070,7 @@ def _statisch(quelle: str, ende: float, s: _Sammler) -> None:
         daten = pkg_daten.get(ordner)
         if not any(o in lock_ordner for o in _eltern(ordner)) and _hat_abhaengigkeiten(daten):
             s.entwurf(_entwurf(
-                "lockfile-fehlt", "P2", rel, 1, f"Lockfile fehlt für {rel}",
+                "lockfile-fehlt", "P2", rel, 1, "Lockfile fehlt",
                 f"Zu {rel} gibt es weder im selben Ordner noch in einem Elternordner ein Lockfile "
                 "(`package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lock`, `bun.lockb`).",
                 "Ohne Lockfile löst jede Installation die Abhängigkeiten neu auf; eine kompromittierte oder manipulierte "
@@ -2159,7 +2159,7 @@ def _statisch(quelle: str, ende: float, s: _Sammler) -> None:
                           "`packageManager: pnpm@10` oder neuer" if pm == "pnpm" else
                           "`ignore-scripts=true` in `.npmrc`, `--ignore-scripts` in allen npm-Installationen")
             s.entwurf(_entwurf(
-                "install-skripte-offen", "P3", rel, zeile, f"Install-Skripte in {rel} nicht abgeschaltet",
+                "install-skripte-offen", "P3", rel, zeile, "Install-Skripte nicht abgeschaltet",
                 f"Das Lockfile {rel} enthält {len(betroffen)} Paket(e) mit Install-Skripten ({_paketnamen_text(namen)}), und keine "
                 f"Schutzmaßnahme für {pm} greift ({massnahmen}).",
                 "Beim Installieren laufen die Install-Skripte der Pakete (preinstall, install, postinstall) mit den Rechten des "

@@ -285,7 +285,7 @@ Neutrale Pfade, keine echte Anwendung.
     {
       "id": "S-7", "stufe": "P2", "status": "unbestätigt",
       "datei": "Dockerfile", "zeile": 6, "kategorie": "A03",
-      "titel": "Installation ohne Lockfile-Treue in Dockerfile",
+      "titel": "Installation ohne Lockfile-Treue",
       "beschreibung": "Werkzeugbefund, kein Request-Beleg möglich. In Dockerfile:6 installiert npm install die Abhängigkeiten, ohne an das Lockfile gebunden zu sein.",
       "szenario": "Builds ziehen beim Installieren neue, ungeprüfte Versionen; ein manipuliertes Paket gelangt unbemerkt in den Build",
       "erwartet": "`npm ci` statt `npm install` verwenden (installiert exakt die Versionen aus dem Lockfile)",
