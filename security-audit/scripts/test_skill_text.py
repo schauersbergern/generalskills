@@ -29,12 +29,13 @@ FIX_FINDINGS_MD = os.path.join(os.path.dirname(os.path.realpath(SKILL_DIR)), "fi
 sys.path.insert(0, HIER)
 import bericht  # noqa: E402
 import ki  # noqa: E402
+import kundenbericht  # noqa: E402
 import lieferkette  # noqa: E402
 import poc  # noqa: E402
 
 PRAEFIX_SKILL = ("python3 -I ${CLAUDE_SKILL_DIR}/scripts/", "python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py")
 PRAEFIX_REFERENZ = ("python3 -I <SKILL_DIR>/scripts/",)
-SKRIPTE = ("poc", "bericht", "lieferkette", "ki")
+SKRIPTE = ("poc", "bericht", "lieferkette", "ki", "kundenbericht")
 
 
 def _lies(pfad: str) -> str:
@@ -109,11 +110,11 @@ def _unterbefehle(skript: str) -> set[str]:
 
 def _aufrufe(text: str) -> list[tuple[str, str, str]]:
     """(skript, unterbefehl, ganze Zeile) für jede Aufrufzeile (`python3 …` in Blöcken) und jeden Inline-Span, in dem
-    `poc.py <wort>`, `bericht.py <wort>`, `lieferkette.py <wort>` oder `ki.py <wort>` steht. Fließtext in Codeblöcken (Briefing-Vorlagen) zählt nicht."""
+    `poc.py <wort>`, `bericht.py <wort>`, `lieferkette.py <wort>`, `ki.py <wort>` oder `kundenbericht.py <wort>` steht. Fließtext in Codeblöcken (Briefing-Vorlagen) zählt nicht."""
     zeilen = [z for z in _code_zeilen(text) if z.startswith("python3")] + _code_zeilen(text, bloecke=False)
     gefunden = []
     for zeile in zeilen:
-        for m in re.finditer(r"\b(poc|bericht|lieferkette|ki)\.py\s+([A-Za-zÄÖÜäöüß][\w-]*)", zeile):
+        for m in re.finditer(r"\b(poc|bericht|lieferkette|ki|kundenbericht)\.py\s+([A-Za-zÄÖÜäöüß][\w-]*)", zeile):
             gefunden.append((m.group(1), m.group(2), zeile))
     return gefunden
 
@@ -198,7 +199,7 @@ def test_optionen_existieren(pfad):
 
 
 def test_skill_md_nennt_jeden_poc_unterbefehl():
-    """Der Ablauf braucht alle Unterbefehle von poc.py, bericht.py, lieferkette.py und ki.py."""
+    """Der Ablauf braucht alle Unterbefehle von poc.py, bericht.py, lieferkette.py, ki.py und kundenbericht.py."""
     gesehen = {(s, u) for s, u, _z in _aufrufe(_lies(SKILL_MD))}
     fehlt = [(s, u) for s in SKRIPTE for u in sorted(_unterbefehle(s)) if (s, u) not in gesehen]
     assert not fehlt, fehlt
@@ -1789,3 +1790,190 @@ def test_haertung_annahme_modell_kopplung_im_schema_und_im_text():
     assert "lehnt `rendern` einen Befund ab" in zeile and "`K1 `, `K2 ` oder `K4 `" in zeile and "`annahme_modell: true`" in zeile
     zeile = _zeile(_lies(BERICHT_FORMAT), "| `annahme_modell`")
     assert "ohne `annahme_modell: true` ein Schemafehler" in zeile and "`K1 `, `K2 ` oder `K4 `" in zeile
+
+
+# ------------------------------------------------------------------------------------ TF4 Task 4: Kundenbericht im Skill
+
+KUNDEN_AUFRUF = "python3 -I ${CLAUDE_SKILL_DIR}/scripts/kundenbericht.py erstellen --json <ausgabe_ordner>/<basisname>.json"
+KUNDEN_KATEGORIEN = ("inhalt", "pdf-werkzeug-fehlt", "pdf-fehler", "eingabe", "intern")      # `kategorie:` der Exit-Codes 2, 3, 4, 5, 1
+KUNDEN_REGELN_ALLE = tuple(bericht.KUNDEN_REGELN) + ("fehlt", "schema")                       # Werte von `regel` in der Exit-2-Meldung
+
+
+def _s7() -> str:
+    return _abschnitt(_lies(SKILL_MD), "7. Bericht")
+
+
+def _regel8() -> str:
+    text = _lies(SKILL_MD)
+    return text[text.index("8. **Skript-Aufrufe**"):text.index("9. **Die Netzregel")]
+
+
+def test_skill_schritt_7_ruft_kundenbericht_nach_rendern_auf():
+    """R1-K9: Die Aufrufzeile steht wörtlich in einem Codeblock von Schritt 7, nach `rendern`; Schritt 1 hält `ordner` in der Notiz."""
+    s7 = _s7()
+    zeilen = [z for _info, inhalt in _bloecke(s7) for z in inhalt.split("\n")]
+    assert KUNDEN_AUFRUF in zeilen
+    rendern = next(i for i, z in enumerate(zeilen) if "bericht.py rendern" in z)
+    assert zeilen.index(KUNDEN_AUFRUF) > rendern
+    s1 = _abschnitt(_lies(SKILL_MD), "1. Kontext")
+    assert "`ordner`" in s1 and "`kontext`" in s1
+    notiz = _zeile(s1, "- Die JSON-Ausgabe liefert")
+    assert "`ordner`" in notiz and notiz.index("`ordner`") < notiz.index("Halte"), "ordner gehört zu den Feldern der Notiz"
+    assert "`ordner`" in notiz[notiz.index("Halte"):]
+
+
+def test_skill_schritt_7_felder_fuer_bestaetigt_und_unbestaetigt():
+    s7 = _s7()
+    zeile = _punkt(s7, r"`zusammenfassung` und `massnahme`.*geschrieben|schreibst `zusammenfassung`")
+    assert "`bestätigt`" in zeile and "`unbestätigt`" in zeile and "jeden Befund" in zeile
+    assert "`verworfen`" not in zeile or "nicht" in zeile
+
+
+def test_skill_schritt_7_exit_folgen_und_zwei_runden():
+    """Exit 2: nur `zusammenfassung`, `massnahme` und `titel` korrigieren, dann `rendern` und `erstellen` neu, höchstens 2 Runden, danach
+    „Kundenbericht nicht erstellt (inhalt)“ (R2-K-11); Exit 3 oder 4 ergibt „nur als Markdown“, Exit 5 oder 1 „nicht erstellt“."""
+    s7 = _s7()
+    exit2 = _punkt(s7, r"^- \*\*Exit 2\*\*")
+    assert "`zusammenfassung`, `massnahme` und `titel`" in exit2
+    assert "`rendern`" in exit2 and "`erstellen`" in exit2 and "höchstens 2 Runden" in exit2
+    assert "„Kundenbericht nicht erstellt (inhalt)“" in exit2 and "Schlussmeldung" in exit2
+    assert "nur" in exit2 and "`stufe`" in exit2 and "`status`" in exit2 and "`datei`" in exit2   # alles andere bleibt unverändert
+    exit34 = _punkt(s7, r"^- \*\*Exit 3 oder 4\*\*")
+    assert "„Kundenbericht nur als Markdown (<kategorie>)“" in exit34 and "Schlussmeldung" in exit34
+    exit51 = _punkt(s7, r"^- \*\*Exit 5 oder 1\*\*")
+    assert "„Kundenbericht nicht erstellt (<kategorie>)“" in exit51 and "keine Korrektur" in exit51
+    quelle = _lies(os.path.join(HIER, "kundenbericht.py"))
+    for kategorie in KUNDEN_KATEGORIEN:                                   # jede Kategorie gibt es im Skript, jede steht im Skill-Text
+        assert f'"{kategorie}"' in quelle, kategorie
+        assert f"`{kategorie}`" in s7, kategorie
+    assert "kategorie: <wert>" in quelle or "`kategorie: <wert>`" in quelle
+    assert "`kategorie: <wert>`" in s7 and "`kunde-md:`" in s7 and "`kunde-pdf:`" in s7
+
+
+def test_skill_schritt_7_regel_legende():
+    """R2-W-2: Jeder Wert von `regel` (die von `bericht.KUNDEN_REGELN` plus `fehlt` und `schema`) hat in Schritt 7 eine Legendenzeile."""
+    s7 = _s7()
+    for regel in KUNDEN_REGELN_ALLE:
+        zeile = _punkt(s7, rf"^\s*- `{regel}`: ")
+        assert len(zeile.split(": ", 1)[1].strip()) >= 10, regel
+    assert "Detail ist das Wort" in _punkt(s7, r"^\s*- `du`: ") and "Detail ist das Token" in _punkt(s7, r"^\s*- `a`: ")
+    assert "auch der eigene" in _punkt(s7, r"^\s*- `e`: ")
+    assert "Regel <regel>" in s7 and "<id> <feld>" in s7                    # das Meldungsformat des Skripts
+
+
+def test_skill_schritt_7_titelkorrektur_vor_5b():
+    """R1-W5: Die Titelkorrektur geht der Regel „Entwürfe unverändert übernehmen“ aus 5b vor; 5b verweist darauf."""
+    s7 = _s7()
+    zeile = _punkt(s7, r"Trifft eine Meldung `titel`")
+    assert "formulierst du den Titel ohne Pfad und Zeile um" in zeile
+    assert "`lieferkette`-Entwürfen" in zeile and "festen Werkzeugtiteln aus 5b" in zeile
+    assert "geht der Regel „unverändert übernehmen“ vor" in zeile
+    assert "`stufe`, `status`, `datei` und alle anderen Felder bleiben" in zeile
+    s5b = _abschnitt(_lies(SKILL_MD), "5b.")
+    lieferkette = _punkt(s5b, r"^- \*\*Lieferkette \(`lieferkette`\)")
+    assert "unverändert übernehmen" in lieferkette and "Schritt 7" in lieferkette and "`titel`" in lieferkette
+
+
+def test_skill_schreibregeln_fuer_die_kundenfelder():
+    """K9, R2-W-2: Sie-Form mit festem Satzmuster, Geschäftsfolge, keine Datei- oder Pfadnamen, Zeilenangaben, Requests, Code, Bezeichner,
+    Backticks und `{ } < > =`, keine URL- oder E-Mail-Adressen, nichts aus `advisories[].zusammenfassung`."""
+    s7 = _s7()
+    regeln = _punkt(s7, r"\*\*Schreibregeln")
+    schreib = s7[s7.index(regeln):]
+    for teil in ("Sie-Form", "„Aktualisieren Sie …“", "„Wir empfehlen, …“", "Geschäftsfolge", "Datei- und Pfadnamen", "Zeilenangaben",
+                 "Requests", "Code", "Bezeichner", "Backticks", "`{ } < > =`", "URL-", "E-Mail-Adressen", "`advisories[].zusammenfassung`"):
+        assert teil in schreib, teil
+    assert "Datenabfluss" in schreib and "Du-Form" in schreib
+
+
+def test_skill_schlussmeldung_nennt_kundendateien():
+    """K13: Pfade der Kundendateien, „Vor Weitergabe lesen.“, gegebenenfalls „Projektname fehlte“; der Hinweis nach gescheiterten Runden
+    steht in der Schlussmeldung, nicht in `bericht.hinweise` (K14)."""
+    s = _abschnitt(_lies(SKILL_MD), "Schlussmeldung")
+    assert "`-kunde.md`" in s and "`-kunde.pdf`" in s
+    assert "Vor Weitergabe lesen." in s and "Projektname fehlte" in s
+    assert "Kundenbericht nur als Markdown (<kategorie>)" in s and "Kundenbericht nicht erstellt (<kategorie>)" in s
+    assert "Kundenbericht nicht erstellt (inhalt)" in s
+
+
+def test_skill_budget_kundenbericht_entspricht_dem_skript():
+    """R1-K6: Grundregel 8 nennt `kundenbericht.py erstellen` mit dem Wert von `kundenbericht.KUNDE_BUDGET` (außerhalb der Zeile mit dem
+    langen Timeout), die Umgebungsvariable des Skripts, die Mindestversionen der Werkzeuge (R2-K-13) und die Bash-Liste."""
+    regel8 = _regel8()
+    ohne_langen = "\n".join(z for z in regel8.splitlines() if BASH_TIMEOUT not in z)
+    assert kundenbericht.KUNDE_BUDGET == 90
+    assert re.search(rf"`kundenbericht\.py erstellen`[^`]*?{kundenbericht.KUNDE_BUDGET} s", ohne_langen)
+    assert "SECURITY_AUDIT_KUNDE_BUDGET" in ohne_langen and "SECURITY_AUDIT_KUNDE_BUDGET" in _lies(os.path.join(HIER, "kundenbericht.py"))
+    assert kundenbericht.PANDOC_MAX == 20 and kundenbericht.WEASYPRINT_MAX == 60
+    assert "höchstens 20 s" in ohne_langen and "höchstens 60 s" in ohne_langen                   # Anteile von pandoc und weasyprint
+    assert BASH_TIMEOUT not in "\n".join(z for z in regel8.splitlines() if "kundenbericht.py" in z)
+    assert "`kundenbericht.py`" in _zeile(regel8.replace("\n   - ", "\n- "), "- Bash sonst nur für")
+    assert "pandoc ≥ 2.15 (für `--sandbox`)" in ohne_langen
+    assert "weasyprint mit Option `--allowed-protocols` (geprüft mit 68.1)" in ohne_langen
+    einzeln = _zeile(regel8.replace("\n   - ", "\n- "), "- `poc.py`, `lieferkette.py` und `ki.py` immer als **einzelner einfacher Befehl**")
+    assert "kein `&&`" in einzeln                                                          # K-9: diese Zeile bleibt, wie sie ist
+
+
+def test_bericht_format_nennt_die_kundenfelder_und_den_abschnitt_kundenbericht():
+    """Felder `zusammenfassung`, `massnahme`, `ordner` (außerhalb der Tabelle der Pflichtfelder); Abschnitt „Kundenbericht“ mit Stufentabelle,
+    Nachweistexten und Exit-Codes, passend zu `kundenbericht.py`."""
+    text = _lies(BERICHT_FORMAT)
+    for feld in ("`zusammenfassung`", "`massnahme`", "`ordner`"):
+        assert feld in text, feld
+    assert "40 bis 600" in text and "20 bis 400" in text
+    pflicht = text[text.index("## Oberste Ebene"):text.index("## Befund")]
+    ordner_zeilen = [z for z in text.splitlines() if z.startswith("| `ordner`")]
+    assert not ordner_zeilen, "ordner steht außerhalb der Tabelle „Oberste Ebene (alles Pflicht)“"
+    assert "`ordner`" in text[text.index("## Befund"):] or "`ordner`" in pflicht
+    k = _abschnitt(text, "Kundenbericht")
+    for stufe in kundenbericht.KUNDENSTUFEN:
+        assert stufe in k, stufe
+    assert "`ohne_anmeldung`" in k and "`mandantenuebergreifend`" in k
+    for nachweis in (kundenbericht._NACHWEIS_NACHGESTELLT, kundenbericht._NACHWEIS_ANNAHME, kundenbericht._NACHWEIS_ABGELEITET,
+                     *kundenbericht._NACHWEIS_WERKZEUG.values()):
+        assert nachweis in k, nachweis
+    assert kundenbericht.GITLEAKS_TITEL in k
+    for kategorie in KUNDEN_KATEGORIEN:
+        assert f"`{kategorie}`" in k, kategorie
+    for code in ("| 0 |", "| 1 |", "| 2 |", "| 3 |", "| 4 |", "| 5 |"):
+        assert code in k, code
+    assert "-kunde.md" in k and "-kunde.pdf" in k
+
+
+def test_beispiel_json_traegt_die_kundenfelder_in_sie_form():
+    """R2-K-18: Jeder Befund mit Status `bestätigt` oder `unbestätigt` trägt beide Felder; das Beispiel besteht `pruefe_schema` und
+    `kunden_verstoesse`, hat `ordner`, und die ganze Kette `kundenbericht.py erstellen` läuft bis zur PDF-Stufe (ohne Werkzeuge: Exit 3)."""
+    daten = _beispiel_json()
+    assert bericht.pruefe_schema(daten) == []
+    assert bericht.kunden_verstoesse(daten) == []
+    assert daten.get("ordner") == "beispiel-shop"
+    gelistet = [b for b in daten["befunde"] if b["status"] in ("bestätigt", "unbestätigt")]
+    assert len(gelistet) >= 5
+    for b in gelistet:
+        assert 40 <= len(b["zusammenfassung"]) <= 600 and 20 <= len(b["massnahme"]) <= 400, b["id"]
+        assert re.match(r"(Aktualisieren Sie|Lassen Sie|Wir empfehlen,|Prüfen Sie|Ergänzen Sie)", b["massnahme"]), b["id"]
+    assert {b["status"] for b in gelistet} == {"bestätigt", "unbestätigt"}
+    assert all("zusammenfassung" not in b and "massnahme" not in b for b in daten["befunde"] if b["status"] not in ("bestätigt", "unbestätigt"))
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        pfad = os.path.join(tmp, "beispiel.json")
+        with open(pfad, "w", encoding="utf-8") as f:
+            json.dump(daten, f, ensure_ascii=False)
+        r = subprocess.run([sys.executable, "-I", os.path.join(HIER, "kundenbericht.py"), "erstellen", "--json", pfad],
+                           capture_output=True, text=True, timeout=60,
+                           env={**os.environ, "SECURITY_AUDIT_OHNE": "pandoc,weasyprint"})
+        assert r.returncode == 3 and r.stdout.startswith("kategorie: pdf-werkzeug-fehlt"), (r.returncode, r.stdout, r.stderr)
+        assert os.path.isfile(os.path.join(tmp, "beispiel-kunde.md"))
+
+
+def test_readme_nennt_kundenbericht_dateien_versionen_und_tests():
+    """TF4-D8, R1-K10: Die Zeile `security-audit` nennt den Kundenbericht (Markdown und PDF) und `projekt=`; die Dateiliste kennt
+    `kundenbericht.py` und `kundenbericht.html5`; Mindestversionen und der opt-in Test (`SECURITY_AUDIT_PDF=1`) stehen im Text."""
+    text = _lies(README)
+    zeile = next(z for z in text.splitlines() if z.startswith("| `security-audit` |"))
+    assert "Kundenbericht" in zeile and "Markdown" in zeile and "PDF" in zeile and "`projekt=`" in zeile
+    assert "`security-audit/scripts/kundenbericht.py`" in zeile and "`security-audit/scripts/kundenbericht.html5`" in zeile
+    baum = text[text.index("  security-audit/\n"):text.index("## Skill-Details")]
+    assert "      kundenbericht.py\n" in baum and "      kundenbericht.html5\n" in baum
+    assert "pandoc ≥ 2.15" in text and "--allowed-protocols" in text and "68.1" in text
+    assert "SECURITY_AUDIT_PDF=1" in text

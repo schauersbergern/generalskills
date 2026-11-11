@@ -71,7 +71,8 @@ def erlaubte_regeln(skill_ordner: str, ausgabe: str, home: str, tmp: str | None 
     - Write/Edit nur im Ausgabeordner (`//` = absoluter Pfad ab Wurzel).
     - Bash: `poc.py` (auch `poc.py modell` für den Modell-Mock), `lieferkette.py` (kopierter Skill; `lieferkette.py` ruft selbst OSV-API und
       KEV-Katalog auf, das ist die Erlaubtliste des Feature-Files, die Session macht keinen eigenen Netzverkehr), `ki.py` (TF3, rein
-      statische Erkennung ohne Netz und ohne Kindprozess), `bericht.py kontext`, `bericht.py repo` (beide read-only), `bericht.py rendern <ausgabe>/*`, `agent-stats.py add
+      statische Erkennung ohne Netz und ohne Kindprozess), `bericht.py kontext`, `bericht.py repo` (beide read-only), `bericht.py rendern <ausgabe>/*`,
+      `kundenbericht.py erstellen --json <ausgabe>/*` (TF4; pandoc und weasyprint ruft nur das Skript auf, nie die Session), `agent-stats.py add
       <ausgabe>/*` (mit `~` und mit absolutem `home`) und `ls`. Die `*`-Muster treffen auch `..`-Pfade (Restrisiko)."""
     absolut = lambda pfad: "/" + pfad                    # "//<absoluter Pfad ohne führenden />"
     if tmp is None:
@@ -89,6 +90,7 @@ def erlaubte_regeln(skill_ordner: str, ausgabe: str, home: str, tmp: str | None 
         f"Bash(python3 -I {skill_ordner}/scripts/poc.py *)",
         f"Bash(python3 -I {skill_ordner}/scripts/lieferkette.py *)",
         f"Bash(python3 -I {skill_ordner}/scripts/ki.py *)",
+        f"Bash(python3 -I {skill_ordner}/scripts/kundenbericht.py erstellen --json {ausgabe}/*)",
         f"Bash({bericht} kontext)",
         f"Bash({bericht} kontext *)",
         f"Bash({bericht} repo)",

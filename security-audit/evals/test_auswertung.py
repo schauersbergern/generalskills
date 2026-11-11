@@ -884,7 +884,7 @@ def test_regeln_passen_zu_skill():
     regeln = run_eval.erlaubte_regeln(skill, aus, home)
     bash = [r for r in regeln if r.startswith("Bash(")]
     zeilen = _aufrufzeilen()
-    gesehen = {"poc": 0, "kontext": 0, "repo": 0, "rendern": 0, "add": 0, "lieferkette": 0, "ki": 0}
+    gesehen = {"poc": 0, "kontext": 0, "repo": 0, "rendern": 0, "add": 0, "lieferkette": 0, "ki": 0, "kundenbericht": 0}
     assert len(zeilen) >= 5
     for z in zeilen:
         z = z.replace("${CLAUDE_SKILL_DIR}", skill).replace("<SKILL_DIR>", skill)
@@ -893,7 +893,8 @@ def test_regeln_passen_zu_skill():
             continue
         assert any(_regel_passt(r, z) for r in bash), f"keine Regel für: {z}"
         for schluessel, marke in (("poc", "/poc.py "), ("kontext", "bericht.py kontext"), ("repo", "bericht.py repo"), ("rendern", "bericht.py rendern "),
-                                  ("add", "agent-stats.py add "), ("lieferkette", "/lieferkette.py "), ("ki", "/ki.py ")):
+                                  ("add", "agent-stats.py add "), ("lieferkette", "/lieferkette.py "), ("ki", "/ki.py "),
+                                  ("kundenbericht", "/kundenbericht.py erstellen ")):
             gesehen[schluessel] += marke in z
     assert all(gesehen.values()), gesehen                                # jede Form kommt im Skill-Text vor
     assert f"Bash(python3 -I {skill}/scripts/poc.py *)" in regeln
@@ -904,6 +905,7 @@ def test_regeln_passen_zu_skill():
     assert f"Bash(python3 -I {skill}/scripts/bericht.py repo)" in regeln
     assert f"Bash(python3 -I {skill}/scripts/bericht.py repo *)" in regeln
     assert f"Bash(python3 -I {skill}/scripts/bericht.py rendern {aus}/*)" in regeln
+    assert f"Bash(python3 -I {skill}/scripts/kundenbericht.py erstellen --json {aus}/*)" in regeln
     assert f"Bash(python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py add {aus}/*)" in regeln
     assert f"Bash(python3 {home}/.claude/skills/auto-feature/scripts/agent-stats.py add {aus}/*)" in regeln
     assert "Bash(ls *)" in regeln and "Bash(ls)" in regeln
@@ -911,6 +913,14 @@ def test_regeln_passen_zu_skill():
     for gefaehrlich in (f"python3 -I {skill}/scripts/bericht.py rendern /etc/x.json",
                         f"python3 -I {skill}/scripts/bericht.py rendern {aus}x/y.json",
                         f"python3 -I {skill}/scripts/bericht.py schreiben {aus}/a",
+                        # TF4 (R1-W3): `kundenbericht.py` nur als `erstellen --json <Ausgabeordner>/…`
+                        f"python3 -I {skill}/scripts/kundenbericht.py erstellen --json /etc/x.json",
+                        f"python3 -I {skill}/scripts/kundenbericht.py erstellen --json {aus}x/y.json",
+                        f"python3 -I {skill}/scripts/kundenbericht.py schreiben --json {aus}/a.json",
+                        f"python3 -I {skill}/scripts/kundenbericht.py erstellen {aus}/a.json",
+                        f"python3 {skill}/scripts/kundenbericht.py erstellen --json {aus}/a.json",
+                        f"python3 -I /etc/scripts/kundenbericht.py erstellen --json {aus}/a.json",
+                        f"python3 -I {skill}/scripts/kundenbericht.pyx erstellen --json {aus}/a.json",
                         f"python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py add /Users/test/.zshrc --x",
                         f"python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py init",
                         f"python3 {home}/.claude/skills/auto-feature/scripts/agent-stats.py add /etc/x"):
