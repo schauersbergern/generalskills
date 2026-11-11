@@ -1046,6 +1046,16 @@ def test_start_befehl_legitim_erlaubt(umg, tmp_path, mock, befehl):
     ("OPENAI_API_HOST=http://llm:4010 node server.js", "OPENAI_API_HOST"),
     ("ANTHROPIC_AUTH_TOKEN=x node server.js", "ANTHROPIC_AUTH_TOKEN"),
     ("OPENAI_PROJECT_ID=proj-x node server.js", "OPENAI_PROJECT_ID"),
+    # Review R1-7: gruppierte Optionen, read, for, Builtins, die Export oder Wert aufheben
+    ("env -vu OPENAI_BASE_URL node server.js", "OPENAI_BASE_URL"),
+    ("env -iu OPENAI_API_KEY node server.js", "OPENAI_API_KEY"),
+    ("read OPENAI_API_KEY < /tmp/f; node server.js", "OPENAI_API_KEY"),
+    ("read -r OPENAI_BASE_URL < /tmp/f && node server.js", "OPENAI_BASE_URL"),
+    ("for OPENAI_BASE_URL in a b; do node server.js; done", "OPENAI_BASE_URL"),
+    ("export -n OPENAI_BASE_URL; node server.js", "OPENAI_BASE_URL"),
+    ("typeset +x ANTHROPIC_API_KEY; node server.js", "ANTHROPIC_API_KEY"),
+    ("printf -v OPENAI_API_KEY %s x; node server.js", "OPENAI_API_KEY"),
+    ("declare -n ref=OPENAI_BASE_URL; ref=x node server.js", "OPENAI_BASE_URL"),
 ])
 def test_start_befehl_syntaxformen_reservierter_namen_exit2(umg, tmp_path, befehl, name):
     vorbereitet(umg, tmp_path)
@@ -1059,9 +1069,30 @@ def test_start_befehl_syntaxformen_reservierter_namen_exit2(umg, tmp_path, befeh
 @pytest.mark.parametrize("befehl", ["unset NODE_OPTIONS && node server.js", "node server.js -u poc", "env -u NODE_OPTIONS node server.js",
                                     "NEXT_PUBLIC_OPENAI_BASE_URL+=x npm start", "echo OPENAI_BASE_URL gesetzt; node server.js",
                                     "unset FOO; node server.js --modell OPENAI_API_KEY", "node server.js --unsetzen OPENAI_API_KEY",
-                                    "node server.js --u OPENAI_API_KEY"])      # `--u` ist keine Kurzoption `-u` (Wortgrenze davor)
+                                    "node server.js --u OPENAI_API_KEY", "env -v node server.js", "read LINE < f; node server.js",
+                                    "for x in a b; do echo OPENAI_API_KEY; done", "export -n FOO; node server.js",
+                                    "printf -v FOO %s x; node server.js", "declare -n ref=FOO; node server.js"])   # `--u` ist keine Kurzoption `-u` (Wortgrenze davor)
 def test_start_befehl_syntaxformen_legitim_erlaubt(umg, tmp_path, befehl):
     """Gegenprobe zu den Syntaxformen: Wortgrenzen, Befehlsgrenzen (`;`, `&&`) und `-u` ohne reservierten Namen bleiben erlaubt."""
+    vorbereitet(umg, tmp_path)
+    r = starten_mit_befehl(umg, befehl, "--modell-mock", "openai")
+    assert r.returncode == 0, (befehl, r.stdout + r.stderr)
+
+
+@pytest.mark.parametrize("befehl", ["env -i node server.js", "env - node server.js", "env -vi FOO=1 node server.js",
+                                    "/usr/bin/env --ignore-environment node server.js", "env -i; node server.js"])
+def test_start_befehl_env_leert_umgebung_exit2_review_r1_7(umg, tmp_path, befehl):
+    """Review R1-7: `env -i` und `env -` leeren die Umgebung samt der Mock-Variablen: mit --modell-mock Exit 2 (ohne Mock erlaubt)."""
+    vorbereitet(umg, tmp_path)
+    r = starten_mit_befehl(umg, befehl, "--modell-mock", "openai")
+    assert r.returncode == 2 and "leert die Umgebung" in r.stderr and "node server.js" not in r.stderr, (befehl, r.stderr)
+    assert umg.aufrufe() == []
+    assert starten_mit_befehl(umg, befehl).returncode == 0
+
+
+@pytest.mark.parametrize("befehl", ["env FOO=1 node server.js", "env -u FOO node server.js", "node server.js -i", "node server.js --env -i",
+                                    "environment -i x", "env -C /app node server.js"])
+def test_start_befehl_env_ohne_leeren_erlaubt_review_r1_7(umg, tmp_path, befehl):
     vorbereitet(umg, tmp_path)
     r = starten_mit_befehl(umg, befehl, "--modell-mock", "openai")
     assert r.returncode == 0, (befehl, r.stdout + r.stderr)

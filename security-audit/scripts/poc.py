@@ -17,7 +17,7 @@ Exit-Codes: 0 ok, 2 ungültige Argumente, 3 Docker fehlt oder Daemon nicht errei
 
 `starten --modell-mock openai,anthropic` startet vor der App den Modell-Mock `<netz>-llm` (Alias `llm`, Port 4010, nur im internen Netz)
 und setzt in der App die Variablen der gewählten APIs (Dummy-Schlüssel). `--env`: jeder Wert läuft durch die Netzregel (Exit 2 bei
-fremdem Host, die Meldung nennt nie den Wert); mit `--modell-mock` sind die vier Variablen des Mocks für `--env` reserviert.
+fremdem Host, die Meldung nennt nie den Wert); mit `--modell-mock` sind die Namen in `MOCK_RESERVIERT` für `--env`, `--start-befehl` und `--seed` reserviert.
 
 `modell --lauf <id> --rolle <r> (--antworten-datei <datei> | --protokoll [--suche <marker>])` steuert den Modell-Mock der Rolle
 (ein `docker exec` auf `<netz>-llm`, unter der geteilten Rollensperre, Budget 60 s, nur verkürzbar). `--antworten-datei` prüft die
@@ -113,9 +113,19 @@ MOCK_RESERVIERT = frozenset({name for paare in MOCK_ENV.values() for name, _ in 
 _RESERVIERT_NAMEN = "|".join(sorted(MOCK_RESERVIERT))
 # `NAME=` und `NAME+=` (Anhängen), mit Wortgrenze davor (`NEXT_PUBLIC_OPENAI_BASE_URL=` ist ein anderer Name).
 MOCK_RESERVIERT_RE = re.compile(r"(?<![A-Za-z0-9_])(" + _RESERVIERT_NAMEN + r")\+?=", re.IGNORECASE)
-# Aufheben statt Setzen: `unset … NAME` (im selben Befehl, nicht über `;`, `&`, `|`, Zeilenende hinweg), `env -u NAME`, `--unset NAME`.
-MOCK_ENTFERNT_RE = re.compile(r"(?<![A-Za-z0-9_])(?:unset\b[^;&|\n]*?\s|(?<![\w-])-u\s*|--unset[=\s]\s*)(" + _RESERVIERT_NAMEN + r")(?![A-Za-z0-9_])",
+# Aufheben statt Setzen: `unset … NAME` (im selben Befehl, nicht über `;`, `&`, `|`, Zeilenende hinweg), `env -u NAME` (auch gruppiert: `-vu`),
+# `--unset NAME`.
+MOCK_ENTFERNT_RE = re.compile(r"(?<![A-Za-z0-9_])(?:unset\b[^;&|\n]*?\s|(?<![\w-])-[A-Za-z]*u\s*|--unset[=\s]\s*)(" + _RESERVIERT_NAMEN + r")(?![A-Za-z0-9_])",
                               re.IGNORECASE)
+# Weitere Formen, die einen Namen setzen, überschreiben oder aus dem Export nehmen (Review R1-7): `read [-r] NAME`, `for NAME in`, `printf -v NAME`,
+# `export -n NAME`, `typeset +x NAME` und `declare|typeset|local -n ref=NAME` (Namensreferenz).
+_TOKEN = r"[^;&|\s]+\s+"
+MOCK_WEITERE_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:read\b[^;&|\n]*?\s|for\s+|printf\s+(?:" + _TOKEN + r")*?-v\s*"
+    r"|(?:export|typeset|declare|local)\s+(?:" + _TOKEN + r")*?(?:-[A-Za-z]*n[A-Za-z]*|\+[A-Za-z]*x[A-Za-z]*)\s+(?:" + _TOKEN + r")*?(?:[^;&|\s=]+=)?"
+    r")(" + _RESERVIERT_NAMEN + r")(?![A-Za-z0-9_])", re.IGNORECASE)
+# `env -i`, `env -` und `env --ignore-environment` leeren die Umgebung samt der Mock-Variablen.
+MOCK_ENV_LEER_RE = re.compile(r"(?<![A-Za-z0-9_.-])env(?:\s+-\S+)*?\s+(?:-[A-Za-z]*i[A-Za-z]*|-|--ignore-environment)(?=[\s;&|]|$)")
 _QUOTES_RE = re.compile(r"\\\r?\n|[\"'\\]")     # Zeilenfortsetzung, Anführungszeichen und Rückstrich: die Shell entfernt sie vor dem Lesen des Namens
 
 # Hinweis-Kategorien, die `bauen` ausgeben kann (`hinweis: <kategorie>`); SKILL.md und bericht-format.md nennen jede.
@@ -1010,7 +1020,7 @@ def _starte(lauf: str, rolle: str, p: dict) -> int:
 def _env_pruefen(env: list[str], modell_mock: list[str]) -> None:
     """Regeln für `--env` (Exit 2, Meldungen nennen nur Namen und Host, nie den Wert): jeder Wert läuft durch die Netzregel
     (`netzregel.verstoesse_poc`: nur app, db, llm, localhost und Loopback); mit `--modell-mock` sind die Namen in `MOCK_RESERVIERT`
-    (alle vier, auch die der nicht gewählten API) gesperrt, weil `starten` sie selbst setzt."""
+    (auch die der nicht gewählten API) gesperrt, weil `starten` sie selbst setzt."""
     for e in env:
         name, _, wert = e.partition("=")
         if modell_mock and name.upper() in MOCK_RESERVIERT:
@@ -1023,14 +1033,18 @@ def _env_pruefen(env: list[str], modell_mock: list[str]) -> None:
 def _start_befehl_pruefen(befehl: str, modell_mock: list[str], option: str = "--start-befehl") -> None:
     """Regeln für `--start-befehl` und `--seed` (`option`; Exit 2, die Meldung nennt nur Namen oder Host, nie den Befehl): mit `--modell-mock`
     darf der Befehl keinen Namen aus `MOCK_RESERVIERT` zuweisen oder aufheben (`NAME=`, `NAME+=`, auch nach `env` und `export`, `unset NAME`,
-    `env -u NAME`; Anführungszeichen, Rückstriche und Zeilenfortsetzungen im Namen zählen nicht: `OPENAI_BASE_UR""L=` wird erkannt);
+    `env -u NAME` auch gruppiert, `read NAME`, `for NAME in`, `printf -v NAME`, `export -n NAME`, `typeset +x NAME`, `declare -n x=NAME`; Anführungszeichen,
+    Rückstriche und Zeilenfortsetzungen im Namen zählen nicht: `OPENAI_BASE_UR""L=` wird erkannt) und kein `env -i`, `env -` oder `env --ignore-environment` (leeren die Umgebung);
     unabhängig davon läuft er durch die Netzregel (nur URL-Hosts). Nicht erkennbar ist, was die Shell erst beim Ausführen zusammensetzt
-    (`eval`, Variablennamen aus Variablen, `process.env[…]` in einem Skript): die Sperre ist das interne Netz, nicht diese Prüfung."""
+    (`eval`, Variablennamen aus Variablen, `process.env[…]` in einem Skript) und weitere Builtins, die Variablen setzen (`mapfile`, `getopts`,
+    `let`, `${NAME:=…}`): die Sperre ist das interne Netz, nicht diese Prüfung."""
     if modell_mock:
         for text in (befehl, _QUOTES_RE.sub("", befehl)):
-            m = MOCK_RESERVIERT_RE.search(text) or MOCK_ENTFERNT_RE.search(text)
+            m = MOCK_RESERVIERT_RE.search(text) or MOCK_ENTFERNT_RE.search(text) or MOCK_WEITERE_RE.search(text)
             if m:
                 raise PocFehler(f"{option}: reservierter Name {m.group(1)} bei --modell-mock")
+            if MOCK_ENV_LEER_RE.search(text):
+                raise PocFehler(f"{option}: env -i leert die Umgebung samt der Mock-Variablen bei --modell-mock")
     fremd = netzregel.url_verstoesse(befehl)
     if fremd:
         raise PocFehler(f"{option}: nicht erlaubter Host {_entschaerfen(fremd[0])[:100]}")
