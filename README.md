@@ -80,6 +80,7 @@ nikskills/
       test_auswertung.py
       test_fixture.py
       expected/
+      fixture-ki/
       fixture-web/
       sdk-vertrag/
       testdaten/

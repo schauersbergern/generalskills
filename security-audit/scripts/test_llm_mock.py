@@ -45,9 +45,10 @@ BODY_GRENZE = 8192
 class Mock:
     """Ein lokal gestarteter Mock. Beendet wird nur die eigene Prozessgruppe."""
 
-    def __init__(self, extra=()):
+    def __init__(self, extra=(), host="127.0.0.1"):
+        """`host=None`: ohne --host, also mit dem Standard des Mocks (wie im Container)."""
         self.p = subprocess.Popen(
-            [NODE, MOCK, "--server", "--host", "127.0.0.1", "--port", "0", "--steuer-port", "0", *extra],
+            [NODE, MOCK, "--server", *(["--host", host] if host else []), "--port", "0", "--steuer-port", "0", *extra],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=True,
         )
@@ -1873,3 +1874,83 @@ def test_vertrag_sdk(vertrag_zeilen, fall):
     assert z["waechter"] == [], z
     # der Weg ist belegt, nicht nur benannt: genau ein Request, auf dem erwarteten Endpunkt
     assert z["pfade"] == [ERWARTETER_PFAD[(fall[0], fall[1])]], (fall, z["pfade"])
+
+
+# ---------------------------------------------------------------- Review R1
+
+def _grosse_hex(json_text):
+    return re.sub(r"\\u([0-9a-f]{4})", lambda m: "\\u" + m.group(1).upper(), json_text)
+
+
+@pytest.mark.parametrize("stufe", ["einfach", "doppelt"])
+def test_mock_maskierung_unicode_escape_mit_grossen_hexziffern(mock, stufe):
+    """Clients, die \\uXXXX mit großen Hex-Ziffern schreiben, dürfen den Wert nicht am Maskieren vorbeischmuggeln (Review R1-4)."""
+    wert = "pä€ß-Wört-9"
+    einfach = _grosse_hex(json.dumps(wert)[1:-1])
+    assert "\\u00E4" in einfach and "\\u00e4" not in einfach  # tatsächlich große Hex-Ziffern
+    form = einfach if stufe == "einfach" else einfach.replace("\\", "\\\\")
+    anfrage(mock.api, "POST", "/v1/nix", f"x {form} y")
+    (e,) = protokoll(mock, [{"name": "PW", "wert": wert}])["eintraege"]
+    assert "<ENV:PW>" in e["body"] and "u20AC" not in e["body"] and "u00DF" not in e["body"] and "ert-9" not in e["body"], e["body"]
+
+
+def test_mock_maskierung_doppelt_escapt_mit_ascii_in_beiden_stufen(mock):
+    """Python-Standard (ensure_ascii) in Tool-Ergebnis und Body: Der Body enthält \\\\u00e4 mit doppeltem Backslash (Review R1-4, Klasse)."""
+    wert = "pä€ß-Wört-9"
+    body = json.dumps({"messages": [{"role": "tool", "content": json.dumps({"k": wert})}]})
+    assert "\\\\u00e4" in body
+    anfrage(mock.api, "POST", "/v1/nix", body)
+    (e,) = protokoll(mock, [{"name": "PW", "wert": wert}])["eintraege"]
+    assert "<ENV:PW>" in e["body"] and "u00e4" not in e["body"] and "ert-9" not in e["body"], e["body"]
+
+
+def test_mock_protokoll_kuerzung_behaelt_den_verbrauchenden_request(mock):
+    """Wiederholt eine App den Verlauf, steht der Marker in jedem Request. Bei der Kürzung auf 64 KiB fallen zuerst die Rückfallantworten
+    weg, nicht der Request, der die Antwort aus der Liste verbraucht hat (Review R1-1)."""
+    marker = "POCMARKER-p1-verlauf"
+    setzen(mock, [{"werkzeug": {"name": "tool_a", "argumente": {"an": "x@example.test"}}, "wenn_enthaelt": marker}])
+    for i in range(9):
+        chat_json(mock, marker + " " + "v" * 9000 + str(i))
+    for p in (protokoll(mock), protokoll(mock, suche=marker)):
+        nrs = [e["nr"] for e in p["eintraege"]]
+        assert p["gekuerzt"] > 0 and p["aelter"] == 0 and p["gekuerzt"] + len(nrs) == 9
+        assert nrs[0] == 1 and "standard" not in p["eintraege"][0]
+        assert all(e.get("standard") for e in p["eintraege"][1:]) and nrs == sorted(nrs)
+
+
+def _nicht_loopback_adresse():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("192.0.2.1", 9))  # kein Paket: das Betriebssystem wählt nur die Quelladresse
+        ip = s.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        s.close()
+    return None if ip.startswith("127.") or ip == "0.0.0.0" else ip
+
+
+def test_mock_steuerport_nur_auf_loopback_im_standardlauf():
+    """Mit dem Standard-Host (0.0.0.0, wie im Container) lauscht nur die API auf allen Adressen, die Steuerung nur auf 127.0.0.1 (Review R1-2)."""
+    quelle = open(MOCK, encoding="utf-8").read()
+    assert 'lauschen(steuer, a.steuerPort, "127.0.0.1")' in quelle  # statisch: der Aufruf bindet fest an Loopback
+    ip = _nicht_loopback_adresse()
+    if ip is None:
+        pytest.skip("keine Nicht-Loopback-Adresse")
+    m = Mock(host=None)
+    try:
+        assert m.erste_zeile.startswith("bereit")
+        for port, erreichbar in ((m.api, True), (m.steuer, False)):
+            c = socket.socket()
+            c.settimeout(5)
+            try:
+                c.connect((ip, port))
+                ok = True
+            except OSError:
+                ok = False
+            finally:
+                c.close()
+            assert ok is erreichbar, (port, ip)
+        socket.create_connection(("127.0.0.1", m.steuer), timeout=5).close()  # über Loopback bleibt die Steuerung erreichbar
+    finally:
+        m.beenden()
