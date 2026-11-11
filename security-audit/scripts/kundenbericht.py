@@ -444,9 +444,13 @@ def markdown_erzeugen(daten: dict) -> str:
 # ------------------------------------------------------------------------------------ PDF
 
 # pandoc liest das Markdown ohne alles, was Dateien oder Netz berühren könnte (R1-K2): kein raw_html/raw_tex/raw_attribute, keine
-# Attribute, Zitate oder Formeln. Dazu `--sandbox`; die zweite Schicht ist die HTML-Prüfung, die dritte weasyprint ohne Protokolle.
+# Zitate oder Formeln, und keine Erweiterung, die Attribute, Spans, Divs oder Fußnoten erzeugt (native_spans/native_divs, Attribute
+# an Überschriften, Links, Code, Fußnoten). Eine Ergänzung zu R1-K2: `<span style=…>` wird so zu Text statt zu einem Element mit
+# Attribut. Dazu `--sandbox`; die zweite Schicht ist die HTML-Prüfung (Erlaubtliste für Tags und Attribute), die dritte weasyprint
+# ohne Protokolle. Die HTML-Prüfung ist die Schicht, die Attribute stoppt; die Liste hier hält sie gar nicht erst entstehen.
 PANDOC_FORMAT = ("markdown-smart-auto_identifiers-yaml_metadata_block-pandoc_title_block-citations-tex_math_dollars-implicit_figures"
-                 "-raw_html-raw_attribute-raw_tex-header_attributes-bracketed_spans-fenced_divs-link_attributes")
+                 "-raw_html-raw_attribute-raw_tex-header_attributes-bracketed_spans-fenced_divs-link_attributes"
+                 "-native_spans-native_divs-fenced_code_attributes-inline_code_attributes-footnotes-inline_notes")
 _HTML_TAGS = frozenset("html head meta title style body header main section footer h1 h2 h3 p ul li table thead tbody tr th td strong em code br hr div span".split())
 _HTML_ATTRIBUTE = {"": frozenset({"class", "id"}), "meta": frozenset({"class", "id", "charset", "name", "content"}), "html": frozenset({"class", "id", "lang"})}
 _FEHLER_IN_STDERR = ("disallowed protocol", "failed to load", "error")      # ohne Beachtung der Schreibweise (R2-K-3)
@@ -552,18 +556,24 @@ def _werkzeug_lauf(name: str, args: list[str], anteil: int, ende: float, tmp: st
         lauf = gitkopie.werkzeug_ausfuehren(args, min(anteil, rest), tmp, _werkzeug_env(tmp))
     except gitkopie.GitFehler:
         raise Abbruch(3, "pdf-werkzeug-fehlt", [f"Werkzeug nicht startbar: {name}"]) from None
+    except ValueError:      # `Popen` wirft bei einem NUL in einem Argument (etwa im Titel) ValueError statt OSError
+        raise Abbruch(4, "pdf-fehler", [f"Werkzeug nicht aufrufbar: {name}"]) from None
     if lauf.rc is None:
         raise Abbruch(4, "pdf-fehler", [f"Zeitüberschreitung bei {name}."])
     return lauf
 
 
 def _datei_lesen(pfad: str, grenze: int) -> bytes | None:
-    """Inhalt einer regulären Datei (kein Symlink, höchstens `grenze` + 1 Bytes) oder None, wenn sie fehlt."""
-    st = _lstat(pfad)
-    if st is None or not stat.S_ISREG(st.st_mode):
-        return None
-    with open(pfad, "rb") as fh:
-        return fh.read(grenze + 1)
+    """Inhalt einer regulären Datei (kein Symlink, höchstens `grenze` + 1 Bytes) oder None, wenn sie fehlt.
+    Ein Lesefehler (Rechte, Datenträger) ist ein erwarteter Fehlerfall der PDF-Kette: Exit 4 `pdf-fehler`."""
+    try:
+        st = _lstat(pfad)
+        if st is None or not stat.S_ISREG(st.st_mode):
+            return None
+        with open(pfad, "rb") as fh:
+            return fh.read(grenze + 1)
+    except OSError:
+        raise Abbruch(4, "pdf-fehler", [f"{os.path.basename(pfad)} nicht lesbar."]) from None
 
 
 def _pdf_ablegen(roh: bytes, ziel: str) -> None:

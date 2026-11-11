@@ -1254,7 +1254,8 @@ def test_erfolg_beide_werkzeuge_in_reihenfolge(tmp_path, bericht_pfad):
 
 
 PANDOC_ERWEITERUNGEN = ("markdown-smart-auto_identifiers-yaml_metadata_block-pandoc_title_block-citations-tex_math_dollars-implicit_figures"
-                        "-raw_html-raw_attribute-raw_tex-header_attributes-bracketed_spans-fenced_divs-link_attributes")
+                        "-raw_html-raw_attribute-raw_tex-header_attributes-bracketed_spans-fenced_divs-link_attributes"
+                        "-native_spans-native_divs-fenced_code_attributes-inline_code_attributes-footnotes-inline_notes")
 
 
 def test_pandoc_args(tmp_path, bericht_pfad):
@@ -1368,6 +1369,57 @@ def test_werkzeug_nicht_startbar_exit3(tmp_path, bericht_pfad, kaputt):
     assert inhalt(tmp_path / "out") == [BASIS + "-kunde.md", BASIS + ".json"]
 
 
+def test_nul_im_titel_exit4(tmp_path, monkeypatch):
+    """M-2: `Popen` wirft bei einem NUL im Argument ValueError (nicht OSError); `pdf_erstellen` meldet Exit 4 und räumt auf."""
+    env, log = attrappen(tmp_path, **beide())
+    monkeypatch.setenv("SECURITY_AUDIT_OHNE", "")
+    monkeypatch.setenv("PATH", env["PATH"])
+    md, pdf = md_datei(tmp_path)
+    code, kategorie, meldungen = kundenbericht.pdf_erstellen(md, pdf, "Ti\x00tel", time.monotonic() + 30)
+    assert (code, kategorie) == (4, "pdf-fehler") and meldungen == ["Werkzeug nicht aufrufbar: pandoc"], (code, kategorie, meldungen)
+    assert protokoll(log) == [] and not os.path.exists(pdf)
+    assert not [n for n in os.listdir(tempfile.gettempdir()) if n.startswith("kunde-pdf-") and os.path.getmtime(os.path.join(tempfile.gettempdir(), n)) > time.time() - 30]
+
+
+@pytest.mark.parametrize("name", ["kunde.html", "kunde.pdf"])
+def test_datei_nicht_lesbar_exit4(tmp_path, monkeypatch, name):
+    """M-3: ein OSError beim Lesen von HTML oder PDF aus dem eigenen Temp-Ordner ergibt Exit 4 statt eines internen Fehlers."""
+    env, log = attrappen(tmp_path, **beide())
+    monkeypatch.setenv("SECURITY_AUDIT_OHNE", "")
+    monkeypatch.setenv("PATH", env["PATH"])
+    echtes_open = open
+
+    def open_(pfad, *a, **kw):
+        if os.path.basename(str(pfad)) == name:
+            raise PermissionError(13, "Zugriff verweigert")
+        return echtes_open(pfad, *a, **kw)
+
+    monkeypatch.setattr(kundenbericht, "open", open_, raising=False)
+    md, pdf = md_datei(tmp_path)
+    code, kategorie, meldungen = kundenbericht.pdf_erstellen(md, pdf, "T", time.monotonic() + 30)
+    assert (code, kategorie) == (4, "pdf-fehler") and len(meldungen) == 1 and "nicht lesbar" in meldungen[0], (code, kategorie, meldungen)
+    assert not os.path.exists(pdf)
+    cwd = aufruf(log, "pandoc")["cwd"]
+    assert not os.path.exists(cwd), "Temp-Ordner entfernt"
+
+
+def test_datei_nicht_lesbar_ende_zu_ende_exit4(tmp_path, bericht_pfad, monkeypatch):
+    """M-3 über die CLI: Exit 4 mit Kategorie pdf-fehler, das Markdown liegt, nichts Weiteres."""
+    env, _ = attrappen(tmp_path, **beide())
+    echtes_lstat = kundenbericht._lstat
+
+    def lstat(pfad):
+        if pfad.endswith(".html"):
+            raise PermissionError(13, "Zugriff verweigert")
+        return echtes_lstat(pfad)
+
+    monkeypatch.setattr(kundenbericht, "_lstat", lstat)
+    monkeypatch.setenv("SECURITY_AUDIT_OHNE", "")
+    monkeypatch.setenv("PATH", env["PATH"])
+    assert kundenbericht.main(["erstellen", "--json", str(bericht_pfad)]) == 4
+    assert inhalt(tmp_path / "out") == [BASIS + "-kunde.md", BASIS + ".json"]
+
+
 # ------------------------------------------------------------------------------------ HTML-Prüfung
 
 def html_mit(body, kopf=""):
@@ -1411,6 +1463,42 @@ def test_html_pruefung_href_extern(body, erwartet):
     assert any(z.startswith(f"Attribut nicht erlaubt: {erwartet} an ") for z in m) and "x.example" not in " ".join(m)
 
 
+@pytest.mark.parametrize("tag,body,kopf", [
+    ("svg", '<svg><image href="file:///etc/hosts"/></svg>', ""),
+    ("math", "<math><mi>x</mi></math>", ""),
+    ("base", "", '<base href="http://x.example/">'),
+    ("script", "<script>alert(1)</script>", ""),
+    ("iframe", '<iframe src="file:///etc/hosts"></iframe>', ""),
+    ("textarea", "<textarea>x</textarea>", ""),
+    ("template", "<template><p>x</p></template>", ""),
+    ("form", '<form action="http://x.example/"></form>', ""),
+    ("noscript", "<noscript>x</noscript>", ""),
+    ("embed", '<embed src="file:///etc/hosts">', ""),
+    ("image", '<image href="file:///etc/hosts">', ""),
+    ("use", '<use href="#x">', ""),
+])
+def test_html_pruefung_verbotene_tags(tag, body, kopf):
+    """Die Erlaubtliste ist festgenagelt: jeder dieser Tags wird mit Namen gemeldet, nie mit Werten."""
+    m = kundenbericht.html_pruefen(html_mit(body, kopf))
+    assert f"Tag nicht erlaubt: {tag}" in m and "x.example" not in " ".join(m) and "etc/hosts" not in " ".join(m)
+
+
+def test_html_pruefung_meta_http_equiv_ist_verboten():
+    m = kundenbericht.html_pruefen(html_mit("", kopf='<meta http-equiv="refresh" content="0;url=http://x.example/">'))
+    assert m == ["Attribut nicht erlaubt: http-equiv an meta"]
+
+
+@pytest.mark.parametrize("attribut", ["onload", "xmlns", "style", "href", "dir"])
+def test_html_pruefung_html_tag_nur_lang(attribut):
+    m = kundenbericht.html_pruefen(html_mit("<p>a</p>").replace('<html lang="de">', f'<html lang="de" {attribut}="x">'))
+    assert m == [f"Attribut nicht erlaubt: {attribut} an html"]
+
+
+def test_html_pruefung_body_onload():
+    m = kundenbericht.html_pruefen(html_mit("<p>a</p>").replace("<body>", '<body onload="x">'))
+    assert m == ["Attribut nicht erlaubt: onload an body"]
+
+
 def test_html_pruefung_a_tag():
     m = kundenbericht.html_pruefen(html_mit('<p><a href="http://x.example/">y</a></p>'))
     assert "Tag nicht erlaubt: a" in m and "x.example" not in " ".join(m)
@@ -1423,7 +1511,7 @@ def test_html_pruefung_style_attribut():
 
 def test_html_pruefung_zweites_style():
     m = kundenbericht.html_pruefen(html_mit("<p>a</p><style>p { color: red; }</style>"))
-    assert m and any("style" in z for z in m)
+    assert m == ["style: genau ein Element erlaubt"]
 
 
 def test_html_pruefung_style_inhalt_geaendert():
@@ -1731,7 +1819,7 @@ def test_pdf_echt(tmp_path):
 @nur_echt
 def test_pdf_echt_ohne_dateizugriff(tmp_path):
     """Escapte Ladeversuche im Titel bleiben Text: das PDF entsteht ohne Ladefehler, und /etc/hosts wird nicht gelesen."""
-    titel = "Probe url(file:///etc/hosts) und ![x](/etc/hosts) und <img src=file:///etc/hosts>"
+    titel = "Probe url(file:///etc/hosts) und ![x](/etc/hosts) und <img src:file:///etc/hosts>"     # ohne `=`: Titelregel c lässt es sonst nicht durch
     pfad = schreibe(tmp_path / "out", bericht_daten(befund(1, titel=titel)))
     p = lauf(pfad, env={"SECURITY_AUDIT_OHNE": ""})
     assert p.returncode == 0, p.stdout + p.stderr
@@ -1751,3 +1839,42 @@ def test_pdf_echt_ohne_dateizugriff(tmp_path):
     else:
         roh = b"\n".join([pdf, *entpackte_streams(pdf)])
         assert not any(t.encode() in roh for t in inhalte)
+
+
+@nur_echt
+@pytest.mark.parametrize("markdown,meldung", [
+    ("![x](file:///etc/hosts)\n", "Tag nicht erlaubt: img"),
+    ("[a](http://poc-fremd.invalid/)\n", "Tag nicht erlaubt: a"),
+    ("<http://poc-fremd.invalid/>\n", "Tag nicht erlaubt: a"),
+    ("Text[^1]\n\n[^1]: http://poc-fremd.invalid/\n", "Tag nicht erlaubt: a"),
+])
+def test_pdf_echt_schichten_greifen(tmp_path, monkeypatch, markdown, meldung):
+    """Feindliches Markdown ohne Escaping direkt an `pdf_erstellen`: die Kette bricht mit Exit 4 ab und schreibt kein PDF.
+    Gegenprobe: ohne die Schichten (`--sandbox`, `raw_html` aus, HTML-Prüfung) ergäbe das Exit 0, ein PDF und beim Rendern einen
+    Zugriff auf Datei bzw. Host. `poc-fremd.invalid` wird nie aufgelöst, weil die Kette vorher abbricht; es braucht kein Netz."""
+    monkeypatch.setenv("SECURITY_AUDIT_OHNE", "")
+    md, pdf = tmp_path / "feind.md", tmp_path / "feind.pdf"
+    md.write_text(markdown, encoding="utf-8")
+    code, kategorie, meldungen = kundenbericht.pdf_erstellen(str(md), str(pdf), "Titel", time.monotonic() + 90)
+    assert (code, kategorie) == (4, "pdf-fehler") and meldung in meldungen, (code, kategorie, meldungen)
+    assert not pdf.exists() and sorted(os.listdir(tmp_path)) == ["feind.md"], "kein PDF und keine Reste"
+
+
+@nur_echt
+@pytest.mark.parametrize("markdown", [
+    '<span style="background:url(http://poc-fremd.invalid/)">x</span>\n',
+    '<div style="background:url(http://poc-fremd.invalid/)">x</div>\n',
+    '`a`{style="background:url(http://poc-fremd.invalid/)"}\n',
+    '```{style="background:url(http://poc-fremd.invalid/)"}\nx\n```\n',
+    "Text^[Notiz]\n",
+])
+def test_pdf_echt_erweiterungen_erzeugen_keine_attribute(tmp_path, monkeypatch, markdown):
+    """Die Erweiterungsliste (`-native_spans-native_divs-fenced_code_attributes-inline_code_attributes-footnotes-inline_notes`) ist
+    die erste Schicht gegen Attribute: pandoc macht aus diesen Konstrukten Text, die HTML-Prüfung findet nichts (Exit 0). Fehlte
+    eine der Erweiterungen im Ausschluss, entstünde ein `span`/`div`/`code` mit `style` bzw. ein Link `a`, und die HTML-Prüfung
+    ergäbe Exit 4."""
+    monkeypatch.setenv("SECURITY_AUDIT_OHNE", "")
+    md, pdf = tmp_path / "x.md", tmp_path / "x.pdf"
+    md.write_text(markdown, encoding="utf-8")
+    assert kundenbericht.pdf_erstellen(str(md), str(pdf), "Titel", time.monotonic() + 90) == (0, None, [])
+    assert open(pdf, "rb").read(4) == b"%PDF"
