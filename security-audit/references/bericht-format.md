@@ -79,7 +79,7 @@ Befunde zu den Prüfpunkten K1 bis K7 (`references/pruefpunkte-ki.md`) tragen zu
 | Feld | Typ | Inhalt |
 |---|---|---|
 | `owasp_ki` | Liste von Text | 1 bis 3 verschiedene IDs aus `ASI01` bis `ASI10` oder `LLM01` bis `LLM10`; der Reviewer liefert sie, die Hauptsession übernimmt sie |
-| `annahme_modell` | Wahrheitswert | `true` nur mit `status: bestätigt`: Der Beleg beruht auf dem Modell-Mock unter der Annahme, dass das Modell der Anweisung folgt. Setzt die Hauptsession (Schritt 6 in `SKILL.md`), nie der Prüfer; bei einem anderen Status ein Schemafehler |
+| `annahme_modell` | Wahrheitswert | `true` nur mit `status: bestätigt`: Der Beleg beruht auf dem Modell-Mock unter der Annahme, dass das Modell der Anweisung folgt. Setzt die Hauptsession (Schritt 6 in `SKILL.md`), nie der Prüfer; bei einem anderen Status ein Schemafehler. Umgekehrt ist ein `bestätigt` mit `klasse` ab `K1 `, `K2 ` oder `K4 ` ohne `annahme_modell: true` ein Schemafehler |
 
 - `kategorie` bleibt `A01` bis `A10` (die der Wurzel); die OWASP-KI-IDs stehen nur in `owasp_ki`. Die Befundliste im Codeblock bleibt unverändert.
 - `klasse` beginnt bei KI-Befunden mit der Prüfpunkt-Nummer und einem Leerzeichen (`K1 Tool mit Wirkung nach fremd befülltem Kontext`, einzeilig); die Hauptsession setzt `annahme_modell` nur bei `K1`, `K2` und `K4`.

@@ -708,6 +708,31 @@ def test_schema_annahme_modell_true_status_nfd_ist_bestaetigt():
     assert not any("annahme_modell" in x for x in bericht.pruefe_schema(mit(b)))
 
 
+@pytest.mark.parametrize("klasse", ["K1 Tool mit Wirkung nach fremd befülltem Kontext", "K2 Tool-Argumente in Senke", "K4 Modellausgabe in Senke",
+                                    "K1 x", "K4 "])
+def test_schema_k1_k2_k4_bestaetigt_braucht_annahme_modell_haertung(klasse):
+    """Härtung (Frage 7): Ein bestätigter K1-, K2- oder K4-Befund beruht auf dem Modell-Mock. Ohne `annahme_modell: true` (vergessen von der
+    Hauptsession) liefe er als schlichtes „bestätigt“ ohne die Annahme durch; `rendern` lehnt das ab. Mit `annahme_modell: true` ist er gültig."""
+    f = bericht.pruefe_schema(mit(befund(klasse=klasse)))
+    assert any("S-1" in x and "annahme_modell" in x and "K1, K2 oder K4" in x for x in f), f
+    assert bericht.pruefe_schema(mit(befund(klasse=klasse, annahme_modell=False))) != []
+    assert bericht.pruefe_schema(mit(befund(klasse=klasse, annahme_modell=True))) == []
+    assert "Modell-Mock, Annahme" in bericht.markdown(mit(befund(klasse=klasse, annahme_modell=True)))
+
+
+@pytest.mark.parametrize("klasse", ["K3 Tool-Rechte", "K5 Geheimnis im Prompt", "K6 Speicher", "K7 MCP", "K10 x", "K1", "K1x", "k1 x", " K1 x",
+                                    "Injection K1 x", "keine weiteren", "x K2 y"])
+def test_schema_bestaetigt_ohne_k1_k2_k4_praefix_braucht_keine_annahme_haertung(klasse):
+    """Die Kopplung gilt nur bei dem Präfix `K1 `, `K2 ` oder `K4 ` am Anfang von `klasse` (so erkennt Schritt 6 den Fall)."""
+    assert bericht.pruefe_schema(mit(befund(klasse=klasse))) == [], klasse
+
+
+@pytest.mark.parametrize("status", ["unbestätigt", "verworfen", "verdacht"])
+def test_schema_k1_ohne_bestaetigt_braucht_keine_annahme_haertung(status):
+    b = befund(status=status, klasse="K1 Tool mit Wirkung nach fremd befülltem Kontext", code_pfad=["src/a.js:1", "src/b.js:2"], grund="g")
+    assert not any("annahme_modell" in x for x in bericht.pruefe_schema(mit(b)))
+
+
 def test_schema_ki_felder_optional():
     b = befund()
     assert "owasp_ki" not in b and "annahme_modell" not in b

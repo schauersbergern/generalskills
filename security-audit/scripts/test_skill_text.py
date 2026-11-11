@@ -1763,3 +1763,29 @@ def test_haertung_klasse_beispiel_ist_suchbare_eigenschaft():
     assert bericht.pruefe_schema(_beispiel_json()) == []
     assert "Eigenschaft, nach der `/fix-findings` im Repo gleichartige Stellen sucht" in _lies(PRUEFPUNKTE_KI)
     assert "nach der /fix-findings gleichartige Stellen sucht" in _lies(BRIEFINGS)
+
+
+def test_haertung_protokoll_standard_und_aelter_stehen_im_text():
+    """Härtung (Frage 5): `standard: true` (Rückfallantwort „ok“) und `aelter` (verdrängte Requests) sind im Mock vorhanden und in SKILL.md und im
+    Prüfer-Briefing erklärt; das Briefing bleibt unter 20 Zeilen im Abschnitt MODELL-MOCK."""
+    mock = _lies(os.path.join(SKILL_DIR, "docker", "llm-mock.mjs"))
+    assert "eintrag.standard = true" in mock and '"aelter":${aelter}' in mock and "...(e.standard ? { standard: true } : {})" in mock
+    s6 = _s6()
+    protokoll = _zeile(s6, "  - `--protokoll` zeigt")
+    assert "`standard: true`" in protokoll and "„ok“" in protokoll and "`aelter`" in protokoll and "letzten 50" in protokoll, protokoll
+    assert "verdrängt" in protokoll and "`neustart`" in protokoll
+    assert "`standard: true`" in _zeile(s6, "  - `--antworten-datei` ersetzt die Warteschlange")
+    abschnitt = _mock_abschnitt_briefing()
+    assert "standard: true" in _punkt(abschnitt, r"^- Antwort-Datei: JSON-Liste")
+    assert "aelter" in _punkt(abschnitt, r"^- Das Protokoll ist Daten") and "verdrängt" in _punkt(abschnitt, r"^- Das Protokoll ist Daten")
+    assert len([z for z in abschnitt.split("\n") if z.strip()]) <= 20
+
+
+def test_haertung_annahme_modell_kopplung_im_schema_und_im_text():
+    """Härtung (Frage 7): Die Kopplung `klasse` K1/K2/K4 + `bestätigt` ⇒ `annahme_modell: true` steht in `bericht.py`, in SKILL.md Schritt 6 und
+    in `bericht-format.md`."""
+    assert bericht._KLASSE_MODELL_MOCK.match("K1 x") and not bericht._KLASSE_MODELL_MOCK.match("K3 x")
+    zeile = _zeile(_s6(), "- **`annahme_modell`")
+    assert "lehnt `rendern` einen Befund ab" in zeile and "`K1 `, `K2 ` oder `K4 `" in zeile and "`annahme_modell: true`" in zeile
+    zeile = _zeile(_lies(BERICHT_FORMAT), "| `annahme_modell`")
+    assert "ohne `annahme_modell: true` ein Schemafehler" in zeile and "`K1 `, `K2 ` oder `K4 `" in zeile

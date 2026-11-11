@@ -42,6 +42,7 @@ _ID = re.compile(r"S-[1-9][0-9]{0,8}")
 _KATEGORIE = re.compile(r"A(0[1-9]|10)")
 _ZEILE_IM_PFAD = re.compile(r"(:[0-9]+(:[0-9]+)?|#L[0-9]+(C[0-9]+)?(-L?[0-9]+(C[0-9]+)?)?)\Z")
 _OWASP_KI = re.compile(r"(ASI|LLM)(0[1-9]|10)")
+_KLASSE_MODELL_MOCK = re.compile(r"K[124] ")     # `klasse` von K1, K2 und K4: die Wirkung hängt an einer Modellentscheidung (Modell-Mock, TF3)
 MAX_OWASP_KI = 3
 _COMMIT = re.compile(r"[0-9a-f]{7,64}")
 _CODE_PFAD = re.compile(r"(.+):([1-9][0-9]*)", re.DOTALL)
@@ -359,6 +360,10 @@ def _befund_fehler(b: dict, label: str, teilpfad: str | None = None) -> list[str
             fehler("annahme_modell", "muss true oder false sein")
         elif b["annahme_modell"] and status != "bestätigt":
             fehler("annahme_modell", "true ist nur mit status bestätigt erlaubt")
+    if (status == "bestätigt" and isinstance(b.get("klasse"), str) and _KLASSE_MODELL_MOCK.match(b["klasse"])
+            and b.get("annahme_modell") is not True and type(b.get("annahme_modell", False)) is bool):
+        fehler("annahme_modell", "K1, K2 oder K4 mit status bestätigt beruht auf dem Modell-Mock und braucht annahme_modell true "
+                                 "(sonst steht „bestätigt“ ohne die Annahme im Bericht)")
 
     if "poc" in b:
         if msg := _text_fehler(b["poc"], False):

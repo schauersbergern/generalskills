@@ -579,14 +579,17 @@ WAECHTER = os.path.join(HIER, "sdk-vertrag", "waechter.mjs")
 
 def _waechter_vorschalt(wurzel):
     """Schreibt `<wurzel>/waechter-vorschalt.mjs` und gibt (Pfad des Moduls, Pfad der Trefferdatei) zurück. Das Modul lädt den Wächter
-    des SDK-Vertragstests (er ersetzt fetch, http(s), net und tls: nur 127.0.0.1 ist erlaubt) und schreibt jeden Treffer (`{art, ziel}`,
-    nie einen Request-Inhalt) sofort als eine JSON-Zeile in die Trefferdatei, auch wenn die App den Fehler fängt."""
+    des SDK-Vertragstests (er ersetzt fetch, http(s), net und tls: nur 127.0.0.1 ist erlaubt), legt beim Laden `<wurzel>/waechter-aktiv`
+    an (Beleg, dass der Prozess hinter dem Wächter läuft; ohne ihn bewiese eine leere Trefferdatei nichts) und schreibt jeden Treffer
+    (`{art, ziel}`, nie einen Request-Inhalt) sofort als eine JSON-Zeile in die Trefferdatei, auch wenn die App den Fehler fängt."""
     vorschalt = os.path.join(wurzel, "waechter-vorschalt.mjs")
     treffer = os.path.join(wurzel, "waechter-treffer.jsonl")
+    aktiv = os.path.join(wurzel, "waechter-aktiv")
     with open(vorschalt, "w", encoding="utf-8") as f:
         f.write(f'import {{ treffer }} from {json.dumps(pathlib.Path(WAECHTER).as_uri())};\n'
-                'import { appendFileSync } from "node:fs";\n'
+                'import { appendFileSync, writeFileSync } from "node:fs";\n'
                 f'const ziel = {json.dumps(treffer)};\n'
+                f'writeFileSync({json.dumps(aktiv)}, "1");\n'
                 'const eintragen = treffer.push.bind(treffer);\n'
                 'treffer.push = (...t) => { for (const x of t) appendFileSync(ziel, JSON.stringify(x) + "\\n"); return eintragen(...t); };\n')
     return vorschalt, treffer
@@ -896,6 +899,7 @@ def test_ki_start_mock_und_app_nur_loopback(tmp_path):
     assert kommando == ["/pfad/zu/node", "--import", vorschalt, "src/server.js"]
     text = open(vorschalt, encoding="utf-8").read()
     assert pathlib.Path(WAECHTER).as_uri() in text and os.path.join(wurzel, "waechter-treffer.jsonl") in text
+    assert os.path.join(wurzel, "waechter-aktiv") in text
     assert os.path.isfile(WAECHTER)
     assert _start_kommando("node", wurzel, False) == ["node", "src/server.js"]          # fixture-web und fixture-deps starten wie bisher
     env = _start_umgebung(wurzel, 3999, {"OPENAI_BASE_URL": "http://127.0.0.1:4242/v1", **KI_DUMMY})
@@ -929,6 +933,7 @@ def test_ki_waechter_vorschalt_weist_fremden_host_ab_und_haelt_ihn_fest(tmp_path
     r = subprocess.run([node, "--import", vorschalt, "--input-type=module", "-e", skript], cwd=wurzel, capture_output=True, text=True, timeout=60,
                        env={"PATH": os.environ.get("PATH") or "/usr/bin:/bin", "HOME": wurzel, "LANG": "C.UTF-8"})
     assert r.returncode == 0, r.stderr
+    assert os.path.isfile(os.path.join(wurzel, "waechter-aktiv"))                           # Beleg: der Prozess lief hinter dem Wächter
     assert json.loads(r.stdout.strip().splitlines()[-1]) == ["abgewiesen", "abgewiesen", "EWAECHTER", "lokal"], r.stdout
     zeilen = [json.loads(z) for z in open(treffer, encoding="utf-8").read().splitlines()]
     assert [z["ziel"] for z in zeilen] == ["poc-fremd.invalid", "192.0.2.1", "poc-fremd.invalid"], zeilen
@@ -1025,5 +1030,6 @@ def test_ki_nur_der_mock_sah_requests(app_ki):
     assert status == 200, body
     eintraege = json.loads(app_ki.mock.protokoll(marker))["eintraege"]
     assert eintraege and all(e["methode"] == "POST" and e["pfad"].endswith("/chat/completions") for e in eintraege), eintraege
+    assert os.path.isfile(os.path.join(app_ki.wurzel, "waechter-aktiv")), "die App läuft nicht hinter dem Wächter"
     treffer = os.path.join(app_ki.wurzel, "waechter-treffer.jsonl")
     assert not os.path.exists(treffer) or open(treffer, encoding="utf-8").read() == "", open(treffer, encoding="utf-8").read()

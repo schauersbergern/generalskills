@@ -413,6 +413,60 @@ def test_mock_ohne_passenden_eintrag_ok(mock):
     assert "".join(c["choices"][0]["delta"].get("content") or "" for c in chunks) == "ok"
 
 
+# Härtung (Frage 5): Die Rückfallantwort „ok“ und verdrängte Ring-Einträge sind im Protokoll sichtbar.
+ROUTEN_MIT_ANTWORT = [("/v1/chat/completions", {"messages": []}), ("/v1/responses", {"input": "x"}), ("/v1/messages", {"messages": []})]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("pfad,body", ROUTEN_MIT_ANTWORT)
+def test_mock_protokoll_markiert_rueckfallantwort_haertung(mock, pfad, body, stream):
+    """Jeder Eintrag, den die Warteschlange nicht beantwortet hat (der Mock sagt „ok“), trägt `standard: true`; ein Eintrag, dessen Antwort aus der
+    Warteschlange stammt, und jeder Request ohne Antwort aus der Liste (Modellliste, 404, 405, Embeddings) trägt das Feld nicht."""
+    marker = "POCMARKER-p1-haertung"
+    setzen(mock, [{"text": "aus-der-liste", "wenn_enthaelt": marker}])
+    b = {**body, "stream": stream}
+    assert anfrage(mock.api, "POST", pfad, {**b, "x": "ohne marker"})[0] == 200               # nr 1: kein Eintrag passt -> „ok“
+    assert anfrage(mock.api, "POST", pfad, {**b, "x": marker})[0] == 200                       # nr 2: der Eintrag passt
+    assert anfrage(mock.api, "POST", pfad, {**b, "x": "danach"})[0] == 200                     # nr 3: Liste leer -> „ok“
+    assert anfrage(mock.api, "GET", "/v1/models")[0] == 200                                    # nr 4
+    assert anfrage(mock.api, "GET", "/v1/gibt-es-nicht")[0] == 404                             # nr 5
+    assert anfrage(mock.api, "GET", pfad)[0] == 405                                            # nr 6
+    assert anfrage(mock.api, "POST", "/v1/embeddings", {"input": "x", "dimensions": 2})[0] == 200  # nr 7
+    e = {x["nr"]: x for x in protokoll(mock)["eintraege"]}
+    assert e[1].get("standard") is True and e[3].get("standard") is True, e
+    assert "standard" not in e[2], e[2]
+    assert all("standard" not in e[n] for n in (4, 5, 6, 7)), e
+    mit_suche = protokoll(mock, suche=marker)["eintraege"]
+    assert [x["nr"] for x in mit_suche] == [2] and "standard" not in mit_suche[0] and "fundstelle" in mit_suche[0]
+    assert all(set(x) <= {"nr", "methode", "pfad", "body", "standard", "fundstelle"} for x in e.values())
+
+
+def test_mock_protokoll_ungueltiger_body_ist_keine_rueckfallantwort_haertung(mock):
+    """Ein Request, der vor der Antwort scheitert (kein JSON, 400), hat keine Antwort aus der Liste und keine Rückfallantwort bekommen."""
+    setzen(mock, [{"text": "bleibt"}])
+    assert anfrage(mock.api, "POST", "/v1/chat/completions", "kein json")[0] == 400
+    assert "standard" not in protokoll(mock)["eintraege"][0]
+    assert chat_json(mock)["choices"][0]["message"]["content"] == "bleibt"                    # der Eintrag wurde nicht verbraucht
+
+
+def test_mock_protokoll_aelter_zaehlt_verdraengte_eintraege_haertung(mock):
+    """`aelter` ist die Zahl der Requests, die der Ring von 50 Einträgen schon verdrängt hat (unabhängig von `--suche` und von der
+    Kürzung der Ausgabe `gekuerzt`): Ohne Treffer bei `--suche` weiß der Aufrufer so, ob der Marker verdrängt worden sein kann."""
+    marker = "POCMARKER-p1-alt"
+    assert protokoll(mock)["aelter"] == 0
+    chat_json(mock, marker)                                                                    # nr 1
+    for _ in range(49):
+        assert anfrage(mock.api, "GET", "/v1/models")[0] == 200
+    p = protokoll(mock, suche=marker)
+    assert p["aelter"] == 0 and [e["nr"] for e in p["eintraege"]] == [1]                       # der Ring ist genau voll
+    assert anfrage(mock.api, "GET", "/v1/models")[0] == 200                                    # nr 51 verdrängt nr 1
+    p = protokoll(mock, suche=marker)
+    assert p["eintraege"] == [] and p["aelter"] == 1 and p["gekuerzt"] == 0
+    for _ in range(9):
+        anfrage(mock.api, "GET", "/v1/models")
+    assert protokoll(mock)["aelter"] == 10 and len(protokoll(mock)["eintraege"]) == 50
+
+
 def test_mock_setzen_ersetzt_die_warteschlange(mock):
     setzen(mock, [{"text": "alt1"}, {"text": "alt2"}])
     setzen(mock, [{"text": "neu"}])

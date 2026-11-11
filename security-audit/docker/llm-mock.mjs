@@ -8,10 +8,12 @@
 //   node llm-mock.mjs --bereit   [--steuer-port <n>]            Exit 0, wenn die Steuerung antwortet, sonst 1. Keine Ausgabe.
 //   node llm-mock.mjs --setzen   [--steuer-port <n>]            stdin: Antwortliste (JSON-Array). Ersetzt die Warteschlange.
 //   node llm-mock.mjs --protokoll [--suche <m>] [--steuer-port <n>]
-//       stdin: {"werte":[{"name":"N","wert":"..."}]}. stdout: {"eintraege":[{nr,methode,pfad,body[,fundstelle]}],"gekuerzt":n},
+//       stdin: {"werte":[{"name":"N","wert":"..."}]}. stdout: {"eintraege":[{nr,methode,pfad,body[,standard][,fundstelle]}],"gekuerzt":n,"aelter":m},
 //       reines ASCII, höchstens 64 KiB. Die Werte werden roh und JSON-escaped durch <ENV:N> ersetzt (längste zuerst),
 //       erst danach wird jeder Body auf 8 KiB gekürzt. --suche sucht im maskierten Body und liefert je Eintrag zusätzlich
 //       `fundstelle`: der einzeilige Ausschnitt (höchstens 300 Zeichen) um das erste Vorkommen, auch hinter der Kürzung.
+//       `standard: true` heißt: kein Eintrag der Antwortliste passte, der Mock antwortete mit „ok“. `aelter` ist die Zahl der Requests, die der
+//       Ring (die letzten 50) schon verdrängt hat; `gekuerzt` zählt dagegen die wegen der Ausgabegrenze weggelassenen Einträge.
 // API-Endpunkte (mit oder ohne /v1): POST chat/completions, responses, messages, embeddings sowie GET models.
 // Exit-Codes: 0 = ok, 1 = Fehler (Steuerung nicht erreichbar, Port belegt, …), 2 = ungültige Argumente oder ungültiger stdin.
 
@@ -188,10 +190,14 @@ function normalisiereAntworten(daten) {
 }
 
 // Erster passender Eintrag: ohne Marker passt jeder Request, mit Marker nur ein Request, dessen Body ihn enthält.
-// Der Eintrag wird verbraucht. Ohne Treffer antwortet der Mock mit „ok“.
-function naechsteAntwort(body) {
+// Der Eintrag wird verbraucht. Ohne Treffer antwortet der Mock mit „ok“ und markiert den Protokolleintrag des Requests mit `standard`,
+// damit die Rückfallantwort im Protokoll sichtbar ist (ein Marker, der nicht passte, oder ein schon verbrauchter Eintrag).
+function naechsteAntwort(body, eintrag) {
   const i = zustand.warteschlange.findIndex((e) => e.wenn_enthaelt === undefined || body.includes(e.wenn_enthaelt));
-  if (i < 0) return { typ: "text", text: "ok" };
+  if (i < 0) {
+    eintrag.standard = true;
+    return { typ: "text", text: "ok" };
+  }
   const [e] = zustand.warteschlange.splice(i, 1);
   if (e.werkzeug) return { typ: "werkzeug", name: e.werkzeug.name, argumente: e.werkzeug.argumente };
   return { typ: "text", text: e.text };
@@ -202,8 +208,10 @@ function naechsteAntwort(body) {
 function ringEintragen(methode, pfad, body) {
   zustand.nr += 1;
   // Methode und Pfad werden hier nicht gekürzt: erst die Ausgabe maskiert und kürzt (Node begrenzt die Request-Zeile über die Headergrenze).
-  zustand.ring.push({ nr: zustand.nr, methode: String(methode), pfad: String(pfad), body });
+  const eintrag = { nr: zustand.nr, methode: String(methode), pfad: String(pfad), body };
+  zustand.ring.push(eintrag);
   while (zustand.ring.length > RING_MAX) zustand.ring.shift();
+  return eintrag;
 }
 
 // Liefert null bei gültiger Eingabe, sonst eine feste Meldung.
@@ -278,7 +286,9 @@ function protokollAusgabe(werte, suche) {
     methode: maske(e.methode).slice(0, 16),
     pfad: maske(e.pfad).slice(0, PFAD_MAX), // erst maskieren, dann kürzen
     body: maske(e.body), // erst maskieren, dann kürzen
+    ...(e.standard ? { standard: true } : {}),
   }));
+  const aelter = zustand.nr - zustand.ring.length; // Requests, die der Ring schon verdrängt hat (auch bei --suche der Gesamtstand)
   if (suche !== null) eintraege = eintraege.filter((e) => e.body.includes(suche));
   const strings = eintraege.map((e) => {
     const ausgabe = { ...e, body: kuerzen(e.body) };
@@ -288,14 +298,14 @@ function protokollAusgabe(werte, suche) {
   let gekuerzt = 0;
   const gesamt = () => {
     const kopf = `{"eintraege":[`;
-    const fuss = `],"gekuerzt":${gekuerzt}}`;
+    const fuss = `],"gekuerzt":${gekuerzt},"aelter":${aelter}}`;
     return Buffer.byteLength(kopf) + Buffer.byteLength(fuss) + strings.reduce((s, x) => s + Buffer.byteLength(x), 0) + Math.max(0, strings.length - 1);
   };
   while (strings.length > 0 && gesamt() > AUSGABE_MAX) {
     strings.shift(); // die ältesten Einträge zuerst
     gekuerzt += 1;
   }
-  return `{"eintraege":[${strings.join(",")}],"gekuerzt":${gekuerzt}}`;
+  return `{"eintraege":[${strings.join(",")}],"gekuerzt":${gekuerzt},"aelter":${aelter}}`;
 }
 
 // ---------------------------------------------------------------- Chat Completions
@@ -354,8 +364,8 @@ function chatStreamend(res, antwort, bodyLaenge, mitUsage) {
   res.end();
 }
 
-function chatCompletions(res, daten, body) {
-  const antwort = naechsteAntwort(body);
+function chatCompletions(res, daten, body, eintrag) {
+  const antwort = naechsteAntwort(body, eintrag);
   if (daten.stream === true) {
     const mitUsage = istObjekt(daten.stream_options) && daten.stream_options.include_usage === true;
     chatStreamend(res, antwort, Buffer.byteLength(body), mitUsage);
@@ -473,8 +483,8 @@ function responsesStreamend(res, antwort, bodyLaenge) {
   res.end();
 }
 
-function responses(res, daten, body) {
-  const antwort = naechsteAntwort(body);
+function responses(res, daten, body, eintrag) {
+  const antwort = naechsteAntwort(body, eintrag);
   if (daten.stream === true) responsesStreamend(res, antwort, Buffer.byteLength(body));
   else responsesNichtStreamend(res, antwort, Buffer.byteLength(body));
 }
@@ -532,8 +542,8 @@ function messagesStreamend(res, antwort, bodyLaenge) {
   res.end();
 }
 
-function messages(res, daten, body) {
-  const antwort = naechsteAntwort(body);
+function messages(res, daten, body, eintrag) {
+  const antwort = naechsteAntwort(body, eintrag);
   if (daten.stream === true) messagesStreamend(res, antwort, Buffer.byteLength(body));
   else messagesNichtStreamend(res, antwort, Buffer.byteLength(body));
 }
@@ -595,9 +605,9 @@ function normalisierePfad(url) {
 }
 
 const ROUTEN = {
-  "POST /chat/completions": { json: true, ablauf: (res, daten, body) => chatCompletions(res, daten, body) },
-  "POST /responses": { json: true, ablauf: (res, daten, body) => responses(res, daten, body) },
-  "POST /messages": { json: true, ablauf: (res, daten, body) => messages(res, daten, body) },
+  "POST /chat/completions": { json: true, ablauf: (res, daten, body, eintrag) => chatCompletions(res, daten, body, eintrag) },
+  "POST /responses": { json: true, ablauf: (res, daten, body, eintrag) => responses(res, daten, body, eintrag) },
+  "POST /messages": { json: true, ablauf: (res, daten, body, eintrag) => messages(res, daten, body, eintrag) },
   "POST /embeddings": { json: true, ablauf: (res, daten) => embeddings(res, daten) },
   "GET /models": { json: false, ablauf: (res) => modelle(res) },
 };
@@ -605,7 +615,7 @@ const ROUTEN = {
 async function apiBehandeln(req, res) {
   const { text: body, zuGross } = await bodyLesen(req, BODY_MAX_REQUEST);
   // Ein zu großer Body wird nicht protokolliert: Maskierung braucht den ganzen Wert.
-  ringEintragen(req.method, req.url ?? "", body);
+  const eintrag = ringEintragen(req.method, req.url ?? "", body);
   if (zuGross) return zuGrossAntworten(res);
   const pfad = normalisierePfad(req.url ?? "");
   const pfadBekannt = pfad !== null && Object.keys(ROUTEN).some((k) => k.endsWith(` ${pfad}`));
@@ -620,7 +630,7 @@ async function apiBehandeln(req, res) {
     if (!geparst.ok || !istObjekt(geparst.wert)) return fehler(res, 400, "invalid_request_error", "Body ist kein gültiges JSON-Objekt");
     daten = geparst.wert;
   }
-  route.ablauf(res, daten, body);
+  route.ablauf(res, daten, body, eintrag);
 }
 
 // ---------------------------------------------------------------- Steuerung (nur 127.0.0.1)
