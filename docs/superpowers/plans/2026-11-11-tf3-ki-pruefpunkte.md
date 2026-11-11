@@ -251,3 +251,58 @@ fixture-ki schreibt nach `path.join(os.tmpdir(), "ausgang.jsonl")`; im Container
 **Neue Reihenfolge (W7):** 1 → 2 → 3a → 3b → 3c → (Hauptsession: Vertragstest, `vertrag.md`) → 4a → 4b → 5 → 6a → 6b.
 
 **Entscheidung K9:** angenommen, `dateien` von L4 = [`src/agent/prompt.js`, `src/agent/assistent.js`].
+
+## Nachträge nach Plan-Review R2 (Vorrang vor allem oben, auch vor dem Haupttext der Spec)
+
+
+**B1-neu** (Task 5 braucht Dateien, die erst 6a und 6b anlegen)
+**Zu W10 (Reihenfolge):** Task 5 erweitert die Verbotsliste in `test_skill_text.py` um eine **feste** Liste: `CRM_API_KEY`, `datei_suchen`, `send_email`, `antwort-sicher`, `tickets.js`, `assistent.js`, `fixture-ki`, `ausgang.jsonl`, `src/agent/prompt.js`, `src/routes/antwort.js`, `src/routes/antwort-sicher.js`, `src/agent/tickets.js`, `src/agent/assistent.js`. Task 6a ergänzt `test_ki_verbotsliste_deckt_erwartung` in `test_skill_text.py`: Die feste Liste umfasst alle `dateien` von `expected/fixture-ki.json` außer generischen Namen. `test_temp_repo_ki_skill_ohne_erwartung` und `test_eval_fixture_ki` (K6) gehören zu **6b**.
+
+**B2-neu** (Der Wächter-Test schickt in der TDD-Rotphase einen echten Request, wenn er einen API-Host nutzt)
+**Zu B3 (Wächter):** Tests des Wächters nutzen als fremde Ziele nur `http://poc-fremd.invalid/` und `http://192.0.2.1:9/` (TEST-NET-1), nie einen Modell-API-Host. `vertrag.mjs` prüft vor dem ersten SDK-Import selbst, dass `fetch("http://192.0.2.1:9/")` und `http.request({host: "192.0.2.1"})` vom Wächter abgewiesen werden; sonst endet es mit Exit 3 und importiert kein SDK. Jeder Treffer wird in einer Liste des Wächters festgehalten, unabhängig davon, ob das SDK den Fehler fängt. `vertrag.mjs` gibt diese Liste je Ergebniszeile aus. Die Clients laufen mit `maxRetries: 0`; das setzt keine Basis-URL.
+
+**W1-neu** (Der W7-Schnitt hat keine Zuordnung von Tests und Dateien je Teil-Task)
+**Zuordnung W7:**
+- **3a** (`docker/llm-mock.mjs` neu, `scripts/test_llm_mock.py` neu): CLI nach B1, Port 0 (W3), Chat Completions inklusive Chat-Stream-`usage` (Spec-W4), Embeddings, Models, 404, 400, Ring, `--suche`, Maskierung. Tests: `test_mock_wenn_enthaelt_mehrere`, `test_mock_ohne_passenden_eintrag_ok`, `test_mock_embeddings_verbrauchen_nichts`, `test_mock_tool_ids_eindeutig`, `test_mock_keine_steuerung_auf_api_port`, `test_mock_maskierung_vor_kuerzung`, `test_mock_protokoll_hoechstens_64kib`, `test_mock_ungueltiger_json_400`.
+- **3b** (dieselben Dateien): Responses und Messages. Tests `test_mock_responses_text_und_tool[stream]`, `test_mock_messages_text_und_tool[stream]`, `test_mock_messages_ohne_v1`.
+- **3c** (`evals/sdk-vertrag/*` neu, `test_llm_mock.py`): `test_vertrag_umgebung_ohne_fremde_variablen`, `test_vertrag_waechter_blockiert_fremden_host`, `test_sdk_vertrag_lockfile_nur_registry`, opt-in `test_vertrag_sdk[…]`.
+- **4a** (`poc.py`, `Dockerfile.poc`, `test_poc.py`): `test_env_regeln_*` (inklusive K3), `test_modell_mock_env_gesetzt`, `test_modell_mock_bereit_timeout`, `test_neustart_mit_mock`, `test_rolle_entfernen_nennt_llm`, `test_aufraeumen_erfasst_llm_ueber_praefix`, `test_mock_container_haertung` (Argumente des Attrappen-`run`), `test_lade_rolle_ohne_modell_mock_kompatibel`, `test_start_fehler_mock_liest_llm_logs`, K4 in `test_dockerfile_und_ignore`, W1-Listen.
+- **4b** (`poc.py`, `SKILL.md` Platzhalterzeile, `test_poc.py`, `test_poc_docker.py`): `test_modell_*` (inklusive K1 Exit 2, K10, `test_modell_budget`), `test_modell_protokoll_maskierung_ende_zu_ende`, `test_12_modell_mock`.
+- **6a** (`expected/*.json`, `auswertung.py`, `testdaten/bericht_ok.json`, `test_auswertung.py`, `test_skill_text.py` nur B1-neu): alle `test_auswertung_tf3_*`, die B2-Anpassungen.
+- **6b** (`evals/fixture-ki/` neu, `test_fixture.py`, `test_auswertung.py` nur Temp-Repo und opt-in Eval): `test_ki_fixture_*`, `test_app_fixtures_benennen_alle_tmpl_um`, `test_temp_repo_ki_skill_ohne_erwartung`, `test_eval_fixture_ki`.
+
+**W2-neu** (Die Env-Regel ohne Mock ändert TF1-Läufe, und SKILL.md sagt nicht, was bei Exit 2 zu tun ist)
+**SKILL.md Schritt 3 (Task 5):** „Endet `starten` mit Exit 2 und der Meldung `--env <NAME>: nicht erlaubter Host <host>`, lässt du diese Variable weg und rufst `starten` erneut auf. Das zählt nicht als der eine korrigierte Versuch. Die Meldung nennt Name und Host, nie den Wert.“ Test in Task 5: `test_skill_env_exit2_variable_weglassen`. Test in 4a: `test_env_regeln_meldung_ohne_wert`.
+
+**W3-neu** (Die Umgebung des fixture-ki-Starts ist nicht als Ersatz festgelegt)
+**Zu W9:** `umgebung` **ersetzt** die Prozessumgebung von Node vollständig (Whitelist nach B3 plus `HOST`, `PORT`, `TMPDIR=<wurzel>`). Ohne `umgebung` bleibt es für fixture-web und fixture-deps bei `dict(os.environ, …)`. `npm ci` darf wie bisher erben. Test in 6b: `test_ki_start_umgebung_ohne_fremde_variablen`, mit gesetztem `OPENAI_ORG_ID`, `HTTPS_PROXY` und `NODE_OPTIONS` per monkeypatch, die nicht im Kind ankommen.
+
+**W4-neu** (Die „openai chat“-Ausnahme in W5 passt nicht zur Reihenfolge)
+**Zu W5:** Task 5 schreibt die Mock-Tabelle (in `references/pruefpunkte-ki.md`) ausschließlich aus `vertrag.md`. Ohne Vertragsergebnis ist jede Zeile „ungeprüft“. Läuft in der Verifikation der Opt-in-Start von fixture-ki grün und ist die Zeile noch „ungeprüft“, setzt die Hauptsession „`openai` chat“ in einem eigenen Commit auf geprüft.
+
+**W5-neu** (`test_12_modell_mock` läuft nach dem Abbau des Stacks)
+**Zu W8:** Der Test heißt `test_09b_modell_mock` und steht vor `test_10_aufraeumen` am selben `stack`, Rolle `p1` nach `test_09`. Seine Aufräumprüfung entfällt, weil `test_10` nach dem Lauf `praefix_reste == []` prüft und damit `-llm` mit abdeckt.
+
+**W6-neu** (Der Wächter in ESM ist nur mit festen Vorgaben machbar)
+**Zu B3 (Umsetzung):** Der Wächter liegt in `evals/sdk-vertrag/waechter.mjs`. `vertrag.mjs` lädt ihn als erste Zeile (`import "./waechter.mjs";`), die SDKs danach nur per `await import()`. Der Wächter ersetzt `globalThis.fetch`, `http.request`/`get`, `https.request`/`get`, `net.connect`/`createConnection` und `tls.connect` und ruft danach `module.syncBuiltinESMExports()` auf. Der Test kopiert `vertrag.mjs` und `waechter.mjs` in den Temp-Ordner mit `node_modules` und startet sie dort. `vertrag.mjs` schreibt je Zeile ein JSON-Objekt `{paket, weg, stream, art, ergebnis, waechter}` auf stdout. Der opt-in-Test ist je Zeile parametrisiert, damit `vertrag.md` direkt aus der pytest-Ausgabe entsteht.
+
+**Klein (R2):**
+- **K1 Netzregel API-Hosts:** Der Test prüft `https://api.openai.com/v1` und `https://api.anthropic.com` als URL (Bash und `poc`); `netzregel` bekommt keine Sonderliste für nackte Hostnamen. Nackte Nennungen deckt TF3-D3 über die Eval ab.
+- **K2 `--suche` nur mit Marker:** `poc.py modell --suche` akzeptiert nur `POCMARKER-[a-z0-9-]{1,40}`, sonst Exit 2. Test `test_modell_suche_nur_marker`.
+- **K3 Netzregel über geparste Antworten-Datei:** Die Netzregel läuft über den Rohtext und über `json.dumps(daten, ensure_ascii=False)` des geparsten Inhalts. Test `test_modell_netzregel_antworten` mit `:`-Variante.
+- **K4 Kein Echo/keine Body-Logs im Mock:** Der Mock gibt nie Teile eines Requests in einer Antwort zurück (kein Echo, keine Vorlagen) und schreibt nie Request-Inhalte auf stdout/stderr des Servers. Nach der `bereit`-Zeile schreibt er nichts mehr auf stdout.
+- **K5 Ausgabegröße/Zeichensatz:** Der Mock gibt reines ASCII-JSON aus (Nicht-ASCII als `\uXXXX`), höchstens 65 536 Bytes. `poc.py modell` nutzt `_entschaerfen`, nicht `_gib_aus`. Ein Exit ≠ 0 des Mock-CLI ergibt Exit 1 mit entschärftem stderr-Auszug.
+- **K6 Testname TF2-D6 (`test_auswertung_regression_nur_tf1`):** Der Name bleibt; nur der Docstring wird angepasst („TF1 vollständig, kein TF2-Schlüssel“). Die Prüfung lautet `{TF1-D1…D7} <= set(dod)` und `not any(k.startswith("TF2-") for k in dod)`.
+- **K7 Vorfallregel erweitern:** Auch der Ende-zu-Ende-Test in `test_poc.py` startet den Mock mit `start_new_session=True` und beendet ihn nur über das eigene Popen-Objekt (`killpg` nur bei `poll() is None`). Seine Docker-Attrappe ersetzt sich per `os.execvp` durch `node`. Ein Timeout in `_docker` beendet so den Node-Client selbst. Keine Mutationsproben an diesem Teardown.
+- **K8 Port-0-Zeile mit Frist:** Die `bereit`-Zeile wird mit Frist gelesen (Thread oder `selectors`, höchstens 10 s), danach geht stdout nach `DEVNULL` oder wird weiter gelesen.
+- **K9 Namensverbot auch in `scripts/` und `docker/`:** Die Briefings von 2, 3a-3c und 4a/4b nennen die W7- und B1-neu-Namen. Diese Namen dürfen auch nicht in Kommentaren oder Beispielen in `scripts/` und `docker/` stehen. Zusätzlich läuft `pytest evals/test_auswertung.py -k temp_repo`.
+- **K10 4b läuft `test_skill_text.py` ganz:** Statt `-k unterbefehl` läuft in 4b `test_skill_text.py` und `test_auswertung.py -k regeln`.
+- **K11 Vorrang:** Die Plan-Nachträge haben auch Vorrang vor dem Haupttext der Spec (Protokollformat B1, W8 ohne API-Request, W9-Pfad).
+- **K12 Maskierung längste zuerst:** Werte werden absteigend nach Länge ersetzt. Bei gleichem Wert gilt der erste Name.
+- **K13 6b darf einmal starten:** Der Implementierer von 6b darf den Opt-in-Start von fixture-ki einmal ausführen (`npm ci` aus der npm-Registry, Env nach B3).
+- **K14 TF3-D3 und die letzte Zeile:** TF3-D3 prüft von der letzten Zeile nur die `command`-Werte (`_command_werte`), nicht den Rohtext.
+
+**Realismus:**
+`poc.py modell` ruft Docker genau einmal auf (`exec -i <llm> node /poc/llm-mock.mjs …`), ohne Vorab-`inspect`.
+
+**Neue Reihenfolge (endgültig):** 1 → 2 → 3a → 3b → 3c → Hauptsession: Vertragstest (`vertrag.md`) → 4a → 4b → 5 → 6a → 6b.
