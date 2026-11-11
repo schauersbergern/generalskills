@@ -8,9 +8,11 @@
 //   node llm-mock.mjs --bereit   [--steuer-port <n>]            Exit 0, wenn die Steuerung antwortet, sonst 1. Keine Ausgabe.
 //   node llm-mock.mjs --setzen   [--steuer-port <n>]            stdin: Antwortliste (JSON-Array). Ersetzt die Warteschlange.
 //   node llm-mock.mjs --protokoll [--suche <m>] [--steuer-port <n>]
-//       stdin: {"werte":[{"name":"N","wert":"..."}]}. stdout: {"eintraege":[{nr,methode,pfad,body}],"gekuerzt":n},
+//       stdin: {"werte":[{"name":"N","wert":"..."}]}. stdout: {"eintraege":[{nr,methode,pfad,body[,fundstelle]}],"gekuerzt":n},
 //       reines ASCII, höchstens 64 KiB. Die Werte werden roh und JSON-escaped durch <ENV:N> ersetzt (längste zuerst),
-//       erst danach wird jeder Body auf 8 KiB gekürzt. --suche sucht im maskierten Body.
+//       erst danach wird jeder Body auf 8 KiB gekürzt. --suche sucht im maskierten Body und liefert je Eintrag zusätzlich
+//       `fundstelle`: der einzeilige Ausschnitt (höchstens 300 Zeichen) um das erste Vorkommen, auch hinter der Kürzung.
+// API-Endpunkte (mit oder ohne /v1): POST chat/completions, responses, messages, embeddings sowie GET models.
 // Exit-Codes: 0 = ok, 1 = Fehler (Steuerung nicht erreichbar, Port belegt, …), 2 = ungültige Argumente oder ungültiger stdin.
 
 import http from "node:http";
@@ -91,6 +93,11 @@ function fehler(res, status, art, text) {
 
 function sse(res, objekt) {
   res.write(`data: ${JSON.stringify(objekt)}\n\n`);
+}
+
+// Benanntes SSE-Ereignis (`event:` plus `data:`), wie es die Responses-API und die Messages-API senden.
+function sseEreignis(res, name, objekt) {
+  res.write(`event: ${name}\ndata: ${JSON.stringify(objekt)}\n\n`);
 }
 
 function stuecke(text, laenge) {
@@ -212,6 +219,21 @@ function kuerzen(text) {
   return bytes.subarray(0, BODY_MAX_AUSGABE).toString("utf8");
 }
 
+const FUNDSTELLE_MAX = 300;
+const FUNDSTELLE_VOR = 60;
+
+// Ausschnitt des (maskierten, ungekürzten) Bodys um das erste Vorkommen von `suche`, höchstens 300 Zeichen, einzeilig.
+// Der Marker (höchstens 200 Zeichen) steht immer vollständig darin.
+function fundstelle(body, suche) {
+  const i = body.indexOf(suche);
+  if (i < 0) return "";
+  let von = Math.max(0, i - FUNDSTELLE_VOR);
+  let bis = Math.min(body.length, von + FUNDSTELLE_MAX);
+  if (von > 0 && von < i && /[\udc00-\udfff]/.test(body[von])) von += 1; // kein halbes Ersatzzeichenpaar am Rand
+  if (bis < body.length && bis > i + suche.length && /[\ud800-\udbff]/.test(body[bis - 1])) bis -= 1;
+  return body.slice(von, bis).replace(/[\r\n\u2028\u2029]/g, " ");
+}
+
 function protokollAusgabe(werte, suche) {
   const maske = maskierer(werte);
   let eintraege = zustand.ring.map((e) => ({
@@ -221,7 +243,11 @@ function protokollAusgabe(werte, suche) {
     body: maske(e.body), // erst maskieren, dann kürzen
   }));
   if (suche !== null) eintraege = eintraege.filter((e) => e.body.includes(suche));
-  const strings = eintraege.map((e) => jsonAscii({ ...e, body: kuerzen(e.body) }));
+  const strings = eintraege.map((e) => {
+    const ausgabe = { ...e, body: kuerzen(e.body) };
+    if (suche !== null) ausgabe.fundstelle = fundstelle(e.body, suche);
+    return jsonAscii(ausgabe);
+  });
   let gekuerzt = 0;
   const gesamt = () => {
     const kopf = `{"eintraege":[`;
@@ -301,6 +327,180 @@ function chatCompletions(res, daten, body) {
   }
 }
 
+// ---------------------------------------------------------------- Responses
+
+function antwortZeichen(antwort) {
+  return antwort.typ === "text" ? antwort.text.length : JSON.stringify(antwort.argumente).length + antwort.name.length;
+}
+
+function usageResponses(bodyLaenge, antwort) {
+  const eingabe = tokenZahl(bodyLaenge);
+  const ausgabe = tokenZahl(antwortZeichen(antwort));
+  return {
+    input_tokens: eingabe,
+    input_tokens_details: { cached_tokens: 0 },
+    output_tokens: ausgabe,
+    output_tokens_details: { reasoning_tokens: 0 },
+    total_tokens: eingabe + ausgabe,
+  };
+}
+
+function responseObjekt(id, erstellt, status, output, usage) {
+  return {
+    id,
+    object: "response",
+    created_at: erstellt,
+    status,
+    error: null,
+    incomplete_details: null,
+    instructions: null,
+    max_output_tokens: null,
+    model: MODELL,
+    output,
+    parallel_tool_calls: true,
+    previous_response_id: null,
+    reasoning: { effort: null, summary: null },
+    store: false,
+    temperature: 1,
+    text: { format: { type: "text" } },
+    tool_choice: "auto",
+    tools: [],
+    top_p: 1,
+    truncation: "disabled",
+    usage,
+    user: null,
+    metadata: {},
+  };
+}
+
+// Das fertige Output-Item. `status` ist beim Anlegen „in_progress“ (ohne Inhalt), am Ende „completed“.
+function responsesItem(antwort, ids, status, fertig) {
+  if (antwort.typ === "text") {
+    return {
+      id: ids.item,
+      type: "message",
+      status,
+      role: "assistant",
+      content: fertig ? [{ type: "output_text", text: antwort.text, annotations: [] }] : [],
+    };
+  }
+  return {
+    id: ids.item,
+    type: "function_call",
+    status,
+    call_id: ids.aufruf,
+    name: antwort.name,
+    arguments: fertig ? JSON.stringify(antwort.argumente) : "",
+  };
+}
+
+function responsesIds(antwort) {
+  const ids = { antwort: eindeutigeKennung("resp_") };
+  if (antwort.typ === "text") ids.item = eindeutigeKennung("msg_");
+  else {
+    ids.item = eindeutigeKennung("fc_");
+    ids.aufruf = eindeutigeKennung("call_");
+  }
+  return ids;
+}
+
+function responsesNichtStreamend(res, antwort, bodyLaenge) {
+  const ids = responsesIds(antwort);
+  const item = responsesItem(antwort, ids, "completed", true);
+  antwortJson(res, 200, responseObjekt(ids.antwort, Math.floor(Date.now() / 1000), "completed", [item], usageResponses(bodyLaenge, antwort)));
+}
+
+function responsesStreamend(res, antwort, bodyLaenge) {
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+  const ids = responsesIds(antwort);
+  const erstellt = Math.floor(Date.now() / 1000);
+  let folge = 0;
+  const ereignis = (typ, felder) => sseEreignis(res, typ, { type: typ, ...felder, sequence_number: folge++ });
+  const fertig = responsesItem(antwort, ids, "completed", true);
+
+  ereignis("response.created", { response: responseObjekt(ids.antwort, erstellt, "in_progress", [], null) });
+  ereignis("response.output_item.added", { output_index: 0, item: responsesItem(antwort, ids, "in_progress", false) });
+  if (antwort.typ === "text") {
+    const teil = { item_id: ids.item, output_index: 0, content_index: 0 };
+    ereignis("response.content_part.added", { ...teil, part: { type: "output_text", text: "", annotations: [] } });
+    for (const s of stuecke(antwort.text, 12)) ereignis("response.output_text.delta", { ...teil, delta: s, logprobs: [] });
+    ereignis("response.output_text.done", { ...teil, text: antwort.text, logprobs: [] });
+    ereignis("response.content_part.done", { ...teil, part: fertig.content[0] });
+  } else {
+    const teil = { item_id: ids.item, output_index: 0 };
+    for (const s of stuecke(fertig.arguments, 12)) ereignis("response.function_call_arguments.delta", { ...teil, delta: s });
+    ereignis("response.function_call_arguments.done", { ...teil, name: antwort.name, arguments: fertig.arguments });
+  }
+  ereignis("response.output_item.done", { output_index: 0, item: fertig });
+  ereignis("response.completed", { response: responseObjekt(ids.antwort, erstellt, "completed", [fertig], usageResponses(bodyLaenge, antwort)) });
+  res.end();
+}
+
+function responses(res, daten, body) {
+  const antwort = naechsteAntwort(body);
+  if (daten.stream === true) responsesStreamend(res, antwort, Buffer.byteLength(body));
+  else responsesNichtStreamend(res, antwort, Buffer.byteLength(body));
+}
+
+// ---------------------------------------------------------------- Messages (Anthropic)
+
+function usageMessages(eingabe, ausgabe) {
+  return { input_tokens: eingabe, output_tokens: ausgabe, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+}
+
+function messagesNichtStreamend(res, antwort, bodyLaenge) {
+  const block =
+    antwort.typ === "text"
+      ? { type: "text", text: antwort.text }
+      : { type: "tool_use", id: eindeutigeKennung("toolu_"), name: antwort.name, input: antwort.argumente };
+  antwortJson(res, 200, {
+    id: eindeutigeKennung("msg_"),
+    type: "message",
+    role: "assistant",
+    model: MODELL,
+    content: [block],
+    stop_reason: antwort.typ === "text" ? "end_turn" : "tool_use",
+    stop_sequence: null,
+    usage: usageMessages(tokenZahl(bodyLaenge), tokenZahl(antwortZeichen(antwort))),
+  });
+}
+
+function messagesStreamend(res, antwort, bodyLaenge) {
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+  const eingabe = tokenZahl(bodyLaenge);
+  const ausgabe = tokenZahl(antwortZeichen(antwort));
+  const ereignis = (typ, felder) => sseEreignis(res, typ, { type: typ, ...felder });
+  ereignis("message_start", {
+    message: {
+      id: eindeutigeKennung("msg_"),
+      type: "message",
+      role: "assistant",
+      model: MODELL,
+      content: [],
+      stop_reason: null,
+      stop_sequence: null,
+      usage: { ...usageMessages(eingabe, 1) },
+    },
+  });
+  if (antwort.typ === "text") {
+    ereignis("content_block_start", { index: 0, content_block: { type: "text", text: "" } });
+    for (const s of stuecke(antwort.text, 12)) ereignis("content_block_delta", { index: 0, delta: { type: "text_delta", text: s } });
+  } else {
+    ereignis("content_block_start", { index: 0, content_block: { type: "tool_use", id: eindeutigeKennung("toolu_"), name: antwort.name, input: {} } });
+    for (const s of stuecke(JSON.stringify(antwort.argumente), 12)) ereignis("content_block_delta", { index: 0, delta: { type: "input_json_delta", partial_json: s } });
+  }
+  ereignis("content_block_stop", { index: 0 });
+  ereignis("message_delta", { delta: { stop_reason: antwort.typ === "text" ? "end_turn" : "tool_use", stop_sequence: null }, usage: { output_tokens: ausgabe } });
+  ereignis("message_stop", {});
+  res.end();
+}
+
+function messages(res, daten, body) {
+  const antwort = naechsteAntwort(body);
+  if (daten.stream === true) messagesStreamend(res, antwort, Buffer.byteLength(body));
+  else messagesNichtStreamend(res, antwort, Buffer.byteLength(body));
+}
+
 // ---------------------------------------------------------------- Embeddings
 
 function einzelVektor(eingabe, dimension) {
@@ -359,6 +559,8 @@ function normalisierePfad(url) {
 
 const ROUTEN = {
   "POST /chat/completions": { json: true, ablauf: (res, daten, body) => chatCompletions(res, daten, body) },
+  "POST /responses": { json: true, ablauf: (res, daten, body) => responses(res, daten, body) },
+  "POST /messages": { json: true, ablauf: (res, daten, body) => messages(res, daten, body) },
   "POST /embeddings": { json: true, ablauf: (res, daten) => embeddings(res, daten) },
   "GET /models": { json: false, ablauf: (res) => modelle(res) },
 };

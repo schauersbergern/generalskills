@@ -1,4 +1,4 @@
-"""Tests für docker/llm-mock.mjs (Modell-Mock, Kern: Chat Completions, Embeddings, Models, Steuerung).
+"""Tests für docker/llm-mock.mjs (Modell-Mock: Chat Completions, Responses, Messages, Embeddings, Models, Steuerung).
 
 Aufruf: python3 -m pytest security-audit/scripts/test_llm_mock.py -q
 Der Mock läuft lokal mit Node auf 127.0.0.1 (Port 0, Ports aus der bereit-Zeile) als eigene Prozessgruppe
@@ -718,3 +718,372 @@ def test_mock_cli_werte_erscheinen_nie_auf_stderr_oder_stdout(mock):
     mock.beenden()
     out, err = mock.rest()
     assert wert.encode() not in out + err
+
+
+# --------------------------------------------------------------- Responses und Messages (3b)
+
+STREAM = pytest.mark.parametrize("stream", [False, True], ids=["nicht_streamend", "streamend"])
+
+
+def sse_ereignisse(roh):
+    """Parst einen SSE-Strom mit `event:`- und `data:`-Zeilen. Gibt [(event, daten-dict)] zurück.
+
+    Das Format ist streng: je Block genau eine event-Zeile und eine data-Zeile, getrennt durch eine Leerzeile.
+    Der Event-Name muss dem `type` im JSON entsprechen (beide SDKs lesen je eines davon).
+    """
+    text = roh.decode("utf-8")
+    assert text.endswith("\n\n"), "Strom endet nicht mit einer Leerzeile"
+    ereignisse = []
+    for block in text[:-2].split("\n\n"):
+        zeilen = block.split("\n")
+        assert len(zeilen) == 2, block
+        assert zeilen[0].startswith("event: ") and zeilen[1].startswith("data: "), block
+        name, daten = zeilen[0][len("event: "):], json.loads(zeilen[1][len("data: "):])
+        assert daten["type"] == name, (name, daten["type"])
+        ereignisse.append((name, daten))
+    return ereignisse
+
+
+def responses_aufruf(m, inhalt="hallo", stream=False, pfad="/v1/responses", **extra):
+    """Gibt (Antwortobjekt, Ereignisliste oder None) zurück. Im Stream ist das Objekt das aus `response.completed`."""
+    body = {"model": "x", "input": inhalt, "stream": stream, **extra}
+    status, header, roh = anfrage(m.api, "POST", pfad, body)
+    assert status == 200, roh
+    if not stream:
+        assert header["content-type"].startswith("application/json")
+        return json.loads(roh), None
+    assert header["content-type"].startswith("text/event-stream")
+    ereignisse = sse_ereignisse(roh)
+    assert ereignisse[-1][0] == "response.completed"
+    return ereignisse[-1][1]["response"], ereignisse
+
+
+def messages_aufruf(m, inhalt="hallo", stream=False, pfad="/v1/messages", **extra):
+    body = {"model": "x", "max_tokens": 64, "messages": [{"role": "user", "content": inhalt}], "stream": stream, **extra}
+    status, header, roh = anfrage(m.api, "POST", pfad, body, {"x-api-key": "k", "anthropic-version": "2023-06-01"})
+    assert status == 200, roh
+    if not stream:
+        assert header["content-type"].startswith("application/json")
+        return json.loads(roh), None
+    assert header["content-type"].startswith("text/event-stream")
+    return None, sse_ereignisse(roh)
+
+
+def daten_logprobs(ereignisse):
+    """Die API sendet `logprobs: []` an Text-Delta und -Done; das AI SDK liest das Feld."""
+    return all(d.get("logprobs") == [] for n, d in ereignisse if n in ("response.output_text.delta", "response.output_text.done"))
+
+
+def usage_responses_pruefen(u):
+    assert u["input_tokens"] >= 1 and u["output_tokens"] >= 1
+    assert u["total_tokens"] == u["input_tokens"] + u["output_tokens"]
+    assert u["input_tokens_details"]["cached_tokens"] == 0
+    assert u["output_tokens_details"]["reasoning_tokens"] == 0
+
+
+def response_rahmen_pruefen(r, status):
+    assert r["object"] == "response" and r["id"].startswith("resp_") and isinstance(r["created_at"], int)
+    assert r["status"] == status and r["model"] == "poc-mock"  # kein Echo des Request-Modells
+    assert r["error"] is None and r["incomplete_details"] is None
+    assert isinstance(r["output"], list)
+
+
+@STREAM
+def test_mock_responses_text_und_tool(mock, stream):
+    text = "Dies ist eine längere Antwort mit mehreren Stücken."
+    argumente = {"pfad": "/etc; echo poc", "tiefe": 2, "liste": ["a", "b"]}
+    setzen(mock, [{"text": text}, {"werkzeug": {"name": "tool_r", "argumente": argumente}}])
+
+    # --- Text
+    r, ereignisse = responses_aufruf(mock, "frage", stream, model="irgendein-modell-xyz")
+    response_rahmen_pruefen(r, "completed")
+    usage_responses_pruefen(r["usage"])
+    (item,) = r["output"]
+    assert item["type"] == "message" and item["id"].startswith("msg_") and item["status"] == "completed"
+    assert item["role"] == "assistant"
+    assert item["content"] == [{"type": "output_text", "text": text, "annotations": []}]
+    if stream:
+        namen = [n for n, _ in ereignisse]
+        assert namen[:3] == ["response.created", "response.output_item.added", "response.content_part.added"]
+        assert namen[-4:] == ["response.output_text.done", "response.content_part.done", "response.output_item.done", "response.completed"]
+        deltas = [d for n, d in ereignisse if n == "response.output_text.delta"]
+        assert len(deltas) >= 3 and set(namen[3:-4]) == {"response.output_text.delta"}
+        assert "".join(d["delta"] for d in deltas) == text
+        assert all(d["logprobs"] == [] for d in deltas) and daten_logprobs(ereignisse)
+        daten = dict(ereignisse)
+        angelegt = daten["response.created"]["response"]
+        response_rahmen_pruefen(angelegt, "in_progress")
+        assert angelegt["output"] == [] and angelegt["id"] == r["id"]
+        hinzu = daten["response.output_item.added"]
+        assert hinzu["output_index"] == 0 and hinzu["item"]["id"] == item["id"] and hinzu["item"]["status"] == "in_progress"
+        assert hinzu["item"]["type"] == "message" and hinzu["item"]["content"] == []
+        teil = daten["response.content_part.added"]
+        assert teil["part"] == {"type": "output_text", "text": "", "annotations": []}
+        for n, d in ereignisse:
+            if n.startswith("response.output_text.") or n.startswith("response.content_part."):
+                assert (d["item_id"], d["output_index"], d["content_index"]) == (item["id"], 0, 0), n
+        assert daten["response.output_text.done"]["text"] == text
+        assert daten["response.content_part.done"]["part"] == item["content"][0]
+        assert daten["response.output_item.done"]["item"] == item and daten["response.output_item.done"]["output_index"] == 0
+
+    # --- Tool
+    r, ereignisse = responses_aufruf(mock, "frage", stream)
+    response_rahmen_pruefen(r, "completed")
+    usage_responses_pruefen(r["usage"])
+    (item,) = r["output"]
+    assert item["type"] == "function_call" and item["id"].startswith("fc_") and item["status"] == "completed"
+    assert item["call_id"].startswith("call_") and item["name"] == "tool_r"
+    assert isinstance(item["arguments"], str) and json.loads(item["arguments"]) == argumente
+    if stream:
+        namen = [n for n, _ in ereignisse]
+        assert namen[:2] == ["response.created", "response.output_item.added"]
+        assert namen[-3:] == ["response.function_call_arguments.done", "response.output_item.done", "response.completed"]
+        deltas = [d for n, d in ereignisse if n == "response.function_call_arguments.delta"]
+        assert len(deltas) >= 3 and set(namen[2:-3]) == {"response.function_call_arguments.delta"}
+        assert "".join(d["delta"] for d in deltas) == item["arguments"]
+        daten = dict(ereignisse)
+        hinzu = daten["response.output_item.added"]
+        assert hinzu["output_index"] == 0 and hinzu["item"]["type"] == "function_call" and hinzu["item"]["status"] == "in_progress"
+        assert (hinzu["item"]["id"], hinzu["item"]["call_id"], hinzu["item"]["name"], hinzu["item"]["arguments"]) == (item["id"], item["call_id"], "tool_r", "")
+        for n, d in ereignisse:
+            if n.startswith("response.function_call_arguments."):
+                assert (d["item_id"], d["output_index"]) == (item["id"], 0), n
+        assert daten["response.function_call_arguments.done"]["arguments"] == item["arguments"]
+        assert daten["response.output_item.done"]["item"] == item
+        assert "response.content_part.added" not in namen
+
+    if stream:
+        # sequence_number an jedem Event, streng monoton und lückenlos ab 0 (auch im zweiten Strom)
+        assert [d["sequence_number"] for _, d in ereignisse] == list(range(len(ereignisse)))
+
+
+@STREAM
+def test_mock_responses_ohne_v1_und_ohne_passenden_eintrag(mock, stream):
+    r, _ = responses_aufruf(mock, "x", stream, pfad="/responses")
+    assert r["output"][0]["content"][0]["text"] == "ok"
+    r, _ = responses_aufruf(mock, "x", stream, pfad="/v1/responses/")
+    assert r["output"][0]["content"][0]["text"] == "ok"
+
+
+@STREAM
+def test_mock_messages_text_und_tool(mock, stream):
+    text = "Dies ist eine längere Antwort mit mehreren Stücken."
+    argumente = {"pfad": "/etc; echo poc", "tiefe": 2, "liste": ["a", "b"]}
+    setzen(mock, [{"text": text}, {"werkzeug": {"name": "tool_m", "argumente": argumente}}])
+
+    def zusammenbauen(ereignisse):
+        """Setzt aus dem Strom die Nachricht zusammen, so wie es das Anthropic-SDK tut."""
+        namen = [n for n, _ in ereignisse]
+        assert namen[0] == "message_start" and namen[-2:] == ["message_delta", "message_stop"]
+        start = ereignisse[0][1]["message"]
+        assert start["content"] == [] and start["role"] == "assistant" and start["type"] == "message"
+        assert start["stop_reason"] is None and start["stop_sequence"] is None and start["model"] == "poc-mock"
+        assert start["usage"]["input_tokens"] >= 1 and "output_tokens" in start["usage"]
+        bloecke = {}
+        offen = None
+        for n, d in ereignisse[1:-2]:
+            if n == "content_block_start":
+                assert offen is None and d["index"] == len(bloecke)
+                offen = d["index"]
+                bloecke[offen] = {"start": d["content_block"], "teile": []}
+            elif n == "content_block_delta":
+                assert offen == d["index"]
+                bloecke[offen]["teile"].append(d["delta"])
+            else:
+                assert n == "content_block_stop" and offen == d["index"]
+                offen = None
+        assert offen is None
+        ende = ereignisse[-2][1]
+        return start, bloecke, ende
+
+    # --- Text
+    d, ereignisse = messages_aufruf(mock, "frage", stream, model="irgendein-modell-xyz")
+    if stream:
+        start, bloecke, ende = zusammenbauen(ereignisse)
+        assert [n for n, _ in ereignisse][1] == "content_block_start" and len(bloecke) == 1
+        assert bloecke[0]["start"] == {"type": "text", "text": ""}
+        assert len(bloecke[0]["teile"]) >= 3 and all(t["type"] == "text_delta" for t in bloecke[0]["teile"])
+        assert "".join(t["text"] for t in bloecke[0]["teile"]) == text
+        assert ende["delta"] == {"stop_reason": "end_turn", "stop_sequence": None} and ende["usage"]["output_tokens"] >= 1
+        assert [n for n, _ in ereignisse][-3] == "content_block_stop"
+        assert start["id"].startswith("msg_")
+    else:
+        assert d["type"] == "message" and d["role"] == "assistant" and d["id"].startswith("msg_")
+        assert d["model"] == "poc-mock"
+        assert d["content"] == [{"type": "text", "text": text}]
+        assert d["stop_reason"] == "end_turn" and d["stop_sequence"] is None
+        assert d["usage"]["input_tokens"] >= 1 and d["usage"]["output_tokens"] >= 1
+
+    # --- Tool
+    d, ereignisse = messages_aufruf(mock, "frage", stream)
+    if stream:
+        start, bloecke, ende = zusammenbauen(ereignisse)
+        assert len(bloecke) == 1
+        kopf = bloecke[0]["start"]
+        assert kopf["type"] == "tool_use" and kopf["id"].startswith("toolu_") and kopf["name"] == "tool_m" and kopf["input"] == {}
+        assert len(bloecke[0]["teile"]) >= 3 and all(t["type"] == "input_json_delta" for t in bloecke[0]["teile"])
+        assert json.loads("".join(t["partial_json"] for t in bloecke[0]["teile"])) == argumente
+        assert ende["delta"] == {"stop_reason": "tool_use", "stop_sequence": None} and ende["usage"]["output_tokens"] >= 1
+    else:
+        assert d["type"] == "message" and d["role"] == "assistant" and d["model"] == "poc-mock"
+        (block,) = d["content"]
+        assert block["type"] == "tool_use" and block["id"].startswith("toolu_") and block["name"] == "tool_m"
+        assert block["input"] == argumente  # Objekt, kein String
+        assert d["stop_reason"] == "tool_use" and d["stop_sequence"] is None
+        assert d["usage"]["output_tokens"] >= 1
+
+
+@STREAM
+def test_mock_messages_ohne_v1(mock, stream):
+    setzen(mock, [{"text": "eins"}, {"text": "zwei"}, {"text": "drei"}])
+
+    def text(d, ereignisse):
+        if not stream:
+            return d["content"][0]["text"]
+        return "".join(x["delta"]["text"] for n, x in ereignisse if n == "content_block_delta")
+
+    assert text(*messages_aufruf(mock, "x", stream, pfad="/messages")) == "eins"
+    assert text(*messages_aufruf(mock, "x", stream, pfad="/v1/messages")) == "zwei"
+    assert text(*messages_aufruf(mock, "x", stream, pfad="/messages/")) == "drei"  # ein abschließendes „/“ ist egal
+    assert [e["pfad"] for e in protokoll(mock)["eintraege"]] == ["/messages", "/v1/messages", "/messages/"]
+
+
+def test_mock_responses_messages_falsche_methode_und_ungueltiger_body(mock):
+    for pfad in ("/v1/responses", "/v1/messages", "/messages"):
+        assert anfrage(mock.api, "GET", pfad)[0] == 405
+        assert anfrage(mock.api, "POST", pfad, "{kaputt")[0] == 400
+        assert anfrage(mock.api, "POST", pfad, "[1]")[0] == 400
+    assert len(protokoll(mock)["eintraege"]) == 9
+
+
+def test_mock_wenn_enthaelt_gilt_fuer_responses_und_messages_streamend(mock):
+    setzen(mock, [
+        {"text": "nur-responses", "wenn_enthaelt": "POCMARKER-p3-resp"},
+        {"werkzeug": {"name": "nur_messages", "argumente": {"a": 1}}, "wenn_enthaelt": "POCMARKER-p3-msgs"},
+        {"text": "ohne-marker"},
+    ])
+    # ohne Marker bekommt der Request den ersten Eintrag ohne Marker, danach „ok“
+    r, _ = responses_aufruf(mock, "ohne", True)
+    assert r["output"][0]["content"][0]["text"] == "ohne-marker"
+    r, _ = responses_aufruf(mock, "ohne", True)
+    assert r["output"][0]["content"][0]["text"] == "ok"
+    # der Marker im Body (hier in der Eingabe) findet seinen Eintrag, auch streamend; ein fremder Marker nicht
+    _, ereignisse = messages_aufruf(mock, "POCMARKER-p3-fremd", True)
+    assert "".join(x["delta"]["text"] for n, x in ereignisse if n == "content_block_delta") == "ok"
+    r, ereignisse = responses_aufruf(mock, "POCMARKER-p3-resp", True)
+    assert r["output"][0]["content"][0]["text"] == "nur-responses"
+    assert [n for n, _ in ereignisse].count("response.output_text.delta") >= 1
+    r, _ = responses_aufruf(mock, "POCMARKER-p3-resp", False)
+    assert r["output"][0]["content"][0]["text"] == "ok"  # verbraucht
+    _, ereignisse = messages_aufruf(mock, "mit POCMARKER-p3-msgs", True)
+    kopf = ereignisse[1][1]["content_block"]
+    assert kopf["type"] == "tool_use" and kopf["name"] == "nur_messages"
+    d, _ = messages_aufruf(mock, "POCMARKER-p3-msgs", False)
+    assert d["content"] == [{"type": "text", "text": "ok"}]  # verbraucht
+
+    # nicht streamend: derselbe Mechanismus über die Formate hinweg
+    setzen(mock, [{"text": "m", "wenn_enthaelt": "POCMARKER-p3-nstr"}])
+    d, _ = messages_aufruf(mock, "ohne", False)
+    assert d["content"][0]["text"] == "ok"
+    d, _ = messages_aufruf(mock, "POCMARKER-p3-nstr", False)
+    assert d["content"][0]["text"] == "m"
+
+
+def test_mock_tool_ids_eindeutig_ueber_alle_formate(mock):
+    setzen(mock, [{"werkzeug": {"name": "t", "argumente": {}}} for _ in range(14)])
+    ids = []
+    for stream in (False, False, True, True):
+        r, _ = responses_aufruf(mock, "x", stream)
+        (item,) = r["output"]
+        ids += [item["id"], item["call_id"]]
+        d, ereignisse = messages_aufruf(mock, "x", stream)
+        ids.append(d["content"][0]["id"] if not stream else ereignisse[1][1]["content_block"]["id"])
+    for _ in range(2):
+        ids.append(chat_json(mock)["choices"][0]["message"]["tool_calls"][0]["id"])
+    assert len(ids) == 14 and len(set(ids)) == 14
+    # Antwort-IDs (resp_, msg_) sind ebenfalls je Aufruf eindeutig
+    setzen(mock, [])
+    antworten = [responses_aufruf(mock, "x", False)[0]["id"] for _ in range(3)]
+    antworten += [messages_aufruf(mock, "x", False)[0]["id"] for _ in range(3)]
+    assert len(set(antworten)) == 6
+
+
+def test_mock_responses_messages_kein_echo_und_protokoll(mock):
+    geheim = "GEHEIM-ECHO-4712"
+    for stream in (False, True):
+        for pfad, bau in (("/v1/responses", {"model": geheim, "input": geheim}), ("/v1/messages", {"model": geheim, "max_tokens": 5, "messages": [{"role": "user", "content": geheim}]})):
+            status, _, roh = anfrage(mock.api, "POST", pfad, {**bau, "stream": stream, "instructions": geheim})
+            assert status == 200 and geheim.encode() not in roh
+    p = protokoll(mock, suche=geheim)
+    assert [e["pfad"] for e in p["eintraege"]] == ["/v1/responses", "/v1/messages"] * 2
+    mock.beenden()
+    out, err = mock.rest()
+    assert out == b"" and err == b""
+
+
+# --------------------------------------------------------------- Fundstelle bei --suche
+
+
+def test_mock_suche_fundstelle_hinter_kuerzung(mock):
+    marker = "POCMARKER-p1-fund"
+    body = "a" * (BODY_GRENZE + 1000) + f" davor {marker} danach " + "b" * 500
+    anfrage(mock.api, "POST", "/v1/nix", body)
+    (e,) = protokoll(mock, suche=marker)["eintraege"]
+    assert marker not in e["body"] and len(e["body"].encode()) <= BODY_GRENZE  # der Marker liegt hinter der Kürzung
+    f = e["fundstelle"]
+    assert marker in f and " davor " in f and " danach " in f
+    assert len(f) <= 300 and "\n" not in f and "\r" not in f
+    # der Ausschnitt stammt wirklich aus dem Body: zusammenhängend und um den Marker
+    assert body.index(f) < body.index(marker) < body.index(f) + len(f)
+
+
+def test_mock_suche_fundstelle_einzeilig_und_maskiert(mock):
+    marker = "POCMARKER-p1-zeile"
+    wert = "zq7Xk9-geheimer-wert-4711"
+    anfrage(mock.api, "POST", "/v1/nix", f"kopf\nzeile eins\r\nzeile zwei {marker} {wert}\n ende\n")
+    (e,) = protokoll(mock, [{"name": "CRM_TOKEN", "wert": wert}], suche=marker)["eintraege"]
+    f = e["fundstelle"]
+    assert re.search(r"[\r\n  ]", f) is None
+    assert f.startswith("kopf zeile eins") and f"{marker} <ENV:CRM_TOKEN>" in f  # Zeilenumbrüche werden zu Leerzeichen, Wert maskiert
+    assert wert not in f
+
+
+def test_mock_suche_fundstelle_ist_hoechstens_300_zeichen_und_enthaelt_langen_marker(mock):
+    marker = "POCMARKER-" + "x" * 190  # 200 Zeichen, die Obergrenze für --suche
+    assert len(marker) == 200
+    anfrage(mock.api, "POST", "/v1/nix", "v" * 1000 + marker + "n" * 1000)
+    anfrage(mock.api, "POST", "/v1/nix", marker + "n" * 1000)  # Marker ganz am Anfang
+    anfrage(mock.api, "POST", "/v1/nix", "v" * 1000 + marker)  # Marker ganz am Ende
+    e1, e2, e3 = protokoll(mock, suche=marker)["eintraege"]
+    for e in (e1, e2, e3):
+        assert marker in e["fundstelle"] and 200 < len(e["fundstelle"]) <= 300
+    assert e2["fundstelle"].startswith(marker) and e3["fundstelle"].endswith(marker)
+
+
+def test_mock_suche_fundstelle_nimmt_das_erste_vorkommen_und_bleibt_ascii(mock):
+    marker = "POCMARKER-p1-erst"
+    anfrage(mock.api, "POST", "/v1/nix", f"é{marker}é erstes " + "x" * 400 + f" {marker} zweites")
+    r = cli("--protokoll", mock.steuer, json.dumps({"werte": []}), ["--suche", marker])
+    assert r.returncode == 0 and r.stdout.isascii() and b"\\u00e9" in r.stdout
+    (e,) = json.loads(r.stdout)["eintraege"]
+    assert "erstes" in e["fundstelle"] and "zweites" not in e["fundstelle"]
+    assert e["fundstelle"].startswith("é" + marker + "é")
+
+
+def test_mock_protokoll_ohne_suche_hat_keine_fundstelle(mock):
+    chat_json(mock, "POCMARKER-p1-keine")
+    (e,) = protokoll(mock)["eintraege"]
+    assert "fundstelle" not in e
+    (e,) = protokoll(mock, suche="POCMARKER-p1-keine")["eintraege"]
+    assert "POCMARKER-p1-keine" in e["fundstelle"]
+
+
+def test_mock_protokoll_mit_fundstellen_bleibt_unter_64kib(mock):
+    marker = "POCMARKER-p1-gross"
+    for i in range(8):
+        anfrage(mock.api, "POST", "/v1/nix", "é" * 4000 + marker + "é" * 400 + f"{i}")
+    r = cli("--protokoll", mock.steuer, json.dumps({"werte": []}), ["--suche", marker])
+    assert r.returncode == 0 and r.stdout.isascii() and len(r.stdout.rstrip(b"\n")) <= 65536
+    p = json.loads(r.stdout)
+    assert p["gekuerzt"] > 0 and p["gekuerzt"] + len(p["eintraege"]) == 8
+    assert all(marker in e["fundstelle"] for e in p["eintraege"])
