@@ -1,6 +1,6 @@
 # Spec TF3: Prüfpunkte für KI- und Agenten-Apps
 
-Stand: nach Spec-Review R1 (1/10/14, alle eingearbeitet). Feature-File `docs/features/2026-11-09-security-audit.md`, TF3, DoD TF3-D1 bis TF3-D5. Branch `skills/audit-ki`, gestapelt auf `skills/audit-lieferkette` (TF2, PR #12). Mit „TF2-Plan“ ist `docs/superpowers/plans/2026-11-10-tf2-lieferkette-secrets.md` gemeint, die Nachträge B2 (Erwartung/Auswertung) und W-c (Hinweise wörtlich).
+Stand: nach Spec-Review R2. **Die „Nachträge nach Spec-Review R2“ am Ende haben Vorrang vor dem Text darüber.** Feature-File `docs/features/2026-11-09-security-audit.md`, TF3, DoD TF3-D1 bis TF3-D5. Branch `skills/audit-ki`, gestapelt auf `skills/audit-lieferkette` (TF2, PR #12). Mit „TF2-Plan“ ist `docs/superpowers/plans/2026-11-10-tf2-lieferkette-secrets.md` gemeint, die Nachträge B2 (Erwartung/Auswertung) und W-c (Hinweise wörtlich).
 
 ## Ziel
 
@@ -281,3 +281,80 @@ Der Befehl ist ein einzelner einfacher Befehl, nutzt nur die Standardbibliothek,
 - Vorfall 2026-11-10: Signale gehen nur an selbst gestartete Gruppen. Neue Tests starten Node mit `start_new_session=True` und beenden nur diese Gruppe, kein `pkill node`. Keine Mutationsproben an `_rolle_entfernen`, `aufraeumen` oder Signal-Logik.
 - Keine echten Modell-APIs, auch nicht in Tests. Der Mock läuft lokal auf 127.0.0.1 oder im `--internal`-Netz. Der Opt-in-SDK-Vertragstest lädt nur Pakete aus der npm-Registry.
 - Öffentliches Repo: keine Schlüssel, keine verwundbaren Lockfiles unter Standardnamen.
+
+## Nachträge nach Spec-Review R2 (Vorrang vor allem oben)
+
+**B1 `--env`-Regel (ersetzt Abschnitt 4, Start Punkt 3):**
+- Jeder `--env`-Wert läuft immer durch `netzregel.verstoesse_poc`, mit den erlaubten Hosts einschließlich `llm`. Ein Verstoß endet mit Exit 2, mit und ohne Mock. `DATABASE_URL=postgres://poc:poc@db:5432/poc` und `http://localhost:3000` bleiben damit erlaubt.
+- Die vier reservierten Namen `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `ANTHROPIC_BASE_URL` und `ANTHROPIC_API_KEY` enden nur bei gesetztem `--modell-mock` mit Exit 2.
+- SKILL.md Schritt 3 nennt diese vier Namen ausdrücklich als „aus `.env.example` nie übernehmen“.
+- Tests decken beide Fälle ab.
+
+**W1 Gegenlesen:** Der Satz „Die Hauptsession liest beim Gegenlesen den `poc` gegen das Protokoll“ entfällt, weil `neustart` den Mock-Zustand löscht. Stattdessen übernimmt der Prüfer den Protokollauszug in den `poc`: Nummer, Pfad und die Zeile, in der der Marker vorkommt (maskiert, höchstens 300 Zeichen). Die Hauptsession prüft beim Gegenlesen, ob Marker, Nummer und Wirkung zusammenpassen.
+
+**W2 Lieferweg der Felder:**
+- **Reviewer-Format:** bekommt `owasp_ki`, optional, nur bei KI-Befunden.
+- **Prüfer-Format:** bekommt `marker` (der verwendete Marker oder null).
+- **`annahme_modell`:** Die Hauptsession setzt es auf true, wenn der Status `bestätigt` lautet, ein Marker gesetzt ist und der Befund K1, K2 oder K4 betrifft.
+- **Schema:** `annahme_modell: true` ohne `status: bestätigt` ist ein Fehler.
+
+**W3 DoD-Schlüssel:**
+- `pruefe_recall` und `pruefe_koeder` bekommen einen Filter-Parameter, der nur Einträge ohne `dod` bzw. mit einem bestimmten `dod` auswählt. Der Standard ist „ohne `dod`“, damit bleibt das Verhalten für fixture-web gleich.
+- `leer` in `_dod_schluessel` wird über **alle** Einträge gebildet.
+- `fixture-ki` erhält damit genau TF1-D3 bis D7 und TF3-D1 bis D4.
+- Tests: `test_auswertung_tf3_schluessel_fixture_ki` und `test_auswerten_ok` (fixture-web: TF1-D1 bis D7 und TF3-D4).
+
+**W4 Mock-Formate und Vertragstest:**
+- **Antwortformate:** Die Formate in Abschnitt 4 werden um diese Felder ergänzt.
+  - Responses (nicht streamend und streamend): `id` und `status: completed` je Output-Item. Message-Content mit `annotations: []`. `function_call` mit `id`, `call_id` und `status`.
+  - Responses-Stream: `response.content_part.added`/`.done` sowie `item_id`, `output_index`, `content_index` und `sequence_number` an jedem Event.
+  - Anthropic-Stream: `message_start` mit `message.content: []` und `usage`. `message_delta.usage.output_tokens`.
+  - Chat-Stream: `usage` im letzten Chunk, falls `stream_options.include_usage`.
+- **Vertragstest (opt-in, `SECURITY_AUDIT_SDK_VERTRAG=1`):**
+  - Gepinnt über `evals/sdk-vertrag/package.json.tmpl` und `package-lock.json.tmpl`, installiert mit `npm ci --ignore-scripts` im Temp-Ordner. Pakete: `openai`, `@anthropic-ai/sdk`, `ai`, `@ai-sdk/openai`, `@ai-sdk/anthropic`.
+  - Geprüft werden je SDK Text und Tool-Aufruf, jeweils streamend und nicht streamend. Für `@ai-sdk/openai` zählen Responses und Chat.
+  - SDK-Zeilen, die der Test nicht grün abdeckt, stehen in der Mock-Tabelle als „ungeprüft“. Für LangChain ist das bereits so.
+
+**W5 fixture-ki:**
+- Jede Lücke hat ihre **eigene** Modellschleife und ihre eigenen Tools in ihrer Datei:
+  - L1: `src/agent/tickets.js` mit Schleife und `send_email`.
+  - L2: `src/agent/assistent.js` mit eigener Schleife und `datei_suchen`. Die Datei heißt nicht mehr `werkzeuge.js`.
+  - L3: `src/routes/antwort.js`.
+  - L4: `src/agent/prompt.js`. Den Prompt importiert nur die Schleife aus `assistent.js`.
+  - Köder: `src/routes/antwort-sicher.js`.
+- Gemeinsam genutzt wird nur der lazy erzeugte Client in `src/llm.js`.
+- **L1 nach Feature-File:** `POST /tickets` (ohne Anmeldung) nimmt Kundentext und ein Feld `dokument` (Text eines hochgeladenen Dokuments) an. Das ist die Abweichung „Upload-Dokument → Ticket mit Dokument“, begründet durch das Angreifermodell: Ein Fremder befüllt, ein Mitarbeiter löst aus.
+- **`test_fixture.py`:**
+  - Schema der Erwartung und Trennung der Dateien: Keine Lücken-Datei enthält die Senke einer anderen.
+  - Opt-in-Starttest (`SECURITY_AUDIT_FIXTURE_START=1`): App und `llm-mock.mjs` lokal auf 127.0.0.1, jeweils als eigene Prozessgruppe. Mit harmlosen Payloads sind L1 bis L3 ausnutzbar: Die Mail landet im Ausgang, das Tool-Argument `; echo poc` erzeugt eine Ausgabe, HTML kommt unescaped zurück. Der Köder escaped.
+  - Dieser Test ist zugleich der Vertragstest für den Chat-Weg von `openai`.
+
+**W6 Maskierung und K5:**
+- **Maskierung:** `poc.py modell --protokoll` übergibt dem Mock die zu maskierenden Werte per stdin: alle `--env`-Werte der Rolle ab 6 Zeichen und die Mock-Keys. Der Mock maskiert zuerst, dann kürzt er.
+  - Maskiert werden die Rohform und die JSON-escaped Form, Ersatz ist `<ENV:NAME>`.
+  - `--suche` arbeitet auf dem maskierten Body.
+  - Die Werte stehen nicht auf der Kommandozeile und werden nicht ausgegeben.
+- **K5-Beleg:** Der Prüfer setzt einen Marker in seine eigene Eingabe. `--protokoll --suche <marker>` zeigt dann den Request, in dem `<ENV:<NAME>>` im Systemprompt steht.
+
+**W7 Fixture-Namen nicht im Skill:**
+- SKILL.md, references und Briefings verwenden neutrale Platzhalter (`<ENV-NAME>`, `<tool>`).
+- `test_skill_text.py` und der Temp-Repo-Test verbieten zusätzlich `CRM_API_KEY`, `datei_suchen`, `antwort-sicher`, `tickets.js`, `assistent.js` und `fixture-ki`.
+
+**Klein:**
+- **Härtung:** Der Mock bekommt eine eigene Liste `HAERTUNG_MOCK`: `--cap-drop ALL`, `--security-opt no-new-privileges`, `--memory 256m`, `--pids-limit 64`, `--read-only`, `--tmpfs /tmp:rw,noexec,nosuid,size=16m`. Kein doppeltes `--memory`.
+- **Rolle und Neustart:**
+  - `poc.py modell` läuft unter der Rollensperre (nicht exklusiv) mit Zeitbudget 60 s.
+  - `_lade_rolle` gibt `modell_mock` zurück.
+  - Test: `neustart` mit Mock.
+  - `_start_fehler` liest bei einem Mock-Fehler die Logs von `-llm`.
+- **Mock-Verhalten:**
+  - `/v1/embeddings` verbraucht keinen Eintrag der Warteschlange.
+  - Marker: `POCMARKER-<rolle>-<8 Hex>`, mit Zufallsanteil.
+  - `llm-mock.mjs` läuft auf Node 20 und 22.
+- **Text der Spec:** Statt „Ein Dummy-Wert erscheint nie im Stream“ heißt es „nie in einer Protokollausgabe“. Die `--env`-Werte stehen weiterhin im Befehl.
+- **Briefing:** Das Prüfer-Briefing bekommt den Platzhalter `<MODELL_MOCK>`. Die Antworten-Datei heißt `modell-<rolle>-<n>.json` unter `<DATEIORDNER>`.
+- **DNS:** Ein Schalter `--dns` entfällt. Der opt-in-Docker-Test beobachtet nur und hält das Ergebnis fest; ist das Ergebnis „löst extern auf“, steht es im Bericht als Grenze.
+- **Erwartung:**
+  - `expected/fixture-ki.json` enthält `start` (Befehl, Port, `modell_mock: ["openai"]`).
+  - Abbildung `ki_hinweis` → Text: `"nicht anwendbar"` ist der vollständige Satz aus Abschnitt 1, `"angewendet"` das Präfix „KI-Prüfpunkte: angewendet (“.
+- **Scope:** `basis_url` in `ki.py` entfällt, ebenso die Ausgabe und die Tests dazu. Die Mock-Entscheidung trifft die Hauptsession aus Karte und Code.
