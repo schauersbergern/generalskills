@@ -800,7 +800,9 @@ def test_secrets_verwirft_ungueltige_commits_und_dateinamen(umg):
     umg.fake_gitleaks(dir={"report": []}, git={"report": [
         treffer(commit="nicht-hex"), treffer(commit=v.shas[0], datei="src/‮gpj.js"), treffer(commit=v.shas[0], datei="")]})
     out = ausgabe(secrets(umg, v))
-    assert [x["datei"] for x in out["befunde_roh"]] == ["src/\\u202egpj.js"]     # Bidi-Zeichen escaped, Ungültiges verworfen
+    assert out["befunde_roh"] == []                                             # Bidi-Pfad und Ungültiges: nicht ausgegeben
+    assert any("1 Secret-Fundstellen der Historie mit unbrauchbarem Dateipfad" in h for h in out["hinweise"])   # R1-6: Hinweis
+    assert any("2 Fundstellen der Historie mit ungültiger Regel, Datei oder Commit-SHA verworfen" in h for h in out["hinweise"])
 
 
 def test_secrets_in_head_env_datei(umg):
@@ -1724,3 +1726,28 @@ def test_secrets_budgets_laufen_ueber_den_deckel_r1_4(umg, monkeypatch, capsys):
     rc, _ = inproc_secrets(umg, v, monkeypatch, capsys, SECURITY_AUDIT_SECRETS_BUDGET="1e9", SECURITY_AUDIT_SECRETS_DIR_BUDGET="1e9")
     assert rc == 0
     assert sorted(aufrufe) == [("SECURITY_AUDIT_SECRETS_BUDGET", 300), ("SECURITY_AUDIT_SECRETS_DIR_BUDGET", 120)]
+
+
+# ------------------------------------------------------------------------------------ unbrauchbare Pfade in befunde_roh (Review R1-6)
+
+def test_secrets_pfad_mit_zeilenangabe_oder_steuerzeichen_wird_gefiltert_statt_gekappt_r1_6(umg):
+    v = vorbereiten(umg, [MINI])
+    lang = "/".join(["verzeichnis-mit-langem-namen"] * 12) + "/a.js"              # > 300 Zeichen
+    umg.fake_gitleaks(dir={"report": []}, git={"report": [
+        treffer(datei="env:12", commit=v.shas[0]), treffer(datei="a\x01b.js", commit=v.shas[0]),
+        treffer(datei=lang, commit=v.shas[0]), treffer(datei="x#L5", commit=v.shas[0]),
+        treffer(datei="./a.js", commit=v.shas[0]), treffer(datei="src/gut.js", commit=v.shas[0])]})
+    out = ausgabe(secrets(umg, v))
+    assert [b["datei"] for b in out["befunde_roh"]] == ["src/gut.js"]
+    hinweise = "\n".join(out["hinweise"])
+    assert "4 Secret-Fundstellen der Historie mit unbrauchbarem Dateipfad" in hinweise and "nicht ausgegeben" in hinweise
+    assert "1 Secret-Fundstellen der Historie mit überlangem Dateipfad" in hinweise
+    assert "env:12" not in hinweise and lang not in hinweise and "\x01" not in hinweise
+
+
+def test_secrets_ohne_unbrauchbare_pfade_kein_pfad_hinweis_r1_6(umg):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": [treffer(datei="src/mit leerzeichen.js", commit=v.shas[0])]})
+    out = ausgabe(secrets(umg, v))
+    assert [b["datei"] for b in out["befunde_roh"]] == ["src/mit leerzeichen.js"]
+    assert not [h for h in out["hinweise"] if "Dateipfad" in h]

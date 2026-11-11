@@ -806,8 +806,16 @@ def _secrets(a: argparse.Namespace, repo: str, quelle: str, lk: str, marker: str
         hinweise.append("Secret-Prüfung abgebrochen (Zeitbudget)")
     except (GitFehler, ReportFehler) as e:
         hinweise.append(f"Secret-Prüfung der Historie fehlgeschlagen ({_t(e, 200)})")
+    steuer, lang = _pfad_hinweis_zaehler([b["datei"] for b in befunde])
+    if steuer:
+        hinweise.append(f"{steuer} Secret-Fundstellen der Historie mit unbrauchbarem Dateipfad (Zeilenangabe, Steuer- oder "
+                        f"unsichtbare Zeichen) nicht ausgegeben: Historie von Hand prüfen")
+    if lang:
+        hinweise.append(f"{lang} Secret-Fundstellen der Historie mit überlangem Dateipfad (über {PFAD_MAX} Zeichen) nicht "
+                        f"ausgegeben: Historie von Hand prüfen")
+    befunde = [b for b in befunde if _pfad_problem(b["datei"]) is None]
     _aufraeumen(lk)                               # vor der Ausgabe: scheitert das Löschen, endet der Befehl mit Exit 1
-    _ausgabe({"befunde_roh": [{"regel": b["regel"], "datei": _t(b["datei"], 500), "zeile": b["zeile"],
+    _ausgabe({"befunde_roh": [{"regel": b["regel"], "datei": b["datei"], "zeile": b["zeile"],
                                "commits": b["commits"], "in_head": b["in_head"]} for b in befunde],
               "hinweise": hinweise, "geschwaerzt": anzahl})
     return 0
@@ -940,6 +948,7 @@ def _lockfiles_finden(quelle: str, hinweise: list[str]) -> list[str]:
     """Relative Pfade (`/`) aller Lockfiles in der Arbeitskopie, sortiert; `node_modules` und `.git` werden nicht betreten,
     Symlinks nicht angenommen (Hinweis)."""
     gefunden: list[str] = []
+    unbrauchbar = {"steuer": 0, "lang": 0}
     for ordner, unter, dateien in os.walk(quelle):
         unter[:] = sorted(u for u in unter if u not in ("node_modules", ".git"))
         for name in dateien:
@@ -947,6 +956,10 @@ def _lockfiles_finden(quelle: str, hinweise: list[str]) -> list[str]:
                 continue
             pfad = os.path.join(ordner, name)
             rel = os.path.relpath(pfad, quelle).replace(os.sep, "/")
+            problem = _pfad_problem(rel)
+            if problem:                           # kein gültiger `lockfile`-Pfad im Schema: nicht prüfen, nur zählen
+                unbrauchbar[problem] += 1
+                continue
             try:
                 st = os.lstat(pfad)
             except OSError as e:
@@ -960,6 +973,10 @@ def _lockfiles_finden(quelle: str, hinweise: list[str]) -> list[str]:
                 hinweise.append(f"Lockfile zu groß (> {LOCKFILE_MAX // (1024 * 1024)} MiB), übersprungen: {_t(rel)}")
             else:
                 gefunden.append(rel)
+    if unbrauchbar["steuer"]:
+        hinweise.append(f"{unbrauchbar['steuer']} Lockfiles mit Steuerzeichen oder ungültigen Zeichen im Pfad übersprungen")
+    if unbrauchbar["lang"]:
+        hinweise.append(f"{unbrauchbar['lang']} Lockfiles mit überlangem Pfad (über {PFAD_MAX} Zeichen) übersprungen")
     gefunden.sort()
     if len(gefunden) > MAX_LOCKFILES:
         hinweise.append(f"{len(gefunden)} Lockfiles gefunden, nur die ersten {MAX_LOCKFILES} geprüft")
@@ -1371,7 +1388,7 @@ def _lockfile_eintraege(rel: str, name: str, text: bytes, osv_daten: object, end
             ohne_zeile += 1
         else:
             zeile = zeilen_index.zeile(pname, version)
-        erg.append({"paket": _t(pname, 214), "version": _t(version, 100), "lockfile": _t(rel, 500), "zeile": zeile,
+        erg.append({"paket": _t(pname, 214), "version": _t(version, 100), "lockfile": rel, "zeile": zeile,
                     "vulns": vulns, "behoben_in": behoben_in(vulns, pname, version),
                     "dev": index.dev.get((pname, version), False)})
     if ohne_zeile and hinweise is not None:
@@ -1584,6 +1601,23 @@ def _sauber(name: str, datei: bool = False) -> bool:
     if "`" in name or (datei and ZEILE_AM_ENDE.search(name)):
         return False
     return (name.isascii() and name.isprintable()) or _t(name, 10**9) == name
+
+
+def _pfad_problem(rel: str) -> str | None:
+    """None, wenn `rel` (relativer Pfad, `/`) als `datei` oder `lockfile` ins Befund-Schema passt; sonst "lang" (über
+    `PFAD_MAX`) oder "steuer" (Steuer-, Format- oder unsichtbare Zeichen, Backtick, Zeilenangabe am Ende, nicht normalisiert).
+    Solche Pfade werden nie gekappt (der Pfad passte dann nicht mehr zum Repo), sondern ausgelassen und gemeldet."""
+    if len(rel) > PFAD_MAX:
+        return "lang"
+    if not _sauber(rel, True) or bericht._pfad_fehler(rel):
+        return "steuer"
+    return None
+
+
+def _pfad_hinweis_zaehler(rels: list[str]) -> tuple[int, int]:
+    """(Anzahl mit Pfadproblem "steuer", Anzahl mit "lang") unter `rels`."""
+    probleme = [_pfad_problem(r) for r in rels]
+    return probleme.count("steuer"), probleme.count("lang")
 
 
 def _eltern(ordner: str) -> list[str]:

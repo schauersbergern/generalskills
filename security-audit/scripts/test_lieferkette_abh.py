@@ -1362,3 +1362,19 @@ def test_abhaengigkeiten_budget_laeuft_ueber_den_deckel_r1_4(umg, monkeypatch, c
     rc = lieferkette.main(["abhaengigkeiten", "--lauf", LAUF, "--quelle", umg.quelle()])
     capsys.readouterr()
     assert rc == 0 and aufrufe == [("SECURITY_AUDIT_ABH_BUDGET", 300)]
+
+
+def test_unbrauchbare_lockfile_pfade_werden_nicht_geprueft_und_gemeldet_r1_6(umg):
+    """Pfade mit Steuerzeichen oder über 300 Zeichen kämen nie als `lockfile` ins Befund-Schema: übersprungen mit Hinweis,
+    nicht gekappt."""
+    lang = "/".join(["verzeichnis-mit-langem-namen"] * 12)
+    umg.schreibe("a\x01b/package-lock.json", "{}")
+    umg.schreibe(f"{lang}/package-lock.json", "{}")
+    umg.schreibe("ok/package-lock.json", "{}")
+    umg.fake_osv({"rc": 0, "stdout": {"results": []}})
+    out = ausgabe(umg.abh())
+    hinweise = "\n".join(out["hinweise"])
+    assert "1 Lockfiles mit Steuerzeichen oder ungültigen Zeichen im Pfad übersprungen" in hinweise
+    assert "1 Lockfiles mit überlangem Pfad (über 300 Zeichen) übersprungen" in hinweise
+    assert "\x01" not in hinweise and lang not in hinweise
+    assert len(umg.aufrufe()) == 1                                                                  # nur ok/package-lock.json
