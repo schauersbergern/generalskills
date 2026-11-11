@@ -1378,3 +1378,23 @@ def test_unbrauchbare_lockfile_pfade_werden_nicht_geprueft_und_gemeldet_r1_6(umg
     assert "1 Lockfiles mit überlangem Pfad (über 300 Zeichen) übersprungen" in hinweise
     assert "\x01" not in hinweise and lang not in hinweise
     assert len(umg.aufrufe()) == 1                                                                  # nur ok/package-lock.json
+
+
+@pytest.mark.parametrize("ohne", ["", "gitleaks", "gitleaks,docker"])
+def test_osv_scanner_toml_im_repo_wird_von_abhaengigkeiten_gemeldet_r1_7(umg, ohne):
+    """Der Hinweis hängt nicht an `secrets` (das mit fehlendem gitleaks nichts meldet), sondern kommt von `abhaengigkeiten`."""
+    umg.schreibe("package-lock.json", "{}")
+    umg.schreibe("web/osv-scanner.toml", "[[IgnoredVulns]]\nid = 'X'\n")
+    umg.schreibe("node_modules/x/osv-scanner.toml", "")
+    umg.fake_osv({"rc": 0, "stdout": {"results": []}})
+    env = umg.env(SECURITY_AUDIT_OHNE=ohne) if ohne else umg.env()
+    out = ausgabe(umg.abh(env=env))
+    assert [h for h in out["hinweise"] if h.startswith("osv-scanner.toml im Repo vorhanden, beim Audit ignoriert")] == [
+        "osv-scanner.toml im Repo vorhanden, beim Audit ignoriert: web/osv-scanner.toml"]
+    assert not umg.aufrufe()[0]["toml_im_cwd"] and not umg.aufrufe()[0]["toml_beim_lockfile"]
+
+
+def test_ohne_osv_scanner_toml_kein_konfig_hinweis_r1_7(umg):
+    umg.schreibe("package-lock.json", "{}")
+    umg.fake_osv({"rc": 0, "stdout": {"results": []}})
+    assert not [h for h in ausgabe(umg.abh())["hinweise"] if "osv-scanner.toml" in h]

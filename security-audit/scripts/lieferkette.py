@@ -86,7 +86,7 @@ MAX_COMMITS = 20
 MAX_BEFUNDE_ROH = 200          # Einträge in `befunde_roh` (Rest als Hinweis; die in HEAD vorhandenen zuerst)
 MAX_NENNUNGEN = 10             # Dateien je Hinweis zur Repo-Konfiguration
 GITLEAKS_TOML = "[extend]\nuseDefault = true\n"
-KONFIG_NAMEN = (".gitleaks.toml", ".gitleaksignore", "osv-scanner.toml")
+KONFIG_NAMEN = (".gitleaks.toml", ".gitleaksignore")     # `osv-scanner.toml` meldet `abhaengigkeiten` selbst
 ARBEIT = ("leer", "leer-ignore", "gitleaks.toml", "gl-dir.json", "gl-git.json", "spiegel.git", "abh")   # unter <zustand>/lieferkette/
 VOLLER_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 ALLOW_MARKE = b"gitleaks:allow"
@@ -946,12 +946,15 @@ def _einzeilig(text: object, grenze: int) -> str:
 
 def _lockfiles_finden(quelle: str, hinweise: list[str]) -> list[str]:
     """Relative Pfade (`/`) aller Lockfiles in der Arbeitskopie, sortiert; `node_modules` und `.git` werden nicht betreten,
-    Symlinks nicht angenommen (Hinweis)."""
+    Symlinks nicht angenommen (Hinweis). Eine Repo-eigene `osv-scanner.toml` wirkt nicht und steht als Hinweis in `hinweise`."""
     gefunden: list[str] = []
+    osv_toml: list[str] = []
     unbrauchbar = {"steuer": 0, "lang": 0}
     for ordner, unter, dateien in os.walk(quelle):
         unter[:] = sorted(u for u in unter if u not in ("node_modules", ".git"))
-        for name in dateien:
+        for name in sorted(dateien):
+            if name == "osv-scanner.toml":
+                osv_toml.append(os.path.relpath(os.path.join(ordner, name), quelle).replace(os.sep, "/"))
             if name not in LOCKFILE_NAMEN:
                 continue
             pfad = os.path.join(ordner, name)
@@ -973,6 +976,8 @@ def _lockfiles_finden(quelle: str, hinweise: list[str]) -> list[str]:
                 hinweise.append(f"Lockfile zu groß (> {LOCKFILE_MAX // (1024 * 1024)} MiB), übersprungen: {_t(rel)}")
             else:
                 gefunden.append(rel)
+    if osv_toml:                                  # osv-scanner läuft auf einer Kopie ohne die Konfiguration des Repos
+        hinweise.append(f"osv-scanner.toml im Repo vorhanden, beim Audit ignoriert: {_nennung(osv_toml)}")
     if unbrauchbar["steuer"]:
         hinweise.append(f"{unbrauchbar['steuer']} Lockfiles mit Steuerzeichen oder ungültigen Zeichen im Pfad übersprungen")
     if unbrauchbar["lang"]:

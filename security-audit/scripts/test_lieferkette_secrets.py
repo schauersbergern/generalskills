@@ -604,10 +604,10 @@ def test_repo_konfig_hinweise(umg):
     umg.fake_gitleaks(dir={"report": []}, git={"report": []})
     out = ausgabe(secrets(umg, v))
     text = "\n".join(out["hinweise"])
-    assert ".gitleaks.toml" in text and ".gitleaksignore" in text and "web/osv-scanner.toml" in text
+    assert ".gitleaks.toml" in text and ".gitleaksignore" in text and "osv-scanner.toml" not in text   # R1-7: meldet `abhaengigkeiten`
     assert "gitleaks:allow" in text and "src/b.js" in text
     assert all("ignoriert" in h for h in out["hinweise"] if ("Standardausnahmen" not in h) and (".toml" in h or "allow" in h))
-    for name in (".gitleaks.toml", ".gitleaksignore", "osv-scanner.toml"):
+    for name in (".gitleaks.toml", ".gitleaksignore"):
         assert any(h.startswith(f"{name} im Repo vorhanden, beim Audit ignoriert") for h in out["hinweise"]), name
     assert any(h.startswith("gitleaks:allow-Kommentare im Repo vorhanden, beim Audit ignoriert") for h in out["hinweise"])
     assert any(h.startswith("gitleaks-Standardausnahmen nicht geprüft:") and ".gitleaks.toml" in h for h in out["hinweise"])
@@ -1221,13 +1221,13 @@ def test_konfig_suche_bricht_ab_findet_aber_jede_gitleaksignore_m_b(tmp_path, mo
     `.gitleaksignore`, die danach entfernt werden muss) werden weiter gesammelt."""
     schreibe(str(tmp_path), "a/.gitleaksignore", "x\n")
     schreibe(str(tmp_path), "z/tief/.gitleaksignore", "y\n")
-    schreibe(str(tmp_path), "b/osv-scanner.toml", "")
+    schreibe(str(tmp_path), "b/.gitleaks.toml", "")
     schreibe(str(tmp_path), "c/code.js", "// gitleaks:allow\n")
     monkeypatch.setattr(lieferkette, "KONFIG_SUCHE_BUDGET", -1)
     hinweise, ignore = lieferkette._repo_konfiguration(str(tmp_path))
     assert "Suche nach gitleaks:allow abgebrochen (Zeitbudget)" in hinweise
     assert sorted(os.path.relpath(p, tmp_path) for p in ignore) == ["a/.gitleaksignore", "z/tief/.gitleaksignore"]
-    assert any(h.startswith("osv-scanner.toml im Repo vorhanden") for h in hinweise)
+    assert any(h.startswith(".gitleaks.toml im Repo vorhanden") for h in hinweise)
     assert not any(h.startswith("gitleaks:allow-Kommentare") for h in hinweise)
 
 

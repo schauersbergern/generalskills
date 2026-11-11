@@ -62,7 +62,7 @@ Ein Befund je Regel und Datei, P1: ein Secret in der Git-Historie, auch wenn die
 - **gitleaks-Standardausnahmen:** Pfade, die gitleaks mit seiner Standardkonfiguration überspringt (etwa `node_modules/`, Lockfiles, Bilder, Schriften, Office- und Binärformate, Python-Umgebungen wie `venv/lib/…`, `site-packages` und `*.dist-info`, verbreitete JavaScript-Bibliotheken wie `jquery*.js`, Archive; die Liste im Skript stammt aus der Standard-Allowlist von gitleaks 8.30.1), werden weder geprüft noch geschwärzt. Das Skript meldet sie im Hinweis „gitleaks-Standardausnahmen nicht geprüft: …“. Secrets in Archiven bleiben unsichtbar.
 - **Installationsbefehle, die die statische Prüfung nicht sieht:** `su … -c`, `gosu`, `su-exec`, `runuser`, `busybox sh -c`, `/usr/bin/env bash -c`, `corepack pnpm install`, Befehlssubstitution in Anführungszeichen oder Backticks und `sh -c` tiefer als drei Ebenen. Fehlt hier ein Befund, heißt das nicht, dass die Installation lockfile-treu ist.
 - **Dev-Abhängigkeiten:** Die Angabe `dev` gibt es nur im npm-Lockfile; yarn und pnpm tragen sie nicht (dort `dev: false`).
-- **Repo-eigene Werkzeug-Konfiguration** (`.gitleaks.toml`, `.gitleaksignore`, `osv-scanner.toml`, `gitleaks:allow`) wird beim Audit ignoriert und als Hinweis gemeldet.
+- **Repo-eigene Werkzeug-Konfiguration** (`.gitleaks.toml`, `.gitleaksignore`, `osv-scanner.toml`, `gitleaks:allow`) wird beim Audit ignoriert und als Hinweis gemeldet (die gitleaks-Dateien meldet `secrets`, `osv-scanner.toml` meldet `abhaengigkeiten`).
 
 ## A04 Cryptographic Failures
 
