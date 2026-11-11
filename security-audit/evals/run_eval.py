@@ -79,7 +79,12 @@ def erlaubte_regeln(skill_ordner: str, ausgabe: str, home: str, tmp: str | None 
       KEV-Katalog auf, das ist die Erlaubtliste des Feature-Files, die Session macht keinen eigenen Netzverkehr), `ki.py` (TF3, rein
       statische Erkennung ohne Netz und ohne Kindprozess), `bericht.py kontext`, `bericht.py repo` (beide read-only), `bericht.py rendern <ausgabe>/*`,
       `kundenbericht.py erstellen --json <ausgabe>/*` (TF4; pandoc und weasyprint ruft nur das Skript auf, nie die Session), `agent-stats.py add
-      <ausgabe>/*` (mit `~` und mit absolutem `home`) und `ls`. Die `*`-Muster treffen auch `..`-Pfade (Restrisiko)."""
+      <ausgabe>/*` (mit `~` und mit absolutem `home`) und `ls`. Die `*`-Muster treffen auch `..`-Pfade (Restrisiko).
+
+    Restrisiko der Kundenbericht-Regel `kundenbericht.py erstellen --json <ausgabe>/*`: Sie ist so breit wie die von `rendern`. Das Muster
+    trifft auch ein zweites `--json` (`--json <ausgabe>/a.json --json /pfad/b.json`; das letzte `--json` gilt), und `erstellen` entfernt
+    vor dem Lesen vorhandene `-kunde.md` und `-kunde.pdf` neben jeder `*.json`, auch ohne gültigen Bericht. Betroffen sind nur reguläre
+    Dateien mit genau diesen Endungen; geschrieben wird nur bei einem gültigen Bericht."""
     absolut = lambda pfad: "/" + pfad                    # "//<absoluter Pfad ohne führenden />"
     if tmp is None:
         tmp = os.path.realpath(tempfile.gettempdir())

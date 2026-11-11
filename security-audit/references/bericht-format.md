@@ -70,7 +70,7 @@ Beide Felder stehen bei jedem Befund mit Status `bestätigt` oder `unbestätigt`
 
 - Beide Felder sind **Sie-Form** mit festem Satzmuster: „Aktualisieren Sie …“, „Lassen Sie …“ oder „Wir empfehlen, …“. Imperative in Du-Form („Aktualisiere …“) erkennt keine Prüfung statisch; sie fallen nur durch die Schreibregel auf.
 - Verboten sind Datei- und Pfadnamen, Zeilenangaben, Requests, Code, Bezeichner, Backticks, die Zeichen `{ } < > =`, URL- und E-Mail-Adressen sowie jeder Text aus `advisories[].zusammenfassung`. `bericht.py rendern` warnt bei Verstößen nur auf stderr (Exit 0), `kundenbericht.py erstellen` lehnt sie mit Exit 2 ab (Legende der Regeln in Schritt 7 von `SKILL.md`).
-- Auch `titel` darf keinen Pfad und keine Zeile enthalten (Regeln `d` und `e`), weil er im Kundenbericht steht. Für Werkzeugbefunde mit `gitleaks` zeigt der Kundenbericht stattdessen einen festen Titel; ihre `zusammenfassung` gilt weiter.
+- Auch `titel` steht im Kundenbericht und wird geprüft: Regeln `a`, `b`, `c` (im Titel nur Backtick, `{ }` und `=`; `<` und `>` bleiben erlaubt), `d`, `e`, `url` und `email`, nicht `du`. Pfad, Zeile, Request, Token aus einem `poc`, Sonderzeichen, URL und E-Mail sind im Titel also verboten. Für Werkzeugbefunde mit `gitleaks` zeigt der Kundenbericht stattdessen einen festen Titel; ihre `zusammenfassung` gilt weiter.
 
 ## Werkzeugbefunde (optionale Felder `werkzeug`, `commits`, `pakete`)
 
@@ -103,7 +103,7 @@ Befunde zu den Prüfpunkten K1 bis K7 (`references/pruefpunkte-ki.md`) tragen zu
 
 ## Kundenbericht
 
-`kundenbericht.py erstellen --json <ausgabe_ordner>/<basisname>.json` (nach `rendern`) schreibt `<basisname>-kunde.md` und `<basisname>-kunde.pdf` neben das JSON: Kopf „Manibase · Sicherheitsprüfung <Name>“ mit Datum und Commit, Management-Zusammenfassung, Befunde nach Kundenstufe, Umfang und Grenzen. Der Name ist `projekt`, sonst `ordner`, sonst `repo` (mit einem Hinweis, dass kein Projektname angegeben war). Nicht im Kundenbericht stehen `poc`, `code_pfad`, `beschreibung`, Zeilen sowie Befunde mit Status `verworfen` oder `verdacht`.
+`kundenbericht.py erstellen --json <ausgabe_ordner>/<basisname>.json` (nach `rendern`) schreibt `<basisname>-kunde.md` und `<basisname>-kunde.pdf` neben das JSON: Kopf „Manibase · Sicherheitsprüfung <Name>“ mit Datum und „Geprüfter Stand (Commit)“, Management-Zusammenfassung, Befunde nach Kundenstufe, Umfang und Grenzen. Der Name ist `projekt`, sonst `ordner`, sonst `repo` (mit einem Hinweis, dass kein Projektname angegeben war). Nicht im Kundenbericht stehen `poc`, `code_pfad`, `beschreibung`, Zeilen sowie Befunde mit Status `verworfen` oder `verdacht`.
 
 **Kundenstufe:**
 
@@ -114,31 +114,59 @@ Befunde zu den Prüfpunkten K1 bis K7 (`references/pruefpunkte-ki.md`) tragen zu
 | P2 | – | Mittel |
 | P3 | – | Niedrig |
 
+**Management-Zusammenfassung:** Tabelle der Anzahlen je Kundenstufe, darunter die Einordnung der Stufen (fester Text):
+
+- Kritisch: von außen ohne Anmeldung oder über Kundengrenzen ausnutzbar.
+- Hoch: ausnutzbar mit Anmeldung.
+- Mittel: begrenzte Auswirkung.
+- Niedrig: geringe Auswirkung oder nur in Entwicklungsumgebungen.
+
+Je Kundenstufe mit Befunden folgt ein Absatz: „Es besteht eine Schwachstelle der Stufe …“ bei `bestätigt` (mit „ausnutzbar“), „Es besteht eine mögliche Schwachstelle der Stufe …, die im Test nicht nachgestellt werden konnte“ bei `unbestätigt` (nie „ausnutzbar“), dazu eine Empfehlung in Sie-Form. Ohne Befunde und ohne Einschränkung steht „In der geprüften Version wurden keine ausnutzbaren Schwachstellen gefunden.“ Im Abschnitt „Befunde“ steht „Die Befunde sind nach Dringlichkeit sortiert.“
+
 **Nachweis** je Befund (fester Text des Skripts):
 
 | Herkunft | Text |
 |---|---|
 | `bestätigt` ohne `annahme_modell` | im Test nachgestellt |
 | `bestätigt` mit `annahme_modell: true` | im Test nachgestellt unter der Annahme, dass das KI-Modell einer eingeschleusten Anweisung folgt |
-| `unbestätigt` (Code-Befund) | aus dem Quellcode abgeleitet |
+| `unbestätigt` (Code-Befund) | aus dem Quellcode abgeleitet, im Test nicht bestätigt (mögliche Schwachstelle) |
 | `werkzeug` `osv-scanner` | aus der Abhängigkeitsliste mit bekannten Sicherheitslücken abgeglichen |
 | `werkzeug` `gitleaks` | Zugangsschlüssel in der Versionsgeschichte gefunden (Wert nicht wiedergegeben) |
 | `werkzeug` `lieferkette` | aus der Build- und Installationskonfiguration abgeleitet |
 
 Für Befunde mit `werkzeug` `gitleaks` steht im Kundenbericht der feste Titel „Zugangsschlüssel in der Versionsgeschichte“ statt `titel`. Bei einem `datei` von `null` steht dort „gesamtes Projekt“.
 
-**Exit-Codes.** Bei Exit ≠ 0 ist die erste Zeile auf stdout `kategorie: <wert>`; bei Exit 3 und 4 folgt `kunde-md: <pfad>`. Bei Exit 0 stehen `kunde-md:` und `kunde-pdf:` auf stdout. Die Meldungen stehen auf stdout (höchstens 30 Zeilen); bei Exit 2 haben sie die Form `<id> <feld>: Regel <regel>[ (<detail>)]` und nennen nie den Treffertext.
+**Umfang und Grenzen** (fester Text):
+
+- Geprüft wurde der oben genannte Commit.
+- Methode: Code-Analyse durch KI-Agenten; Nachweise entstanden nur in einer isolierten Testumgebung ohne Zugriff auf Produktivsysteme.
+- Es besteht keine Garantie auf Vollständigkeit.
+- Der technische Bericht mit Details liegt Manibase vor.
+- Nach Umsetzung der Maßnahmen empfehlen wir eine erneute Prüfung.
+
+**Eingeschränkte Prüfung:** Fehlt eine Prüfung oder ist sie unvollständig, steht der Satz „Die Prüfung war eingeschränkt (<Kundentexte>); das Ergebnis ist deshalb nicht vollständig.“ am Ende der Management-Zusammenfassung (statt der Entwarnung) und unter „Umfang und Grenzen“. Die Kundentexte folgen aus den `hinweise` (Teilstring, ohne Beachtung der Schreibweise), jeder höchstens einmal; bei einem `teilpfad` steht zuerst „nur der Teilbereich <Teilpfad>“. Der Hinweis „gitleaks-Standardausnahmen nicht geprüft“ zählt nicht, er tritt fast immer auf.
+
+| Teilstring in `hinweise` | Kundentext |
+|---|---|
+| `gitleaks fehlt` | Suche nach Zugangsschlüsseln |
+| `osv-scanner fehlt`, `abhaengigkeiten fehlgeschlagen` | Abgleich der Abhängigkeiten |
+| `lieferkette fehlgeschlagen` | Prüfung der Build-Konfiguration |
+| `docker-fehlt`, `build-fehler`, `build-timeout`, `start-fehler`, `lockfile-fehlt`, `lockfile-fremde-quelle`, `nicht-npm` | Nachstellung in einer Testumgebung |
+| `zeitbudget` | Abschluss einzelner Prüfungen (Zeitlimit) |
+| `ki.py erkennen fehlgeschlagen`, `modell-mock nicht möglich` | Prüfung der KI-Funktionen |
+
+**Exit-Codes.** Bei Exit ≠ 0 ist die erste Zeile auf stdout `kategorie: <wert>`; danach folgt `kunde-md: <pfad>`, wenn das Markdown liegt: bei Exit 3 und 4 immer, bei Exit 1 und 5 nur, wenn der Fehler nach dem Schreiben des Markdown auftrat. Bei Exit 0 stehen `kunde-md:` und `kunde-pdf:` auf stdout. Die Meldungen stehen auf stdout (höchstens 30 Zeilen, danach eine Zeile „… und <n> weitere“); bei Exit 2 haben sie die Form `<id> <feld>: Regel <regel>[ (<detail>)]` und nennen nie den Treffertext.
 
 | Exit | `kategorie` | Bedeutung | Folge in Schritt 7 |
 |---|---|---|---|
 | 0 | – | Markdown und PDF erstellt | Pfade in die Schlussmeldung |
-| 2 | `inhalt` | ein Kundenfeld fehlt oder verstößt gegen die Regeln; es liegen keine Kundendateien vor | `zusammenfassung`, `massnahme` und `titel` korrigieren, `rendern` und `erstellen` neu, höchstens 2 Runden |
-| 3 | `pdf-werkzeug-fehlt` | pandoc oder weasyprint fehlt oder ist nicht startbar; nur das Markdown liegt vor | „Kundenbericht nur als Markdown (<kategorie>)“ |
-| 4 | `pdf-fehler` | die PDF-Kette ist gescheitert (HTML-Prüfung, Fehler in stderr, leere Datei, Zeitbudget); nur das Markdown liegt vor | „Kundenbericht nur als Markdown (<kategorie>)“ |
-| 5 | `eingabe` | Argumente, Eingabedatei, Namenskollision, Ziel, Schema außerhalb der Kundenfelder oder Schreiben | keine Korrektur, „Kundenbericht nicht erstellt (<kategorie>)“ |
-| 1 | `intern` | unerwarteter Fehler | keine Korrektur, „Kundenbericht nicht erstellt (<kategorie>)“ |
+| 2 | `inhalt` | ein Kundenfeld fehlt oder verstößt gegen die Regeln; es liegen keine Kundendateien vor | `zusammenfassung`, `massnahme` und `titel` korrigieren, `rendern` und `erstellen` neu, höchstens 2 Korrekturrunden (also höchstens 3 Aufrufe von `erstellen`); danach „Kundenbericht nicht erstellt (inhalt)“ |
+| 3 | `pdf-werkzeug-fehlt` | pandoc oder weasyprint fehlt oder ist nicht startbar; nur das Markdown liegt vor, `kunde-md:` steht immer da | keine Korrektur, „Kundenbericht nur als Markdown (<kategorie>)“ |
+| 4 | `pdf-fehler` | die PDF-Kette ist gescheitert (HTML-Prüfung, Fehler in stderr, leere Datei, Zeitbudget, zu alte Werkzeugversion); nur das Markdown liegt vor, `kunde-md:` steht immer da | keine Korrektur, „Kundenbericht nur als Markdown (<kategorie>)“ |
+| 5 | `eingabe` | Argumente, Eingabedatei, Namenskollision, Ziel, Schema außerhalb der Kundenfelder oder Schreiben (auch des PDF); `kunde-md:` steht nur, wenn das Markdown schon geschrieben war | keine Korrektur; mit `kunde-md:` „Kundenbericht nur als Markdown (<kategorie>)“, sonst „Kundenbericht nicht erstellt (<kategorie>)“ |
+| 1 | `intern` | unerwarteter Fehler, etwa eine Ausnahme in der PDF-Kette; `kunde-md:` steht nur, wenn das Markdown schon geschrieben war | keine Korrektur; mit `kunde-md:` „Kundenbericht nur als Markdown (<kategorie>)“, sonst „Kundenbericht nicht erstellt (<kategorie>)“ |
 
-Scheitert `rendern` mit Exit 2, wird erst das JSON korrigiert, `erstellen` läuft danach. Das Budget von `erstellen` ist 90 s (pandoc höchstens 20 s, weasyprint höchstens 60 s). Mindestversionen: pandoc ≥ 2.15 (für `--sandbox`), weasyprint mit Option `--allowed-protocols` (geprüft mit 68.1).
+Scheitert `rendern` mit Exit 2, wird erst das JSON korrigiert, `erstellen` läuft danach. Das Budget von `erstellen` ist 90 s (pandoc höchstens 20 s, weasyprint höchstens 60 s). Mindestversionen: pandoc ≥ 2.15 (für `--sandbox`), weasyprint mit Option `--allowed-protocols` (geprüft mit 68.1). Eine zu alte Version endet mit Exit 4 (`pdf-fehler`), ein fehlendes Werkzeug mit Exit 3.
 
 ## Hinweise
 

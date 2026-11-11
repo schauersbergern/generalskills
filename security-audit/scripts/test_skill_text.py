@@ -131,6 +131,14 @@ def test_frontmatter():
     assert fm.get("description"), "description fehlt"
 
 
+def test_frontmatter_description_nennt_den_kundenbericht_bleibt_kurz_und_gueltig():
+    """M9: Die `description` nennt den Kundenbericht (Auslösewort und Ergebnis); sie bleibt ein gültiger Plain-Scalar von höchstens 1024 Zeichen."""
+    beschreibung = _frontmatter(_lies(SKILL_MD))["description"]
+    assert "Kundenbericht" in beschreibung and "customer report (Markdown and PDF)" in beschreibung
+    assert len(beschreibung) <= 1024, len(beschreibung)
+    assert ": " not in beschreibung and " #" not in beschreibung and beschreibung[:1] not in set("[{\"*&!|>%@`'")
+
+
 def test_frontmatter_ist_gueltiges_yaml():
     """Ungequotete Werte dürfen nicht mit `[`, `{`, `"`, `'`, `*`, `&`, `!`, `|`, `>`, `%`, `@` oder `` ` `` beginnen und
     kein `: ` oder ` #` enthalten (YAML-Plain-Scalar); mit PyYAML, falls vorhanden, wird zusätzlich echt geparst."""
@@ -1822,78 +1830,206 @@ def test_skill_schritt_7_ruft_kundenbericht_nach_rendern_auf():
     assert "`ordner`" in notiz[notiz.index("Halte"):]
 
 
+def _kette(text: str, *teile: str) -> None:
+    """Die Teile stehen in dieser Reihenfolge im Text (jeweils nach dem vorigen)."""
+    pos = 0
+    for teil in teile:
+        i = text.find(teil, pos)
+        assert i >= 0, f"{teil!r} fehlt oder steht an falscher Stelle in {text!r}"
+        pos = i + len(teil)
+
+
 def test_skill_schritt_7_felder_fuer_bestaetigt_und_unbestaetigt():
+    """Die Felder stehen bei jedem Befund mit Status `bestätigt` oder `unbestätigt` (ganzer Satz, kein „nur“); bei `verworfen` und
+    `verdacht` stehen sie nicht."""
     s7 = _s7()
-    zeile = _punkt(s7, r"`zusammenfassung` und `massnahme`.*geschrieben|schreibst `zusammenfassung`")
-    assert "`bestätigt`" in zeile and "`unbestätigt`" in zeile and "jeden Befund" in zeile
-    assert "`verworfen`" not in zeile or "nicht" in zeile
+    zeile = _punkt(s7, r"^Schreibe das JSON")
+    assert ("Die Felder `zusammenfassung` und `massnahme` werden für jeden Befund mit Status `bestätigt` oder `unbestätigt` geschrieben, "
+            "auch für Werkzeug- und KI-Befunde") in zeile
+    assert "`verworfen`" not in zeile and "`verdacht`" not in zeile and "nur für" not in zeile
 
 
-def test_skill_schritt_7_exit_folgen_und_zwei_runden():
-    """Exit 2: nur `zusammenfassung`, `massnahme` und `titel` korrigieren, dann `rendern` und `erstellen` neu, höchstens 2 Runden, danach
-    „Kundenbericht nicht erstellt (inhalt)“ (R2-K-11); Exit 3 oder 4 ergibt „nur als Markdown“, Exit 5 oder 1 „nicht erstellt“."""
+def test_skill_schritt_7_rendern_warnung_darf_vor_erstellen_korrigiert_werden():
+    """M6: `rendern` warnt auf stderr („Kundenbericht wird scheitern: …“, Exit 0); die Felder dürfen vor `erstellen` korrigiert werden,
+    entschieden wird im nächsten Befehl."""
+    s7 = _s7()
+    zeile = _punkt(s7, r"^Exit 2 liefert die Fehlerliste")
+    assert "„Kundenbericht wird scheitern: …“" in zeile and "Exit 0" in zeile and "auf stderr" in zeile
+    assert "schon vor `erstellen` korrigieren" in zeile and "keine Korrekturrunde" in zeile
+    assert "entschieden wird im nächsten Befehl" in zeile
+    assert "Kundenbericht wird scheitern" in _lies(os.path.join(HIER, "bericht.py"))               # die Warnung gibt es im Skript
+
+
+def test_skill_schritt_7_meldungsformat_und_zeilengrenze():
+    """M2, M3, N15: Format der Meldungen, Grenze von `kundenbericht.MAX_ZEILEN` Zeilen mit „… und <n> weitere“, der Treffertext steht nie
+    in der Meldung (Ausnahme: Du-Wort und Token bei Regel `a`); `kunde-md:` folgt auf `kategorie:`, wenn das Markdown liegt."""
+    s7 = _s7()
+    zeile = _punkt(s7, r"^Das Skript schreibt")
+    assert kundenbericht.MAX_ZEILEN == 30
+    assert "`<id> <feld>: Regel <regel>[ (<detail>)]`" in zeile
+    assert f"höchstens {kundenbericht.MAX_ZEILEN} Meldungszeilen" in zeile
+    assert "„… und <n> weitere“" in zeile and "erst der nächste Lauf nach der Korrektur" in zeile
+    assert "nennen den Treffertext nie, außer dem Du-Wort (`du`) und dem Token bei Regel `a`" in zeile
+    assert "nennen nie den Treffertext" not in zeile
+    _kette(zeile, "Bei Exit ≠ 0 ist die erste stdout-Zeile `kategorie: <wert>`", "danach folgt `kunde-md: <pfad>`, wenn das Markdown schon liegt",
+           "Exit 1, 3, 4 und 5", "bei Exit 0 stehen `kunde-md:` und `kunde-pdf:` auf stdout")
+
+
+def test_skill_schritt_7_exit_folgen_und_zwei_korrekturrunden():
+    """Exit 2: keine Kundendateien, nur `zusammenfassung`, `massnahme` und `titel` korrigieren, dann `rendern` und `erstellen` neu, höchstens
+    2 Korrekturrunden (also höchstens 3 Aufrufe von `erstellen`), danach „Kundenbericht nicht erstellt (inhalt)“ in der Schlussmeldung
+    (R2-K-11). Ausnahme: zu viele Token in einem `poc`."""
     s7 = _s7()
     exit2 = _punkt(s7, r"^- \*\*Exit 2\*\*")
-    assert "`zusammenfassung`, `massnahme` und `titel`" in exit2
-    assert "`rendern`" in exit2 and "`erstellen`" in exit2 and "höchstens 2 Runden" in exit2
-    assert "„Kundenbericht nicht erstellt (inhalt)“" in exit2 and "Schlussmeldung" in exit2
-    assert "nur" in exit2 and "`stufe`" in exit2 and "`status`" in exit2 and "`datei`" in exit2   # alles andere bleibt unverändert
-    exit34 = _punkt(s7, r"^- \*\*Exit 3 oder 4\*\*")
-    assert "„Kundenbericht nur als Markdown (<kategorie>)“" in exit34 and "Schlussmeldung" in exit34
-    exit51 = _punkt(s7, r"^- \*\*Exit 5 oder 1\*\*")
-    assert "„Kundenbericht nicht erstellt (<kategorie>)“" in exit51 and "keine Korrektur" in exit51
+    assert exit2.startswith("- **Exit 2** (`inhalt`): Ein Kundenfeld fehlt oder verstößt gegen eine Regel, es liegen keine Kundendateien vor.")
+    assert "Markdown" not in exit2 and "PDF" not in exit2                                    # nichts liegt vor, auch kein Markdown
+    _kette(exit2, "Korrigiere nur `zusammenfassung`, `massnahme` und `titel` der genannten Befunde nach der Legende unten",
+           "schreibe das JSON neu", "führe `rendern` und `erstellen` erneut aus", "höchstens 2 Korrekturrunden",
+           "(also höchstens 3 Aufrufe von `erstellen`)", "Alle anderen Felder bleiben unverändert (auch `stufe`, `status`, `datei`)",
+           "Scheitert auch die zweite Korrekturrunde, steht „Kundenbericht nicht erstellt (inhalt)“ in der Schlussmeldung",
+           "(nicht in `bericht.hinweise`)")
+    assert "höchstens 5" not in exit2 and "sofort" not in exit2 and "ändern" not in exit2.replace("Alle anderen Felder bleiben unverändert", "")
+    zu_viele = _punkt(s7, r"^\s*- Meldet Regel `a`")
+    assert zu_viele.strip() == ("- Meldet Regel `a` „zu viele Token zum Prüfen“, helfen Feldkorrekturen nicht; den `poc` kürzen. "
+                                "Das ist die einzige Ausnahme von „Alle anderen Felder bleiben unverändert“.")
+    assert bericht._ZU_VIELE_TOKEN == "zu viele Token zum Prüfen"
+
+
+def test_skill_schritt_7_exit_3_4_5_1_eine_regel_fuer_kunde_md():
+    """I1: Exit 3, 4, 5 und 1 haben keine Feldkorrektur; steht nach `kategorie:` eine Zeile `kunde-md:`, lautet die Schlussmeldung
+    „Kundenbericht nur als Markdown (<kategorie>)“, sonst „Kundenbericht nicht erstellt (<kategorie>)“. Das Skript liefert `kunde-md:` auch
+    bei Exit 1 und 5 nach dem Schreiben des Markdown."""
+    s7 = _s7()
+    punkt = _punkt(s7, r"^- \*\*Exit 3, 4, 5 oder 1\*\*")
+    assert punkt.startswith("- **Exit 3, 4, 5 oder 1** (`pdf-werkzeug-fehlt`, `pdf-fehler`, `eingabe`, `intern`): Keine Korrektur der Felder.")
+    assert re.search(r"Steht nach `kategorie:` eine Zeile `kunde-md:`, liegt das Markdown \(das PDF fehlt\) und die Schlussmeldung lautet "
+                     r"„Kundenbericht nur als Markdown \(<kategorie>\)“, sonst „Kundenbericht nicht erstellt \(<kategorie>\)“\.", punkt)
+    _kette(punkt, "Exit 3 und 4 haben immer `kunde-md:`", "Exit 5 und 1 nur, wenn das Markdown schon geschrieben war")
+    assert "Korrigiere" not in punkt and "erlaubt" not in punkt and "PDF liegt" not in punkt and "Markdown fehlt" not in punkt
+    assert "keine Kundendateien" not in punkt                                                    # die alte Aussage ist falsch (I1)
+    assert "Exit 3 oder 4" not in s7 and "Exit 5 oder 1" not in s7
     quelle = _lies(os.path.join(HIER, "kundenbericht.py"))
     for kategorie in KUNDEN_KATEGORIEN:                                   # jede Kategorie gibt es im Skript, jede steht im Skill-Text
         assert f'"{kategorie}"' in quelle, kategorie
         assert f"`{kategorie}`" in s7, kategorie
     assert "kategorie: <wert>" in quelle or "`kategorie: <wert>`" in quelle
     assert "`kategorie: <wert>`" in s7 and "`kunde-md:`" in s7 and "`kunde-pdf:`" in s7
+    assert "return 1, \"intern\", zeilen +" in quelle and "Das PDF konnte nicht geschrieben werden." in quelle       # `kunde-md:` steht vor Exit 1 und 5
+
+
+def test_skill_schritt_7_exit_0_pfade_in_die_schlussmeldung():
+    zeile = _punkt(_s7(), r"^- \*\*Exit 0")
+    assert zeile == "- **Exit 0:** Die Pfade aus `kunde-md:` und `kunde-pdf:` kommen in die Schlussmeldung."
+
+
+LEGENDE = {                       # exakter Wortlaut der Legende der `regel`-Werte (Schritt 7)
+    "du": "Du-Form, Detail ist das Wort (prüft `titel` nicht)",
+    "a": "Text aus einem `poc`, Detail ist das Token",
+    "b": "HTTP-Methode mit Pfad",
+    "c": "Zeichen `{ } < > =` oder Backtick (im `titel` nur Backtick, `{ }` und `=`)",
+    "d": "Datei mit Zeile, `#L…` oder „Zeile n“",
+    "e": "Dateipfad oder Code-Pfad eines Befunds, auch der eigene",
+    "url": "URL oder `www.`",
+    "email": "E-Mail-Adresse",
+    "fehlt": "Pflichtfeld des Befunds fehlt, `zusammenfassung` oder `massnahme` ist zu ergänzen",
+    "schema": "Typ, Einzeiligkeit, unsichtbare Zeichen oder Länge verletzt, Detail ist die Schemameldung ohne den Wert",
+}
 
 
 def test_skill_schritt_7_regel_legende():
-    """R2-W-2: Jeder Wert von `regel` (die von `bericht.KUNDEN_REGELN` plus `fehlt` und `schema`) hat in Schritt 7 eine Legendenzeile."""
+    """R2-W-2: Jeder Wert von `regel` (die von `bericht.KUNDEN_REGELN` plus `fehlt` und `schema`) hat in Schritt 7 genau die Legendenzeile
+    (Wortlaut, nicht nur Stichwort); `c` trägt den Titel-Hinweis, `du` die Ausnahme für `titel`."""
     s7 = _s7()
+    assert set(LEGENDE) == set(KUNDEN_REGELN_ALLE)
     for regel in KUNDEN_REGELN_ALLE:
-        zeile = _punkt(s7, rf"^\s*- `{regel}`: ")
-        assert len(zeile.split(": ", 1)[1].strip()) >= 10, regel
-    assert "Detail ist das Wort" in _punkt(s7, r"^\s*- `du`: ") and "Detail ist das Token" in _punkt(s7, r"^\s*- `a`: ")
-    assert "auch der eigene" in _punkt(s7, r"^\s*- `e`: ")
+        assert _punkt(s7, rf"^\s*- `{regel}`: ").strip() == f"- `{regel}`: {LEGENDE[regel]}", regel
     assert "Regel <regel>" in s7 and "<id> <feld>" in s7                    # das Meldungsformat des Skripts
 
 
+def test_titelregeln_in_skill_und_format_entsprechen_dem_skript():
+    """I3: Der `titel` wird mit den Regeln aus `bericht._KUNDEN_FELDER` geprüft (a, b, c ohne `<` und `>`, d, e, url, email; nicht `du`);
+    belegt am Skript und an den Texten in SKILL.md und `bericht-format.md`."""
+    titelregeln = dict(bericht._KUNDEN_FELDER)["titel"]
+    assert titelregeln == ("a", "b", "c", "d", "e", "url", "email") and "du" not in titelregeln
+    def titel(wert: str) -> set[str]:
+        daten = {"befunde": [{"id": "S-1", "status": "bestätigt", "titel": wert, "datei": None, "poc": "x"}]}
+        return {regel for (_i, feld, regel, _d) in bericht.kunden_verstoesse(daten) if feld == "titel"}
+    assert titel("Zugriff mit alg=none") == {"c"} and titel("Zugriff {id}") == {"c"} and titel("Version <2.0 und >1.0") == set()
+    assert titel("Ändere die Rechte") == set()                                         # `du` prüft den Titel nicht
+    zeile = _punkt(_s7(), r"Trifft eine Meldung `titel`")
+    assert ("formulierst du den Titel um, ohne Pfad, Zeile, Request, Token aus einem `poc`, Backtick, `{ } =`, URL und E-Mail "
+            "(`<` und `>` sind im Titel erlaubt, die Schreibregeln verbieten sie weiter)") in zeile
+    absatz = _punkt(_lies(BERICHT_FORMAT), r"^- Auch `titel`")
+    assert ("Regeln `a`, `b`, `c` (im Titel nur Backtick, `{ }` und `=`; `<` und `>` bleiben erlaubt), `d`, `e`, `url` und `email`, "
+            "nicht `du`") in absatz
+    for regel in titelregeln:
+        assert f"`{regel}`" in absatz, regel
+    assert "(Regeln `d` und `e`)" not in absatz
+
+
 def test_skill_schritt_7_titelkorrektur_vor_5b():
-    """R1-W5: Die Titelkorrektur geht der Regel „Entwürfe unverändert übernehmen“ aus 5b vor; 5b verweist darauf."""
+    """R1-W5: Die Titelkorrektur geht der Regel „Entwürfe unverändert übernehmen“ aus 5b vor, ohne Ausnahme; 5b verweist darauf."""
     s7 = _s7()
     zeile = _punkt(s7, r"Trifft eine Meldung `titel`")
-    assert "formulierst du den Titel ohne Pfad und Zeile um" in zeile
-    assert "`lieferkette`-Entwürfen" in zeile and "festen Werkzeugtiteln aus 5b" in zeile
-    assert "geht der Regel „unverändert übernehmen“ vor" in zeile
-    assert "`stufe`, `status`, `datei` und alle anderen Felder bleiben" in zeile
+    assert zeile.strip().startswith("- Trifft eine Meldung `titel`, formulierst du den Titel um")
+    assert "Das gilt auch für Titel, die aus `lieferkette`-Entwürfen oder den festen Werkzeugtiteln aus 5b stammen." in zeile
+    assert "Die Korrektur geht der Regel „unverändert übernehmen“ vor, `stufe`, `status`, `datei` und alle anderen Felder bleiben." in zeile
+    assert "Ausnahme" not in zeile and "unverändert immer" not in zeile and "keine" not in zeile
     s5b = _abschnitt(_lies(SKILL_MD), "5b.")
     lieferkette = _punkt(s5b, r"^- \*\*Lieferkette \(`lieferkette`\)")
     assert "unverändert übernehmen" in lieferkette and "Schritt 7" in lieferkette and "`titel`" in lieferkette
 
 
-def test_skill_schreibregeln_fuer_die_kundenfelder():
-    """K9, R2-W-2: Sie-Form mit festem Satzmuster, Geschäftsfolge, keine Datei- oder Pfadnamen, Zeilenangaben, Requests, Code, Bezeichner,
-    Backticks und `{ } < > =`, keine URL- oder E-Mail-Adressen, nichts aus `advisories[].zusammenfassung`."""
+def _schreibregeln() -> tuple[str, list[str]]:
     s7 = _s7()
-    regeln = _punkt(s7, r"\*\*Schreibregeln")
-    schreib = s7[s7.index(regeln):]
-    for teil in ("Sie-Form", "„Aktualisieren Sie …“", "„Wir empfehlen, …“", "Geschäftsfolge", "Datei- und Pfadnamen", "Zeilenangaben",
-                 "Requests", "Code", "Bezeichner", "Backticks", "`{ } < > =`", "URL-", "E-Mail-Adressen", "`advisories[].zusammenfassung`"):
-        assert teil in schreib, teil
-    assert "Datenabfluss" in schreib and "Du-Form" in schreib
+    zeilen = s7.splitlines()
+    kopf = next(i for i, z in enumerate(zeilen) if z.startswith("**Schreibregeln**"))
+    punkte = []
+    for z in zeilen[kopf + 1:]:
+        if z.startswith("- "):
+            punkte.append(z)
+        elif z.strip() and punkte:
+            break
+    return zeilen[kopf], punkte
+
+
+def test_skill_schreibregeln_fuer_die_kundenfelder():
+    """K9, R2-W-2, I4: Jede Schreibregel als ganzer Punkt mit ihrem Ausschluss (Sie-Form verbindlich, Du-Form verboten, keine Datei- und
+    Pfadnamen, keine Zeichen, keine Adressen, nichts aus dem OSV-Text); die Regeln gelten auch für einen umformulierten `titel`."""
+    kopf, punkte = _schreibregeln()
+    assert kopf == "**Schreibregeln** für `zusammenfassung` und `massnahme` (und für einen umformulierten `titel`):"
+    assert len(punkte) == 7, punkte
+    sie, folge, dateien, adressen, osv, laengen, titel = punkte
+    assert sie.startswith("- Sie-Form mit festem Satzmuster: „Aktualisieren Sie …“, „Lassen Sie …“ oder „Wir empfehlen, …“.")
+    assert "Die Du-Form (auch Imperative wie „Aktualisiere …“) ist verboten." in sie
+    assert "Geschäftsfolge" in folge and "Datenabfluss" in folge and "ohne Code" in folge
+    assert dateien.startswith("- Keine Datei- und Pfadnamen")
+    for teil in ("keine Zeilenangaben", "keine Requests", "kein Code", "keine Bezeichner aus dem Code", "keine Backticks",
+                 "keines der Zeichen `{ } < > =`"):
+        assert teil in dateien, teil
+    assert adressen == "- Keine URL- oder E-Mail-Adressen."
+    assert osv.startswith("- Nichts aus `advisories[].zusammenfassung` übernehmen") and "selbst" in osv
+    assert not any(w in " ".join(punkte) for w in ("erlaubt", "darf ", "dürfen", "gelten nicht", "freigestellt"))
+    kundenfelder = bericht.KUNDENFELDER
+    erwartet = "- Längen und Form: " + ", ".join(f"`{feld}` {mini} bis {maxi} Zeichen" for feld, (mini, maxi) in kundenfelder.items()) + \
+               "; beide Felder sind einzeilig."
+    assert laengen == erwartet, (laengen, erwartet)
+    assert titel == ("- Ein `titel` enthält kein `=`, keine Pfade und keine Bezeichner aus dem `poc`; statt „(alg=none)“ schreibst du "
+                     "„Algorithmus none“.")
 
 
 def test_skill_schlussmeldung_nennt_kundendateien():
-    """K13: Pfade der Kundendateien, „Vor Weitergabe lesen.“, gegebenenfalls „Projektname fehlte“; der Hinweis nach gescheiterten Runden
-    steht in der Schlussmeldung, nicht in `bericht.hinweise` (K14)."""
+    """K13, I1: Pfade der Kundendateien mit „Vor Weitergabe lesen.“, gegebenenfalls „Projektname fehlte“; mit `kunde-md:` nach `kategorie:`
+    „Kundenbericht nur als Markdown (<kategorie>)“, ohne „Kundenbericht nicht erstellt (<kategorie>)“, bei Exit 2 nach 2 Korrekturrunden
+    „Kundenbericht nicht erstellt (inhalt)“; alle drei Fälle stehen in der Schlussmeldung, nicht in `bericht.hinweise` (K14)."""
     s = _abschnitt(_lies(SKILL_MD), "Schlussmeldung")
-    assert "`-kunde.md`" in s and "`-kunde.pdf`" in s
-    assert "Vor Weitergabe lesen." in s and "Projektname fehlte" in s
-    assert "Kundenbericht nur als Markdown (<kategorie>)" in s and "Kundenbericht nicht erstellt (<kategorie>)" in s
-    assert "Kundenbericht nicht erstellt (inhalt)" in s
+    zeile = _punkt(s, r"^Pfade von `\.md`")
+    _kette(zeile, "`-kunde.md`", "`-kunde.pdf`", "„Vor Weitergabe lesen.“", "„Projektname fehlte“",
+           "bei Exit ≠ 0 und ≠ 2 mit einer Zeile `kunde-md:` nach `kategorie:` „Kundenbericht nur als Markdown (<kategorie>)“",
+           "ohne diese Zeile „Kundenbericht nicht erstellt (<kategorie>)“",
+           "bei Exit 2 nach 2 Korrekturrunden „Kundenbericht nicht erstellt (inhalt)“",
+           "(alle drei Fälle stehen in der Schlussmeldung, nicht in `bericht.hinweise`)")
+    assert "bei Exit 3 oder 4" not in zeile and "bei Exit 5 oder 1" not in zeile and "sofort" not in zeile
 
 
 def test_skill_budget_kundenbericht_entspricht_dem_skript():
@@ -1912,29 +2048,149 @@ def test_skill_budget_kundenbericht_entspricht_dem_skript():
     assert "weasyprint mit Option `--allowed-protocols` (geprüft mit 68.1)" in ohne_langen
     einzeln = _zeile(regel8.replace("\n   - ", "\n- "), "- `poc.py`, `lieferkette.py` und `ki.py` immer als **einzelner einfacher Befehl**")
     assert "kein `&&`" in einzeln                                                          # K-9: diese Zeile bleibt, wie sie ist
+    zeile = _zeile(regel8.replace("\n   - ", "\n- "), "- **Kurzes Budget für den Kundenbericht")
+    assert "Es ist ein einzelner einfacher Befehl wie die übrigen Skripte." in zeile             # keine Kette (M12)
+    assert "&&" not in zeile and "2>&1" not in zeile and "erlaubt" not in zeile and "Kette mit" not in zeile
+    assert "nur verkürzbar" in zeile and "verlängerbar" not in zeile and "verlängert" not in zeile        # N03
+    assert "Läuft das Budget ab, endet es mit Exit 4 (`pdf-fehler`) und lässt das Markdown liegen." in zeile      # M13
+    assert "Exit 2" not in zeile and "löscht" not in zeile
+    # M5: fehlendes Werkzeug = Exit 3, zu alte Version = Exit 4 (das Skript prüft nur das Vorhandensein, `poc.werkzeug_fehlt`)
+    assert "Fehlt ein Werkzeug, endet es mit Exit 3 (`pdf-werkzeug-fehlt`), ebenfalls mit Markdown." in zeile
+    assert "Eine zu alte Version (Option `--sandbox` bzw. `--allowed-protocols` unbekannt) endet mit Exit 4 (`pdf-fehler`), ebenfalls mit Markdown." in zeile
+    assert "Fehlt eines, endet es mit Exit 3" not in zeile
+    quelle = _lies(os.path.join(HIER, "kundenbericht.py"))
+    assert '"--sandbox"' in quelle and "--allowed-protocols" in quelle and "poc.werkzeug_fehlt(n)" in quelle
+    assert 'Abbruch(4, "pdf-fehler", [f"pandoc endete mit Exit' in quelle                       # zu alte Version: Werkzeug endet mit Exit != 0
 
 
-def test_bericht_format_nennt_die_kundenfelder_und_den_abschnitt_kundenbericht():
-    """Felder `zusammenfassung`, `massnahme`, `ordner` (außerhalb der Tabelle der Pflichtfelder); Abschnitt „Kundenbericht“ mit Stufentabelle,
-    Nachweistexten und Exit-Codes, passend zu `kundenbericht.py`."""
+def _tabellenzeilen(text: str) -> dict[str, list[str]]:
+    """Zeilen einer Markdown-Tabelle, die mit `| <Schlüssel> |` beginnen: Schlüssel -> Zellen (ohne den Schlüssel)."""
+    aus = {}
+    for z in text.splitlines():
+        if z.startswith("| ") and not z.startswith("| ---"):
+            zellen = [c.strip() for c in z.strip().strip("|").split(" | ")]
+            aus[zellen[0]] = zellen[1:]
+    return aus
+
+
+def test_bericht_format_nennt_die_kundenfelder_mit_laenge_und_einzeiligkeit():
+    """Felder `zusammenfassung`, `massnahme` (Länge aus `bericht.KUNDENFELDER`, einzeilig) und `ordner` (außerhalb der Pflichttabelle)."""
     text = _lies(BERICHT_FORMAT)
     for feld in ("`zusammenfassung`", "`massnahme`", "`ordner`"):
         assert feld in text, feld
-    assert "40 bis 600" in text and "20 bis 400" in text
+    zeilen = _tabellenzeilen(text[text.index("## Kundenfelder"):text.index("## Werkzeugbefunde")])
+    for feld, (mini, maxi) in bericht.KUNDENFELDER.items():
+        inhalt = zeilen[f"`{feld}`"][-1]
+        assert inhalt.endswith(f"Einzeilig, {mini} bis {maxi} Zeichen"), (feld, inhalt)
     pflicht = text[text.index("## Oberste Ebene"):text.index("## Befund")]
     ordner_zeilen = [z for z in text.splitlines() if z.startswith("| `ordner`")]
     assert not ordner_zeilen, "ordner steht außerhalb der Tabelle „Oberste Ebene (alles Pflicht)“"
     assert "`ordner`" in text[text.index("## Befund"):] or "`ordner`" in pflicht
+
+
+def test_bericht_format_kundenbericht_stufen_nachweis_und_kundentexte_entsprechen_dem_skript():
+    """I2: Abschnitt „Kundenbericht“ gibt die festen Kundentexte des Skripts wörtlich wieder (Nachweis je Herkunft, Einordnung der
+    Stufen, Grenzen, Entwarnung), Kopf „Geprüfter Stand (Commit)“, Sortierung nach Dringlichkeit, Empfehlung der erneuten Prüfung."""
+    text = _lies(BERICHT_FORMAT)
     k = _abschnitt(text, "Kundenbericht")
     for stufe in kundenbericht.KUNDENSTUFEN:
         assert stufe in k, stufe
     assert "`ohne_anmeldung`" in k and "`mandantenuebergreifend`" in k
-    for nachweis in (kundenbericht._NACHWEIS_NACHGESTELLT, kundenbericht._NACHWEIS_ANNAHME, kundenbericht._NACHWEIS_ABGELEITET,
-                     *kundenbericht._NACHWEIS_WERKZEUG.values()):
-        assert nachweis in k, nachweis
+    nachweise = _tabellenzeilen(k[k.index("**Nachweis**"):k.index("Für Befunde mit `werkzeug` `gitleaks`")])
+    erwartet = {
+        "`bestätigt` ohne `annahme_modell`": kundenbericht._NACHWEIS_NACHGESTELLT,
+        "`bestätigt` mit `annahme_modell: true`": kundenbericht._NACHWEIS_ANNAHME,
+        "`unbestätigt` (Code-Befund)": kundenbericht._NACHWEIS_ABGELEITET,
+        "`werkzeug` `osv-scanner`": kundenbericht._NACHWEIS_WERKZEUG["osv-scanner"],
+        "`werkzeug` `gitleaks`": kundenbericht._NACHWEIS_WERKZEUG["gitleaks"],
+        "`werkzeug` `lieferkette`": kundenbericht._NACHWEIS_WERKZEUG["lieferkette"],
+    }
+    for herkunft, nachweis in erwartet.items():
+        assert nachweise[herkunft] == [nachweis], (herkunft, nachweise.get(herkunft))
+    assert kundenbericht._NACHWEIS_ABGELEITET == "aus dem Quellcode abgeleitet, im Test nicht bestätigt (mögliche Schwachstelle)"
     assert kundenbericht.GITLEAKS_TITEL in k
-    for kategorie in KUNDEN_KATEGORIEN:
-        assert f"`{kategorie}`" in k, kategorie
+    # Kopf, Einordnung, Sortierung, Grenzen, Entwarnung: wörtlich aus dem Skript
+    assert "„Geprüfter Stand (Commit)“" in k and "Datum und Commit" not in k
+    for stufe, einordnung in kundenbericht._EINORDNUNG:
+        assert f"- {stufe}: {einordnung}" in k, stufe
+    assert "„Die Befunde sind nach Dringlichkeit sortiert.“" in k and "Die Befunde sind nach Dringlichkeit sortiert." in kundenbericht.markdown_erzeugen(
+        _beispiel_json())
+    for satz in kundenbericht._GRENZEN:
+        assert f"- {satz}" in k, satz
+    assert "Nach Umsetzung der Maßnahmen empfehlen wir eine erneute Prüfung." in kundenbericht._GRENZEN
+    assert f"„{kundenbericht._KEINE_SCHWACHSTELLEN}“" in k
+    # bestätigt: „ausnutzbar“, unbestätigt: „mögliche Schwachstelle … nicht nachgestellt“ und nie „ausnutzbar“
+    zeile = _punkt(k, r"^Je Kundenstufe mit Befunden")
+    assert "„Es besteht eine Schwachstelle der Stufe …“" in zeile and "`bestätigt`" in zeile and "„ausnutzbar“" in zeile
+    assert "„Es besteht eine mögliche Schwachstelle der Stufe …, die im Test nicht nachgestellt werden konnte“" in zeile
+    assert "bei `unbestätigt`" in zeile and "nie „ausnutzbar“" in zeile and "Empfehlung in Sie-Form" in zeile
+    for stufe, ((sg, pl), best, unbest) in kundenbericht._STUFE_TEXT.items():
+        assert "ausnutzbar" in sg and "ausnutzbar" in pl and "ausnutzbar" not in unbest and "ausnutzbar" not in best, stufe
+
+
+def test_bericht_format_kundenbericht_eingeschraenkte_pruefung():
+    """Die Tabelle der Hinweise und ihrer Kundentexte entspricht `kundenbericht._EINGESCHRAENKT`; der Satz steht am Ende der
+    Management-Zusammenfassung (statt der Entwarnung) und unter „Umfang und Grenzen“; Standardausnahmen von gitleaks zählen nicht."""
+    k = _abschnitt(_lies(BERICHT_FORMAT), "Kundenbericht")
+    zeilen = _tabellenzeilen(k[k.index("**Eingeschränkte Prüfung:**"):k.index("**Exit-Codes.**")])
+    for muster, kundentext in kundenbericht._EINGESCHRAENKT:
+        eintraege = [(schluessel, z) for schluessel, z in zeilen.items() if kundentext in z]
+        assert len(eintraege) == 1, (kundentext, zeilen)
+        schluessel = eintraege[0][0]
+        for m in muster:
+            assert f"`{m}`" in schluessel, (m, schluessel)
+    assert len(zeilen) - 1 == len(kundenbericht._EINGESCHRAENKT)                       # plus die Kopfzeile der Tabelle
+    satz = _punkt(k, r"^\*\*Eingeschränkte Prüfung:\*\* Fehlt eine Prüfung")
+    assert "„Die Prüfung war eingeschränkt (<Kundentexte>); das Ergebnis ist deshalb nicht vollständig.“" in satz
+    assert kundenbericht._eingeschraenkt_satz(["X"]) == "Die Prüfung war eingeschränkt (X); das Ergebnis ist deshalb nicht vollständig."
+    _kette(satz, "am Ende der Management-Zusammenfassung", "statt der Entwarnung", "unter „Umfang und Grenzen“")
+    assert "gitleaks-Standardausnahmen nicht geprüft" in k
+    assert not any("standardausnahmen" in m for muster, _t in kundenbericht._EINGESCHRAENKT for m in muster)
+    assert "„nur der Teilbereich <Teilpfad>“" in k
+
+
+def test_bericht_format_exit_tabelle_zeilenweise():
+    """I1, I4, M3, M5: Jede Zeile der Exit-Tabelle (Exit, `kategorie`, Bedeutung, Folge in Schritt 7) einzeln: Exit 2 mit Korrekturrunden und
+    ohne Dateien, Exit 3 und 4 immer mit Markdown, Exit 5 und 1 mit `kunde-md:` nur nach dem Schreiben; nur Exit 2 hat eine Feldkorrektur."""
+    k = _abschnitt(_lies(BERICHT_FORMAT), "Kundenbericht")
+    tabelle = k[k.index("| Exit | `kategorie`"):]
+    zeilen = _tabellenzeilen(tabelle[:tabelle.index("\n\n")])
+    assert list(zeilen) == ["Exit", "0", "2", "3", "4", "5", "1"], list(zeilen)
+    kategorie = {"0": "–", "2": "`inhalt`", "3": "`pdf-werkzeug-fehlt`", "4": "`pdf-fehler`", "5": "`eingabe`", "1": "`intern`"}
+    for code, wert in kategorie.items():
+        assert zeilen[code][0] == wert, (code, zeilen[code])
+    bedeutung = {code: zeilen[code][1] for code in kategorie}
+    folge = {code: zeilen[code][2] for code in kategorie}
+    assert folge["0"] == "Pfade in die Schlussmeldung" and bedeutung["0"] == "Markdown und PDF erstellt"
+    # Exit 2: keine Dateien, Feldkorrektur, 2 Korrekturrunden, danach „nicht erstellt (inhalt)“
+    assert "es liegen keine Kundendateien vor" in bedeutung["2"] and "Markdown" not in bedeutung["2"]
+    _kette(folge["2"], "`zusammenfassung`, `massnahme` und `titel` korrigieren", "`rendern` und `erstellen` neu", "höchstens 2 Korrekturrunden",
+           "(also höchstens 3 Aufrufe von `erstellen`)", "„Kundenbericht nicht erstellt (inhalt)“")
+    # Exit 3 und 4: immer `kunde-md:`, nur Markdown, keine Korrektur
+    for code in ("3", "4"):
+        assert "nur das Markdown liegt vor" in bedeutung[code] and "`kunde-md:` steht immer" in bedeutung[code], code
+        assert folge[code] == "keine Korrektur, „Kundenbericht nur als Markdown (<kategorie>)“", (code, folge[code])
+    assert "pandoc oder weasyprint fehlt oder ist nicht startbar" in bedeutung["3"] and "zu alte" not in bedeutung["3"]
+    assert "zu alte Werkzeugversion" in bedeutung["4"] and "Zeitbudget" in bedeutung["4"] and "HTML-Prüfung" in bedeutung["4"]
+    # Exit 5 und 1: `kunde-md:` nur, wenn das Markdown schon geschrieben war
+    for code in ("5", "1"):
+        assert "`kunde-md:` steht nur, wenn das Markdown schon geschrieben war" in bedeutung[code], code
+        assert folge[code] == ("keine Korrektur; mit `kunde-md:` „Kundenbericht nur als Markdown (<kategorie>)“, "
+                               "sonst „Kundenbericht nicht erstellt (<kategorie>)“"), (code, folge[code])
+        assert "keine Kundendateien" not in bedeutung[code] + folge[code]
+    assert "Schreiben (auch des PDF)" in bedeutung["5"] and "Ausnahme in der PDF-Kette" in bedeutung["1"]
+    assert sum("korrigieren" in f for f in folge.values()) == 1                         # nur Exit 2 korrigiert Felder
+    # Einleitung: `kategorie:`, `kunde-md:`, Zeilengrenze
+    einleitung = _punkt(k, r"^\*\*Exit-Codes\.\*\*")
+    _kette(einleitung, "Bei Exit ≠ 0 ist die erste Zeile auf stdout `kategorie: <wert>`", "folgt `kunde-md: <pfad>`, wenn das Markdown liegt",
+           "bei Exit 3 und 4 immer", "bei Exit 1 und 5 nur, wenn der Fehler nach dem Schreiben des Markdown auftrat",
+           "Bei Exit 0 stehen `kunde-md:` und `kunde-pdf:` auf stdout", f"höchstens {kundenbericht.MAX_ZEILEN} Zeilen",
+           "„… und <n> weitere“", "nennen nie den Treffertext")
+    assert "keine Kundendateien" not in einleitung
+    # Mindestversionen: zu alte Version = Exit 4 (M5)
+    nachsatz = _punkt(k, r"^Scheitert `rendern` mit Exit 2")
+    assert "Mindestversionen: pandoc ≥ 2.15 (für `--sandbox`), weasyprint mit Option `--allowed-protocols` (geprüft mit 68.1)" in nachsatz
+    assert "Eine zu alte Version endet mit Exit 4 (`pdf-fehler`), ein fehlendes Werkzeug mit Exit 3." in nachsatz and "alte Version endet mit Exit 3" not in nachsatz
     for code in ("| 0 |", "| 1 |", "| 2 |", "| 3 |", "| 4 |", "| 5 |"):
         assert code in k, code
     assert "-kunde.md" in k and "-kunde.pdf" in k
@@ -1964,6 +2220,19 @@ def test_beispiel_json_traegt_die_kundenfelder_in_sie_form():
                            env={**os.environ, "SECURITY_AUDIT_OHNE": "pandoc,weasyprint"})
         assert r.returncode == 3 and r.stdout.startswith("kategorie: pdf-werkzeug-fehlt"), (r.returncode, r.stdout, r.stderr)
         assert os.path.isfile(os.path.join(tmp, "beispiel-kunde.md"))
+
+
+def test_run_eval_docstring_nennt_das_restrisiko_der_kundenbericht_regel():
+    """M7: Die Regel `kundenbericht.py erstellen --json <ausgabe>/*` ist so breit wie `rendern`; der Docstring nennt `..`, ein zweites
+    `--json` und das Entfernen alter `-kunde.*`-Dateien neben einer beliebigen `*.json` (nur Docstring, kein Code)."""
+    import ast
+    quelle = _lies(os.path.join(SKILL_DIR, "evals", "run_eval.py"))
+    funktion = next(n for n in ast.walk(ast.parse(quelle)) if isinstance(n, ast.FunctionDef) and n.name == "erlaubte_regeln")
+    doc = " ".join(ast.get_docstring(funktion).split())
+    assert "treffen auch `..`-Pfade" in doc
+    assert "ein zweites `--json`" in doc and "das letzte `--json` gilt" in doc
+    assert "`-kunde.md` und `-kunde.pdf` neben jeder `*.json`" in doc and "auch ohne gültigen Bericht" in doc
+    assert "kundenbericht.py erstellen --json <ausgabe>/*" in doc
 
 
 def test_readme_nennt_kundenbericht_dateien_versionen_und_tests():
