@@ -1,6 +1,6 @@
 # Spec TF4: Kundenbericht (Markdown und PDF)
 
-Stand: nach Spec-Review R1 (1/12/16). **Die „Nachträge nach Spec-Review R1“ am Ende haben Vorrang vor dem Text darüber.** Feature-File `docs/features/2026-11-09-security-audit.md`, Abschnitt TF4 (DoD TF4-D1 bis TF4-D8). Branch `skills/audit-kundenbericht`, gestapelt auf `skills/audit-ki` (TF3, PR #13).
+Stand: nach Spec-Review R2. **Die Nachträge R1 und R2 am Ende haben Vorrang; R2 vor R1.** Feature-File `docs/features/2026-11-09-security-audit.md`, Abschnitt TF4 (DoD TF4-D1 bis TF4-D8). Branch `skills/audit-kundenbericht`, gestapelt auf `skills/audit-ki` (TF3, PR #13).
 
 ## Ziel
 
@@ -261,3 +261,75 @@ Nur Standardbibliothek. Kindprozesse (`pandoc`, `weasyprint`) laufen über eigen
 - **K14:** Der Hinweis nach 2 gescheiterten Runden steht in der Schlussmeldung, nicht in `bericht.hinweise`.
 - **K15:** Die Schreibregel verbietet, `advisories[].zusammenfassung` (OSV-Text) zu übernehmen.
 - **K16:** Die Prüfungen auf Du-Formen, Exploit-Spuren, URLs und Länge laufen zusätzlich in `bericht.pruefe_schema`, sobald die Felder vorhanden sind. So reicht eine Korrekturschleife über `rendern`, und `kundenbericht.py` prüft danach erneut. Der Prüfcode wird geteilt, `kundenbericht.py` importiert ihn aus `bericht.py`.
+
+## Nachträge nach Spec-Review R2 (Vorrang vor allem oben)
+
+
+**B-1** (Regel (a) trifft gewöhnliche deutsche Wörter aus dem `poc` (Z. 196, mit Z. 82–83))
+(a) Ein Token aus `poc` (Trenner Whitespace; vorn und hinten werden `.,;:()"'` abgeschnitten) zählt nur, wenn es mindestens 6 Zeichen hat **und** eines der Zeichen `/ = ? & % < > { } _ @ $ \ [ ]` enthält oder eine Folge Wortzeichen-Punkt-Wortzeichen (`\w\.\w`). Reine Wörter aus Buchstaben und Bindestrichen zählen nie; eine Liste von Allerweltswörtern entfällt. Der Abgleich ist ein Teilstring-Abgleich nach NFC und casefold. Die Meldung nennt Befund-ID, Feld, Regel `a` und das Token selbst, gekürzt auf 60 Zeichen per `gitkopie._t`. Das Token stammt aus dem JSON der Hauptsession und ist ihr bereits bekannt. Die Regel „nie den Treffertext“ gilt weiter für die Regeln b bis e und für Text außerhalb des Tokens.
+- Test: Der PoC aus `bericht-format.md:134` plus die zwei Kundensätze oben ergeben Exit 0. Steht `/api/orders/9` oder `org_id` in `massnahme`, ergibt das Exit 2.
+
+
+**B-2** (K16 koppelt den technischen Bericht an die Kundenprüfung, ohne Ausweg (Z. 263))
+K16 neu: `bericht.pruefe_schema` prüft `zusammenfassung` und `massnahme` nur auf Typ, Einzeiligkeit, unsichtbare Zeichen und Länge (40 bis 600 bzw. 20 bis 400). Die Inhaltsregeln (Du-Formen, a bis e, URLs/E-Mail) stehen in `bericht.kunden_verstoesse(daten) -> list[tuple[id, feld, regel, detail]]` und laufen nicht in `pruefe_schema`. `rendern` ruft `kunden_verstoesse` auf und gibt Treffer nur als Warnung auf stderr aus („Kundenbericht wird scheitern: …“), mit Exit 0. `kundenbericht.py` ruft zuerst `pruefe_schema` auf einer Kopie ohne die beiden Felder auf; Fehler dort ergeben Exit 5 `kategorie: eingabe`. Danach folgen die Typ- und Längenprüfung der Felder, fehlende Felder und `kunden_verstoesse`; Treffer ergeben Exit 2 `kategorie: inhalt`. Die Grenze von 2 Korrekturrunden gilt für Exit 2 von `kundenbericht.py`. `rendern` scheitert nie an Kundenregeln.
+
+
+**W-1** (Die Erlaubtliste der HTML-Prüfung verwirft das eigene Template (Z. 188–189 gegen Z. 238))
+W2 ergänzt: `lang` ist nur auf `html` erlaubt, nur mit dem Wert `de`. Es gibt genau ein `<style>`, sein Inhalt ist byte-gleich mit dem CSS des Templates. Tabellen gibt es nur in der Management-Zusammenfassung (Spalten Kundenstufe und Anzahl); Befunde stehen nie in Tabellen. pandoc läuft mit `--columns=1000`.
+
+
+**W-2** (`titel`: B1 und W11 widersprechen sich, Skript und Eval prüfen Verschiedenes (Z. 174, 204, 122))
+Für `titel` gelten im Kundenbericht die Regeln d, e und W11 (nicht a, b, c und nicht die Du-Prüfung). Ein Treffer im Titel ergibt Exit 2. Die Korrektur darf dann `titel` umformulieren, ohne `stufe`, `status`, `datei` oder andere Felder zu ändern, danach folgt wie bei den Feldern erneut `rendern`. Das Eval prüft TF4-D6 mit derselben Funktion `bericht.kunden_verstoesse` auf dem Bericht-JSON (keine Treffer) und am Markdown nur Kopf, Datei-Endungen und `%PDF`. Eine zweite Regex-Prüfung am Markdown gibt es nicht.
+
+
+**W-3** (Was geprüft wird, ist offen: Rohwerte oder fertiges Markdown, ersetzt oder zusätzlich (Z. 77–84 gegen Z. 194–203))
+Die Regeln a bis e, die Du-Prüfung und W11 ersetzen Z. 77–84 vollständig. Geprüft werden die Rohwerte aus dem JSON (nach NFC und casefold), vor dem Escaping, nie das erzeugte Markdown.
+
+
+**W-4** (Regel (d) verfehlt `Dockerfile:6`, das eigene Beispiel (Z. 199 gegen Z. 203))
+(d) zusätzlich: Für jeden `datei`-Wert und jeden Dateiteil eines `code_pfad`-Eintrags aller Befunde, jeweils auch für den Basename, ist `<pfad>` gefolgt von `\s*:\s*\d+` oder `,?\s*(Zeile|Z\.)\s*\d+` verboten (`re.escape`, casefold). Der Satz „z. B. `Dockerfile:6`“ in Z. 199 bezieht sich auf diese Regel.
+
+
+**W-5** (Die Liste „eingeschränkt“ (W7) ist unvollständig und ohne Kundentext (Z. 219–220))
+W7 ergänzt: Eine feste Tabelle im Skript bildet Teilstrings in `hinweise` auf Kundentexte ab:
+- `gitleaks fehlt` → „Suche nach Zugangsschlüsseln“
+- `osv-scanner fehlt` oder `abhaengigkeiten fehlgeschlagen` → „Abgleich der Abhängigkeiten“
+- `lieferkette fehlgeschlagen` → „Prüfung der Build-Konfiguration“
+- `docker-fehlt`, `build-fehler`, `build-timeout`, `start-fehler`, `lockfile-fehlt`, `lockfile-fremde-quelle`, `nicht-npm` → „Nachweis im Test“
+- `Zeitbudget` → „vollständige Laufzeit einzelner Prüfungen“
+- `ki.py erkennen fehlgeschlagen` oder `Modell-Mock nicht möglich` → „Prüfung der KI-Funktionen“
+
+Ein gesetzter `teilpfad` ergibt „nur der Teilbereich <teilpfad>“. Der Satz „Die Prüfung war eingeschränkt (…)“ steht immer unter „Umfang und Grenzen“, sobald ein Eintrag zutrifft (jeder Text nur einmal). Ohne Befunde ersetzt er zusätzlich den Satz „keine ausnutzbaren Schwachstellen“.
+
+
+**W-6** (Das E-Mail-Muster ist nicht festgelegt; Werkzeugtitel enthalten `@` (Z. 204))
+W11: Das E-Mail-Muster ist `[\w.+-]+@[\w-]+(\.[\w-]+)*\.[A-Za-z]{2,}\b`; `name@1.2.3` und `@scope/pkg@1.0.0` treffen es nicht (Test). `www.` gilt nur mit Wortgrenze davor: `\bwww\.`.
+
+
+**Klein (R2), alle angenommen:**
+- **K-1 Budget (Z. 40, 101 gegen Z. 192):**
+  > Gesamt 90 s, pandoc höchstens 20 s, weasyprint höchstens 60 s, jeder Timeout ist `min(Anteil, Restbudget)`. Grundregel 8 nennt `kundenbericht.py erstellen` unter „Kurze Budgets ohne langen Bash-Timeout“ mit 90 s. Z. 40 und Z. 101 gelten nicht mehr.
+  - Hintergrund: `_gruppe_beenden` kann nach einem Timeout bis zu 25 s brauchen (`gitkopie.py:105–122`). Mit 90 s bleibt das unter dem Bash-Standard von 120 s.
+- **K-2 Exit-Codes in einer Tabelle:**
+  > 0: Markdown und PDF erstellt. 2 `inhalt`: Feldkorrektur möglich. 3 `pdf-werkzeug-fehlt`: Werkzeug fehlt oder ist nicht startbar. 4 `pdf-fehler`: dazu gehören auch eine unbekannte Option, die HTML-Prüfung, ein Treffer in stderr und eine leere Datei. 5 `eingabe`: Lesen, Symlink, Schema außerhalb der zwei Felder, Schreiben. 1: unerwarteter Fehler. Die erste stdout-Zeile ist bei Exit ≠ 0 `kategorie: <wert>`. Bei 3 und 4 folgt `kunde-md: <pfad>`. Meldungen stehen auf stdout, höchstens 30 Zeilen. Schritt 7: Bei Exit 5 und 1 gibt es keine Korrektur, die Schlussmeldung sagt „Kundenbericht nicht erstellt (<kategorie>)“.
+- **K-3 weasyprint (Z. 182–183):**
+  > Der stderr-Abgleich ignoriert Groß- und Kleinschreibung (weasyprint schreibt `ERROR: Failed to load …`). Die Vorprüfung per `weasyprint --help` entfällt: Eine unbekannte `--allowed-protocols` endet mit rc ≠ 0 und damit mit Exit 4.
+  - Per Probe belegt: `--allowed-protocols ''` ergibt die Menge `{''}` (`weasyprint/__main__.py:200–202`), damit ist jedes Protokoll gesperrt, auch `file:` und `data:`. Die Eingabedatei wird trotzdem gelesen, rc ist 0.
+- **K-4 `ordner` (Z. 233):**
+  > `bericht.py kontext` gibt `ordner` (Basename von `wurzel`, bereinigt wie `repo`) selbst aus. Die Notiz in Schritt 1 nennt `ordner`. `pruefe_schema` prüft `ordner`, falls vorhanden, als einzeiligen Text. Das Escaping nach K1 gilt auch für `ordner`.
+  - Grund: So muss das Modell den Basename nicht selbst bilden, und der Text im Kopf ist geprüft. Bisher würden unbekannte Felder ignoriert (`bericht-format.md:58`).
+- **K-5 Namenskollision `-kunde`:**
+  > Gibt es `<basisname>-kunde.json`, endet `kundenbericht.py` mit Exit 5 und entfernt nichts.
+  - Grund: Ein Audit mit `teilpfad` `kunde` erhält den Basename `<datum>-<sha7>-kunde` (`bericht.py:130–131`, `:171`). Sein technisches `.md` heißt dann wie der Kundenbericht des Gesamt-Audits vom selben Tag, und W8 würde es löschen.
+- **K-6 Reihenfolge in W8 (Z. 223):**
+  > Das Entfernen von `-kunde.md` und `-kunde.pdf` geschieht direkt nach der Pfadprüfung des JSON und vor dem Lesen. Ist einer der beiden Pfade ein Symlink oder keine reguläre Datei, endet das Skript mit Exit 5, ohne etwas zu entfernen.
+- **K-7 Escaping (Z. 75 gegen Z. 236):**
+  > `<` und `>` werden wie alle Zeichen der K1-Menge mit Backslash escaped, nicht als `&lt;`/`&gt;`, sonst entsteht ein doppeltes Escaping.
+- **K-8 Abweichung vom Default festhalten:**
+  > Entscheidung 7: Die Feature-File-Vorgabe „prüft danach das ganze erzeugte Markdown“ gilt eingeschränkt: Geprüft werden die Rohwerte von `zusammenfassung`, `massnahme` und (nach W-2) `titel`. Die festen Texte sichert ein Test.
+- **K-9 K13 und der Secret-Titel (Z. 259 gegen `SKILL.md:130`, `test_skill_text.py:611`):**
+  > Der Kundenbericht zeigt für Befunde mit `werkzeug: gitleaks` statt `titel` den festen Titel „Zugangsschlüssel in der Versionsgeschichte“. Schritt 5b und der technische Titel bleiben unverändert.
+- **K-10 Testdesign zu D4 und Regel e:**
+  > Der Test für TF4-D4 nutzt `datei: src/dir/x.ts` bei einem Befund und schreibt diesen Pfad nicht in `massnahme` (das wäre ein Treffer der Regel e). Zusätzlich gibt es einen Test, in dem „dir“ als eigenes Wort in `massnahme` Exit 2 ergibt.
+
+**Entscheidung R2-B2:** K16 aus R1 entfällt; es gilt B-2 (Inhaltsregeln nur in `bericht.kunden_verstoesse`, `rendern` warnt, `kundenbericht.py` entscheidet). **Entscheidung K-8:** Geprüft werden die Rohwerte der Kundenfelder und des Titels (W-2/W-3), nicht das ganze Markdown — Abweichung vom Default „ganzes Markdown“, weil Escapes den Abgleich verfälschen und feste Bausteine keine Kundendaten enthalten.
