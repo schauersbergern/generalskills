@@ -1389,3 +1389,443 @@ def test_kontext_mit_ausreichendem_budget_laeuft_normal_haertung_i3(tmp_path, mo
     monkeypatch.setenv("SECURITY_AUDIT_KONTEXT_TIMEOUT", "120")
     p = lauf("kontext", "--repo", str(r))
     assert p.returncode == 0, p.stderr
+
+
+# ------------------------------------------------------------------------------------ TF4: Kundenfelder, ordner, Kundenprüfung
+
+KD_POC = ("poc.py anfrage --rolle p1 --methode GET --pfad /api/orders/9 --header 'Authorization: Bearer <TOKEN_A>' "
+          "-> 200, Body enthält die Bestellung 9 mit org_id 2 (Organisation B)")
+KD_ZUSAMMENFASSUNG = ("Fremde Organisationen können Bestellungen anderer Kunden einsehen. "
+                      "Dadurch drohen Datenabfluss und ein Vertrauensverlust.")
+KD_MASSNAHME = "Wir empfehlen, die Zugriffsprüfung für Bestellungen zu ergänzen."
+KD_VORSPANN = "Wir empfehlen, den Zugriff zu begrenzen. "
+
+
+def kd(massnahme=KD_MASSNAHME, zusammenfassung=KD_ZUSAMMENFASSUNG, **rest):
+    """Dokument mit einem bestätigten Befund S-1, der beide Kundenfelder trägt."""
+    d = beispiel()
+    rest = {"poc": KD_POC, "code_pfad": ["src/api/orders.ts:11", "src/lib/fetch.ts:18"], **rest}
+    b = befund(**rest)
+    if zusammenfassung is not None:
+        b["zusammenfassung"] = zusammenfassung
+    if massnahme is not None:
+        b["massnahme"] = massnahme
+    d["befunde"] = [b]
+    return d
+
+
+def regeln(daten, feld=None):
+    """Regel-Kürzel der Treffer (optional nur eines Felds)."""
+    return [r for (_i, f, r, _d) in bericht.kunden_verstoesse(daten) if feld in (None, f)]
+
+
+def test_kunden_regeln_konstante():
+    assert bericht.KUNDEN_REGELN == ("du", "a", "b", "c", "d", "e", "url", "email")
+
+
+def test_kunden_verstoesse_gueltiger_bericht_hat_keine_treffer():
+    assert bericht.kunden_verstoesse(kd()) == []
+    assert bericht.kunden_verstoesse(beispiel()) == []          # ohne Kundenfelder: nichts zu prüfen
+
+
+@pytest.mark.parametrize("satz,wort", [
+    ("Prüfe, ob du Zugriff hast.", "du"), ("Wir senden dir den Bericht.", "dir"), ("Das gilt auch für dich.", "dich"),
+    ("Dein Team muss handeln.", "Dein"), ("Bitte deine Rechte prüfen.", "deine"), ("Mit deinen Daten.", "deinen"),
+    ("In deinem Projekt.", "deinem"), ("Die Sache deiner Firma.", "deiner"), ("Das Ziel deines Teams.", "deines"),
+    ("Das liegt bei euch.", "euch"), ("Euer Team handelt.", "Euer"), ("Prüft eure Daten.", "eure"),
+    ("Mit euren Daten.", "euren"), ("In eurem Projekt.", "eurem"), ("Die Sache eurer Firma.", "eurer"),
+    ("Das Ziel eures Teams.", "eures"), ("Hast du.", "du"), ("DU kannst das.", "DU"),
+])
+def test_kunden_verstoesse_du_formen(satz, wort):
+    for feld in ("massnahme", "zusammenfassung"):
+        d = kd(**{feld: KD_VORSPANN + KD_VORSPANN + satz})
+        assert bericht.kunden_verstoesse(d) == [("S-1", feld, "du", wort)]
+
+
+@pytest.mark.parametrize("satz", [
+    "Bitte deinstallieren Sie das Paket.", "Eureka ist kein Problem.", "Das Paket dir-glob ist betroffen.", "Ihr Team handelt.",
+    "Dürfen Sie das?", "Eine duplizierte Prüfung.", "Das Modul dir.json bleibt.", "Pfad a/dir/b bleibt.", "Mail du@beispiel.com bleibt.",
+])
+def test_kunden_verstoesse_du_gegenbeispiele(satz):
+    d = kd(massnahme=KD_VORSPANN + satz)
+    assert "du" not in regeln(d)
+
+
+def test_kunden_verstoesse_du_nur_in_den_kundenfeldern_nicht_im_titel():
+    d = kd(titel="Bring dir deine Daten")
+    assert bericht.kunden_verstoesse(d) == []
+
+
+def test_kunden_verstoesse_a_token_aus_poc():
+    for token in ("/api/orders/9", "org_id", "poc.py"):
+        d = kd(massnahme=f"{KD_VORSPANN}Die Stelle {token} wird geändert.")
+        assert bericht.kunden_verstoesse(d) == [("S-1", "massnahme", "a", token)]
+    d = kd(zusammenfassung=KD_ZUSAMMENFASSUNG + " Betroffen ist org_id.")
+    assert bericht.kunden_verstoesse(d) == [("S-1", "zusammenfassung", "a", "org_id")]
+
+
+def test_kunden_verstoesse_a_token_ohne_satzzeichen_und_klammern():
+    d = kd(massnahme=f"{KD_VORSPANN}Die Stelle /api/orders/9 wird geändert.",
+           poc="poc.py (/api/orders/9), 'xx_yy_z'; fertig.")
+    assert [t[3] for t in bericht.kunden_verstoesse(d)] == ["/api/orders/9"]
+    d = kd(massnahme=f"{KD_VORSPANN}Der Wert xx_yy_z wird geändert.", poc="poc.py (/api/orders/9), 'xx_yy_z'; fertig.")
+    assert [t[3] for t in bericht.kunden_verstoesse(d)] == ["xx_yy_z"]
+
+
+def test_kunden_verstoesse_a_ohne_beachtung_der_grossschreibung():
+    d = kd(massnahme=f"{KD_VORSPANN}Die Spalte ORG_ID wird geändert.")
+    assert regeln(d) == ["a"]
+
+
+@pytest.mark.parametrize("wort", ["enthält", "Bestellung", "Organisation", "Authorization", "anfrage", "--rolle", "--methode",
+                                  "Bestellungen"])
+def test_kunden_verstoesse_a_reine_woerter_zaehlen_nie(wort):
+    d = kd(massnahme=f"{KD_VORSPANN}Das Wort {wort} steht hier.")
+    assert regeln(d) == []
+
+
+def test_kunden_verstoesse_a_kurze_token_zaehlen_nicht():
+    d = kd(massnahme=f"{KD_VORSPANN}Das Kürzel a/b/c steht hier.", poc="poc.py a/b/c -> ok")
+    assert regeln(d) == []
+
+
+def test_kunden_verstoesse_a_tausenderpunkte_zaehlen_nicht():
+    d = kd(zusammenfassung=KD_ZUSAMMENFASSUNG + " Betroffen sind über 10.000 Datensätze.", poc=KD_POC + " 10.000 1.234.567,89")
+    assert bericht.kunden_verstoesse(d) == []
+
+
+def test_kunden_verstoesse_a_token_gekuerzt_auf_60_zeichen():
+    lang = "/" + "a" * 79
+    d = kd(massnahme=f"{KD_VORSPANN}Die Stelle {lang} wird geändert.", poc=f"poc.py {lang}")
+    treffer = bericht.kunden_verstoesse(d)
+    assert [t[:3] for t in treffer] == [("S-1", "massnahme", "a")]
+    assert len(treffer[0][3]) <= 60 and treffer[0][3].startswith("/aaaa")
+
+
+@pytest.mark.parametrize("satz", ["Rufen Sie GET /api auf.", "Senden Sie get /api/x ab.", "Ein Post /x genügt.", "Per DELETE   /y",
+                                  "Mit patch /z", "Mit PUT /z"])
+def test_kunden_verstoesse_b_grossklein(satz):
+    d = kd(massnahme=KD_VORSPANN + satz)
+    assert regeln(d) == ["b"]
+
+
+@pytest.mark.parametrize("satz", ["Der Post für Sie ist da.", "Wir put alles in Ordnung.", "Das get Wort steht hier."])
+def test_kunden_verstoesse_b_gegenbeispiele(satz):
+    assert regeln(kd(massnahme=KD_VORSPANN + satz)) == []
+
+
+@pytest.mark.parametrize("zeichen", ["{", "}", "<", ">", "=", "`"])
+def test_kunden_verstoesse_c_zeichen(zeichen):
+    d = kd(massnahme=f"{KD_VORSPANN}Das Zeichen {zeichen} steht hier.")
+    assert regeln(d) == ["c"]
+
+
+@pytest.mark.parametrize("satz", ["Die Datei src/a.ts:42 ist betroffen.", "Siehe Zeile 42.", "Siehe zeile  7.", "Siehe #L42.",
+                                  "Siehe app.js:1."])
+def test_kunden_verstoesse_d_allgemeine_muster(satz):
+    assert regeln(kd(massnahme=KD_VORSPANN + satz)) == ["d"]
+
+
+@pytest.mark.parametrize("satz", ["Siehe Dockerfile:6 und weiter.", "Siehe Dockerfile : 6 und weiter.", "Siehe Dockerfile, Zeile 6 und weiter.",
+                                  "Siehe Dockerfile Z. 6 und weiter.", "Siehe dockerfile:6 und weiter.", "Siehe Dockerfile,Z.6 und weiter."])
+def test_kunden_verstoesse_d_dockerfile_zeile_6(satz):
+    d = kd(datei="Dockerfile", zeile=6, massnahme=KD_VORSPANN + satz)
+    assert "d" in regeln(d)
+    d["befunde"][0]["datei"] = None                                  # ohne diesen Pfad gilt nur das allgemeine Muster
+    d["befunde"][0]["zeile"] = None
+    if "Zeile" not in satz:
+        assert regeln(d) == []
+
+
+def test_kunden_verstoesse_d_basename_und_code_pfad_dateiteile():
+    d = kd(datei="src/web/App.tsx", massnahme=KD_VORSPANN + "In App.tsx , Zeile 3 beginnt es.")
+    assert "d" in regeln(d)
+    d = kd(massnahme=KD_VORSPANN + "Siehe Makefile: 3 weiter.")
+    d["befunde"][0]["code_pfad"] = ["Makefile:3", "src/x/y.ts:4"]
+    assert "d" in regeln(d)
+    d = kd(massnahme=KD_VORSPANN + "Im Matrix: 5 Systeme.")
+    d["befunde"][0]["datei"] = "x"
+    assert "d" not in regeln(d)                                      # linke Grenze: `x` steht nicht am Wortanfang
+
+
+@pytest.mark.parametrize("satz", ["Auf Node 22 läuft das.", "Der Port 3000 ist offen.", "Gegen 14:30 Uhr geschah das.",
+                                  "Betroffen ist Version 4.17.21 des Pakets.", "Betroffen sind über 10.000 Datensätze.",
+                                  "Das Paket name@1.2.3 ist alt.", "Das Paket @scope/pkg@1.0.0 ist alt."])
+def test_kunden_verstoesse_falschpositive(satz):
+    assert regeln(kd(massnahme=KD_VORSPANN + satz)) == []
+    assert regeln(kd(zusammenfassung=KD_ZUSAMMENFASSUNG + " " + satz)) == []
+
+
+def test_kunden_verstoesse_e_eigene_datei():
+    d = kd(datei="src/x/y.ts", massnahme=KD_VORSPANN + "Ergänzen Sie in src/x/y.ts die Prüfung.")
+    treffer = bericht.kunden_verstoesse(d)
+    assert [t[:3] for t in treffer] == [("S-1", "massnahme", "e")] and isinstance(treffer[0][3], str)
+    d = kd(datei="src/x/y.ts", titel="Fehler in src/x/y.ts")
+    assert [t[:3] for t in bericht.kunden_verstoesse(d)] == [("S-1", "titel", "e")]
+
+
+def test_kunden_verstoesse_e_code_pfad_und_datei_ohne_schraegstrich():
+    d = kd(massnahme=KD_VORSPANN + "Ergänzen Sie in src/api/orders.ts die Prüfung.")
+    assert regeln(d) == ["e"]
+    d = kd(massnahme=KD_VORSPANN + "Ergänzen Sie in SRC/LIB/FETCH.TS die Prüfung.")
+    assert regeln(d) == ["e"]
+    d = kd(datei="Dockerfile", massnahme=KD_VORSPANN + "Ergänzen Sie im Dockerfile die Prüfung.")
+    assert regeln(d) == []                                           # `datei` ohne `/` zählt für e nicht
+
+
+@pytest.mark.parametrize("text", ["Siehe https://beispiel.de/x.", "Siehe http://beispiel.de.", "Siehe HTTPS://BEISPIEL.DE.",
+                                  "Siehe www.beispiel.de.", "Siehe WWW.beispiel.de."])
+def test_kunden_verstoesse_url(text):
+    assert "url" in regeln(kd(massnahme=KD_VORSPANN + text))
+    assert "url" in regeln(kd(zusammenfassung=KD_ZUSAMMENFASSUNG + " " + text))
+    assert "url" in regeln(kd(titel=text))
+
+
+def test_kunden_verstoesse_url_gegenbeispiele():
+    assert regeln(kd(massnahme=KD_VORSPANN + "Die Wwwerte sind neu und awww.x bleibt.")) == []
+
+
+@pytest.mark.parametrize("text", ["Schreiben an kontakt@beispiel.de bitte.", "Mail a.b+c@sub.beispiel.de bitte.",
+                                  "Mail KONTAKT@BEISPIEL.DE bitte."])
+def test_kunden_verstoesse_email(text):
+    assert "email" in regeln(kd(massnahme=KD_VORSPANN + text))
+    assert "email" in regeln(kd(zusammenfassung=KD_ZUSAMMENFASSUNG + " " + text))
+    assert "email" in regeln(kd(titel=text))
+
+
+def test_kunden_verstoesse_detail_ohne_treffertext():
+    treffer = {
+        "b": "Rufen Sie GET /geheim an.", "c": "Setzen Sie {geheim}.", "d": "Siehe geheim.ts:42.",
+        "url": "Siehe https://geheim.example.", "email": "Mail geheim@beispiel.de bitte.",
+    }
+    for regel, satz in treffer.items():
+        t = [x for x in bericht.kunden_verstoesse(kd(massnahme=KD_VORSPANN + satz)) if x[2] == regel]
+        assert t and isinstance(t[0][3], str) and t[0][3] and "geheim" not in t[0][3].lower() and "GET" not in t[0][3]
+    t = bericht.kunden_verstoesse(kd(massnahme=KD_VORSPANN + "Ergänzen Sie in src/api/orders.ts die Prüfung."))
+    assert t[0][2] == "e" and "orders" not in t[0][3] and "src" not in t[0][3]
+
+
+def test_kunden_verstoesse_mehrere_regeln_und_felder_in_fester_reihenfolge():
+    d = kd(zusammenfassung=KD_ZUSAMMENFASSUNG + " Mail an x@beispiel.de und du darfst.",
+           massnahme=KD_VORSPANN + "Setzen Sie {a} bei GET /x ein.", titel="Fehler in src/api/orders.ts")
+    assert [(f, r) for (_i, f, r, _d) in bericht.kunden_verstoesse(d)] == [
+        ("zusammenfassung", "du"), ("zusammenfassung", "email"), ("massnahme", "b"), ("massnahme", "c"), ("titel", "e")]
+
+
+def test_kunden_verstoesse_wiederholter_treffer_wird_einmal_gemeldet():
+    d = kd(massnahme=KD_VORSPANN + "Setzen Sie {a} und {b} und {c} ein und du du.")
+    assert [(r) for (_i, _f, r, _d) in bericht.kunden_verstoesse(d)] == ["du", "c"]
+
+
+def test_kunden_verstoesse_fremder_befund():
+    d = kd(massnahme=KD_VORSPANN + "Die Spalte tenant_key wird geändert; siehe src/other/thing.ts bitte.")
+    d["befunde"].append(befund(id="S-2", status="verworfen", grund="x", poc="poc.py tenant_key -> 200",
+                               datei="src/other/thing.ts", zeile=3))
+    assert [t[1:3] for t in bericht.kunden_verstoesse(d)] == [("massnahme", "a"), ("massnahme", "e")]
+    d = kd(massnahme=KD_VORSPANN + "Die Stelle src/other/code.ts wird geändert.")
+    d["befunde"].append(befund(id="S-2", status="verdacht", poc="x", code_pfad=["src/other/code.ts:5", "a/b.ts:6"],
+                               datei=None, zeile=None))
+    assert [t[1:3] for t in bericht.kunden_verstoesse(d)] == [("massnahme", "e")]
+    d = kd(massnahme=KD_VORSPANN + "Siehe Makefile:3 hier.")
+    d["befunde"].append(befund(id="S-2", status="verworfen", grund="x", datei="Makefile", zeile=3))
+    assert "d" in regeln(d)
+
+
+def test_kunden_verstoesse_prueft_nur_bestaetigt_und_unbestaetigt():
+    d = beispiel()
+    schlecht = {"zusammenfassung": KD_ZUSAMMENFASSUNG + " und du", "massnahme": KD_MASSNAHME + " {x}", "titel": "Siehe a.ts:5"}
+    d["befunde"] = [befund(id="S-1", status="verworfen", grund="x", **schlecht), befund(id="S-2", status="verdacht", **schlecht),
+                    befund(id="S-3", status="unbestätigt", code_pfad=["a/b.ts:1", "a/c.ts:2"], **schlecht),
+                    befund(id="S-4", status="bestätigt", **schlecht)]
+    assert sorted({t[0] for t in bericht.kunden_verstoesse(d)}) == ["S-3", "S-4"]
+
+
+def test_kunden_verstoesse_status_nfd_wird_geprueft():
+    d = kd(massnahme=KD_VORSPANN + "Setzen Sie {a} ein.")
+    d["befunde"][0]["status"] = nfd("bestätigt")
+    assert regeln(d) == ["c"]
+
+
+def test_kunden_verstoesse_fehlende_felder_einzeln_uebersprungen():
+    d = kd(massnahme=KD_VORSPANN + "Setzen Sie {a} ein.", zusammenfassung=None)
+    assert regeln(d) == ["c"]
+    d = kd(massnahme=None, zusammenfassung=KD_ZUSAMMENFASSUNG + " und du")
+    assert regeln(d) == ["du"]
+    d = kd(massnahme=KD_VORSPANN + "Siehe a.ts:5", zusammenfassung=None)
+    del d["befunde"][0]["titel"]
+    assert regeln(d) == ["d"]
+    d = kd(massnahme=7, zusammenfassung=KD_ZUSAMMENFASSUNG + " und du", titel=["x"])
+    assert regeln(d) == ["du"]
+
+
+def test_kunden_verstoesse_titel_nur_d_e_url_email():
+    harmlos = "Bring dir GET /x {a} <b> = org_id und /api/orders/9 deine Daten"
+    assert bericht.kunden_verstoesse(kd(titel=harmlos)) == []
+    assert regeln(kd(titel="Fehler Zeile 42")) == ["d"]
+    assert regeln(kd(titel="Fehler in Dockerfile:6", datei="Dockerfile")) == ["d"]
+    assert regeln(kd(titel="Fehler in src/api/orders.ts")) == ["e"]
+    assert regeln(kd(titel="Fehler bei https://beispiel.de")) == ["url"]
+    assert regeln(kd(titel="Fehler bei a@beispiel.de")) == ["email"]
+    assert regeln(kd(titel="Fehler bei www.beispiel.de")) == ["url"]
+
+
+@pytest.mark.parametrize("daten", [
+    None, [], "text", 7, {}, {"befunde": "x"}, {"befunde": None}, {"befunde": {"S-1": 1}}, {"befunde": [None, 5, "x", [], {}]},
+    {"befunde": [{"id": 5, "status": "bestätigt", "massnahme": "du"}]},
+    {"befunde": [{"id": "S-1", "status": 5, "massnahme": "du"}]},
+    {"befunde": [{"id": "S-1", "status": "bestätigt", "poc": 5, "code_pfad": "x", "datei": 5, "massnahme": "du {x}"}]},
+    {"befunde": [{"id": "S-1", "status": "bestätigt", "poc": ["a"], "code_pfad": ["x", 3, None, {"a": 1}, "a/b:c"], "datei": ["x"],
+                  "massnahme": 7, "zusammenfassung": None, "titel": {"a": 1}}]},
+    {"befunde": [{"id": "S-1", "status": "bestätigt", "poc": "\ud800 a/b_c", "massnahme": "du \ud800 a/b_c", "titel": "\x00"}]},
+    {"befunde": [{"id": "S-1", "status": "bestätigt", "code_pfad": ["(" * 50, "["], "datei": "(", "massnahme": "( [ \\ ( zeile"}]},
+    {"befunde": [{"id": "S-1", "status": "bestätigt", "massnahme": "a" * 100000 + "@" + "b" * 100000, "titel": "." * 100000}]},
+])
+def test_kunden_verstoesse_wirft_nie(daten):
+    t0 = time.monotonic()
+    ergebnis = bericht.kunden_verstoesse(daten)
+    assert isinstance(ergebnis, list) and all(isinstance(x, tuple) and len(x) == 4 for x in ergebnis)
+    assert time.monotonic() - t0 < 5
+
+
+def test_kunden_verstoesse_aendert_eingabe_nicht():
+    d = kd(massnahme=KD_VORSPANN + "Setzen Sie {a} ein.")
+    vorher = copy.deepcopy(d)
+    bericht.kunden_verstoesse(d)
+    assert d == vorher
+
+
+def test_text_verstoesse_regeln_und_details():
+    text = "Wir senden dir GET /x, setzen {a} ein, siehe Zeile 4, https://x.example und a@beispiel.de."
+    treffer = bericht.text_verstoesse(text)
+    assert [r for (r, _d) in treffer] == ["du", "b", "c", "d", "url", "email"]
+    assert treffer[0] == ("du", "dir")
+    assert all(isinstance(d, str) and d for (_r, d) in treffer)
+
+
+def test_text_verstoesse_ohne_a_und_e_und_ohne_treffer():
+    assert bericht.text_verstoesse("Das Modul src/api/orders.ts und org_id bleiben unbewertet.") == []
+    assert bericht.text_verstoesse("Es bestehen 2 kritische Schwachstellen. Wir empfehlen die Behebung vor dem Release.") == []
+    assert bericht.text_verstoesse("") == []
+
+
+@pytest.mark.parametrize("wert", [None, 5, ["x"], {"a": 1}, b"du"])
+def test_text_verstoesse_wirft_nie(wert):
+    assert bericht.text_verstoesse(wert) == []
+
+
+def test_text_verstoesse_gegenbeispiele_du():
+    assert bericht.text_verstoesse("Bitte deinstallieren Sie Eureka und dir-glob; Ihr Team prüft das.") == []
+
+
+def test_rendern_warnt_bei_kundenverstoss_exit0(tmp_path):
+    d = kd(massnahme=KD_VORSPANN + "Rufen Sie GET /geheim an, dann prüfe org_id und deine Daten.")
+    pfad = tmp_path / "2026-11-09-abc1234.json"
+    pfad.write_text(json.dumps(d))
+    p = lauf("rendern", str(pfad))
+    assert p.returncode == 0, p.stderr
+    assert (tmp_path / "2026-11-09-abc1234.md").exists() and str(tmp_path / "2026-11-09-abc1234.md") in p.stdout
+    assert "Kundenbericht wird scheitern" in p.stderr
+    for regel in ("du", "a", "b"):
+        assert f"S-1 massnahme: Regel {regel}" in p.stderr
+    for geheim in ("geheim", "org_id", "deine", "GET /"):          # weder Treffertext noch Token noch Wort
+        assert geheim not in p.stderr
+    assert "Traceback" not in p.stderr
+
+
+def test_rendern_ohne_kundenverstoss_keine_warnung(tmp_path):
+    pfad = tmp_path / "x.json"
+    pfad.write_text(json.dumps(kd()))
+    p = lauf("rendern", str(pfad))
+    assert p.returncode == 0 and "Kundenbericht" not in p.stderr
+
+
+def test_rendern_warnung_bei_schemafehler_nicht_noetig(tmp_path):
+    d = kd(massnahme=KD_VORSPANN + "du")
+    d["befunde"][0]["kategorie"] = "A11"
+    pfad = tmp_path / "x.json"
+    pfad.write_text(json.dumps(d))
+    p = lauf("rendern", str(pfad))
+    assert p.returncode == 2 and not (tmp_path / "x.md").exists()
+
+
+def test_kontext_gibt_ordner(tmp_path):
+    r = neues_repo(tmp_path / "mein-ordner", origin="https://github.com/a/kunde-portal.git")
+    k = bericht.kontext(str(r), None, JETZT)
+    assert k["ordner"] == "mein-ordner" and k["repo"] == "kunde-portal"
+    assert os.path.sep not in k["ordner"] and k["ordner"] != k["ausgabe_ordner"]     # der Name, nicht der Ausgabepfad
+    p = lauf("kontext", "--repo", str(r))
+    assert p.returncode == 0, p.stderr
+    assert json.loads(p.stdout)["ordner"] == "mein-ordner"
+
+
+def test_kontext_ordner_ist_bereinigt_und_basename_der_wurzel(tmp_path):
+    r = neues_repo(tmp_path / "kunde portal v2", origin="https://github.com/a/kunde-portal.git")
+    assert bericht.kontext(str(r), None, JETZT)["ordner"] == "kunde-portal-v2"
+    haupt = neues_repo(tmp_path / "haupt-repo")
+    wt = tmp_path / "anderer-name"
+    roh(haupt, "worktree", "add", "-q", str(wt), "-b", "feature")
+    k = bericht.kontext(str(wt), None, JETZT)
+    assert k["ordner"] == "anderer-name" and k["repo"] == "haupt-repo"
+
+
+def test_kontext_ordner_null_ohne_gueltigen_namen(tmp_path):
+    r = neues_repo(tmp_path / "äöü", origin="https://github.com/a/kunde-portal.git")
+    k = bericht.kontext(str(r), None, JETZT)
+    assert "ordner" in k and k["ordner"] is None
+
+
+def test_schema_ordner_optional_null_oder_text():
+    for wert in ("mein-ordner", "a.b_c-1", None):
+        d = beispiel()
+        d["ordner"] = wert
+        assert bericht.pruefe_schema(d) == [], wert
+    assert bericht.pruefe_schema(beispiel()) == []                  # fehlt: gültig
+
+
+@pytest.mark.parametrize("wert", ["", "a b", "...", "a\nb", 5, ["x"], "a/b", "ä", "a```b"])
+def test_schema_ordner_ungueltig(wert):
+    d = beispiel()
+    d["ordner"] = wert
+    assert any(f.startswith("ordner") for f in bericht.pruefe_schema(d)), wert
+
+
+@pytest.mark.parametrize("feld,mini,maxi", [("zusammenfassung", 40, 600), ("massnahme", 20, 400)])
+def test_schema_kundenfelder_laenge(feld, mini, maxi):
+    for n, gut in ((mini - 1, False), (mini, True), (maxi, True), (maxi + 1, False)):
+        d = beispiel()
+        d["befunde"][0][feld] = "x" * n
+        fehler = bericht.pruefe_schema(d)
+        assert (fehler == []) is gut, (n, fehler)
+        if not gut:
+            erwartet = f"S-1: {feld} " + (f"kürzer als {mini} Zeichen" if n < mini else f"länger als {maxi} Zeichen")
+            assert erwartet in fehler
+
+
+@pytest.mark.parametrize("feld", ["zusammenfassung", "massnahme"])
+@pytest.mark.parametrize("wert", [5, None, "", "   ", ["x" * 50], {"a": "x" * 50}, "x" * 30 + "\n" + "y" * 30, "x" * 30 + "\r" + "y" * 30,
+                                  "x" * 30 + "```" + "y" * 30, "x" * 30 + "\x1b[31m" + "y" * 30, "x" * 30 + "‮" + "y" * 30])
+def test_schema_kundenfelder_typ_einzeilig_unsichtbar(feld, wert):
+    d = beispiel()
+    d["befunde"][1][feld] = wert
+    fehler = bericht.pruefe_schema(d)
+    assert fehler and all(f.startswith(f"S-2: {feld} ") for f in fehler), fehler
+
+
+def test_schema_kundenfelder_gelten_fuer_jeden_status_und_sind_optional():
+    d = beispiel()
+    for b in d["befunde"]:
+        assert "zusammenfassung" not in b and "massnahme" not in b
+    d["befunde"][2]["massnahme"] = "kurz"                          # S-3 ist verworfen: Schema gilt trotzdem
+    assert bericht.pruefe_schema(d) == ["S-3: massnahme kürzer als 20 Zeichen"]
+
+
+def test_schema_kundenfelder_ohne_inhaltsregeln():
+    d = kd(zusammenfassung=KD_ZUSAMMENFASSUNG + " du siehe https://x.example {a} GET /x", massnahme=KD_VORSPANN + "dein org_id a.ts:5")
+    assert bericht.pruefe_schema(d) == []
+    assert bericht.kunden_verstoesse(d) != []
+
+
+def test_befund_fehler_behaelt_signatur_und_prueft_kundenfelder():
+    b = befund(zusammenfassung="kurz")
+    assert "S-1: zusammenfassung kürzer als 40 Zeichen" in bericht._befund_fehler(b, "S-1")
+    assert bericht._befund_fehler(befund(), "S-1") == []

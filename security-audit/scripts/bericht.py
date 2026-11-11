@@ -6,7 +6,8 @@
   bericht.py repo [--repo R]                      Repo-Name (genau `kontext`-Feld `repo`) auf stdout, ohne Seiteneffekte
                                                   (Exit 3: kein Repo)
   bericht.py rendern <json>                       Schema prüfen, <basisname>.md neben das JSON schreiben
-                                                  (Exit 2 mit Fehlerliste auf stderr)
+                                                  (Exit 2 mit Fehlerliste auf stderr; Treffer der Kundenregeln nur als Warnung,
+                                                  Exit 0)
 
 Die Befundliste im ersten Codeblock des Markdown nimmt /fix-findings an (Format wie pr-review-loop).
 Nur Standardbibliothek; git-Aufrufe über gitkopie.git.
@@ -46,6 +47,8 @@ _KLASSE_MODELL_MOCK = re.compile(r"K[124] ")     # `klasse` von K1, K2 und K4: d
 MAX_OWASP_KI = 3
 _COMMIT = re.compile(r"[0-9a-f]{7,64}")
 _CODE_PFAD = re.compile(r"(.+):([1-9][0-9]*)", re.DOTALL)
+KUNDENFELDER = {"zusammenfassung": (40, 600), "massnahme": (20, 400)}       # optional; Länge in Zeichen (min, max)
+KUNDEN_REGELN = ("du", "a", "b", "c", "d", "e", "url", "email")         # Werte von `regel` in kunden_verstoesse
 
 
 class KontextFehler(Exception):
@@ -142,6 +145,7 @@ def kontext(repo: str, teilpfad: str | None, jetzt: datetime | None = None) -> d
     except GitFehler as e:
         raise KontextFehler(f"Kein git-Repository mit HEAD unter {_t(repo)}: {_t(e)}") from e
     name = _repo_name(wurzel)
+    ordner_name = _bereinigen(os.path.basename(wurzel))         # `ordner` unten ist der Ausgabeordner, nicht dieser Name
     datum = jetzt.strftime("%Y-%m-%d")
     echt = _teilpfad(wurzel, teilpfad, sha) if teilpfad is not None else None
     slug = _slug(echt) if echt is not None else None
@@ -192,7 +196,7 @@ def kontext(repo: str, teilpfad: str | None, jetzt: datetime | None = None) -> d
         stats = os.path.join(os.path.expanduser("~"), ".claude", "agent-stats", name, f"{datum}-security-audit.md")
 
     return {
-        "repo": name, "wurzel": wurzel, "sha": sha, "sha7": sha[:7], "datum": datum,
+        "repo": name, "ordner": ordner_name, "wurzel": wurzel, "sha": sha, "sha7": sha[:7], "datum": datum,
         "teilpfad": echt, "teilpfad_slug": slug, "ausgabe_ordner": ordner, "basisname": basisname,
         "hinweise": hinweise, "repo_konfiguration": konfig,
         "agent_stats_datei": stats,
@@ -345,6 +349,15 @@ def _befund_fehler(b: dict, label: str, teilpfad: str | None = None) -> list[str
             fehler(feld, msg)
     if "beschreibung" in b and (msg := _text_fehler(b["beschreibung"], False)):
         fehler("beschreibung", msg)
+    for feld, (mini, maxi) in KUNDENFELDER.items():        # optional; Inhaltsregeln stehen in `kunden_verstoesse`, nicht hier
+        if feld not in b:
+            continue
+        if msg := _text_fehler(b[feld], True):
+            fehler(feld, msg)
+        elif len(b[feld].strip()) < mini:
+            fehler(feld, f"kürzer als {mini} Zeichen")
+        elif len(b[feld]) > maxi:
+            fehler(feld, f"länger als {maxi} Zeichen")
     for feld in ("ohne_anmeldung", "mandantenuebergreifend"):
         if feld in b and type(b[feld]) is not bool:
             fehler(feld, "muss true oder false sein")
@@ -415,6 +428,12 @@ def pruefe_schema(daten: object) -> list[str]:
     for feld in ("teilpfad", "projekt"):
         if daten.get(feld) is not None and (msg := _text_fehler(daten[feld], True)):
             f.append(f"{feld} {msg}")
+    if daten.get("ordner") is not None:         # optional (fehlt oder null erlaubt); sonst wie `repo`
+        o = daten["ordner"]
+        if not (isinstance(o, str) and re.fullmatch(r"[A-Za-z0-9._-]+", o)):
+            f.append(f"ordner ungültig: erwartet nur [A-Za-z0-9._-], ist {_t(o)!r}")
+        elif re.fullmatch(r"\.+", o):
+            f.append("ordner ungültig: nur Punkte")
     if "karte" in daten:
         k = daten["karte"]
         if not isinstance(k, list):
@@ -453,6 +472,176 @@ def pruefe_schema(daten: object) -> list[str]:
                                               else f"id muss S-<Zahl> sein, ist {_t(bid)!r}"))
                 f.extend(_befund_fehler(b, label, daten["teilpfad"] if isinstance(daten.get("teilpfad"), str) else None))
     return f
+
+
+# ------------------------------------------------------------------------------------ Kundenprüfung
+
+# Inhaltsregeln für Kundentexte (TF4). Geprüft werden Rohwerte nach NFC, nie das erzeugte Markdown; Regex-Regeln mit
+# re.IGNORECASE, Teilstring-Abgleiche (a, e, d mit Pfad) ohne Beachtung der Großschreibung. Meldungen nennen nie den
+# Treffertext, nur bei `du` das Wort und bei `a` das Token (beides stammt aus dem JSON der Hauptsession).
+_DU_FORMEN = ("du", "dich", "dir", "dein", "deine", "deinen", "deinem", "deiner", "deines",
+              "euch", "euer", "eure", "euren", "eurem", "eurer", "eures")
+# Grenzen nach Spec B1; am Ende darf ein Satzpunkt folgen (`dir.` am Satzende), nicht aber `.<Wortzeichen>` (`dir.json`)
+_DU = re.compile(r"(?<![\w./@-])(?:" + "|".join(_DU_FORMEN) + r")(?![\w/@-])(?!\.\w)", re.IGNORECASE)
+_REGEL_B = re.compile(r"\b(?:GET|POST|PUT|PATCH|DELETE)\s+/", re.IGNORECASE)
+_REGEL_C = re.compile(r"[{}<>=`]")
+_D_LAUF = re.compile(r"(?<![\w./-])[\w./-]+")          # `Pfad:Zahl` ohne Backtracking: Lauf suchen, dann Zeichen danach prüfen
+_D_MUSTER = re.compile(r"#L\d+|\bZeile\s+\d+", re.IGNORECASE)
+_URL = re.compile(r"https?://|\bwww\.", re.IGNORECASE)
+_EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}\b", re.IGNORECASE)
+_TAUSENDER = re.compile(r"\d{1,3}(?:\.\d{3})+(?:,\d+)?")
+_A_ZEICHEN = frozenset("/=?&%<>{}_@$\\[]")
+_A_PUNKT = re.compile(r"\w\.\w")
+_A_RAND = ".,;:()\"'"
+_KUNDEN_DETAIL = {                                   # fester Text je Regel (außer `du` und `a`), nie Treffertext
+    "b": "HTTP-Methode mit Pfad", "c": "Sonderzeichen oder Backtick", "d": "Datei mit Zeilenangabe",
+    "e": "Dateipfad aus einem Befund", "url": "Webadresse", "email": "E-Mail-Adresse",
+}
+_KUNDEN_FELDER = (("zusammenfassung", KUNDEN_REGELN), ("massnahme", KUNDEN_REGELN), ("titel", ("d", "e", "url", "email")))
+_MAX_PRUEF = 5000        # Zeichen je Feld; hält die Regex-Prüfung auch bei übergroßen Texten schnell
+
+
+def _pruef_text(wert: object) -> str | None:
+    return unicodedata.normalize("NFC", wert[:_MAX_PRUEF]) if isinstance(wert, str) else None
+
+
+def _d_allgemein(text: str) -> bool:
+    """`<Pfad mit . oder />:<Zahl>`, `#L<Zahl>` oder `Zeile <Zahl>` (nicht `14:30`)."""
+    if _D_MUSTER.search(text):
+        return True
+    for m in _D_LAUF.finditer(text):
+        nach = text[m.end():m.end() + 2]
+        if len(nach) == 2 and nach[0] == ":" and re.match(r"\d", nach[1]) and ("." in m.group() or "/" in m.group()):
+            return True
+    return False
+
+
+def _regex_treffer(text: str) -> dict[str, list[str]]:
+    t: dict[str, list[str]] = {}
+    if woerter := [m.group() for m in _DU.finditer(text)]:
+        t["du"] = woerter
+    for regel, muster in (("b", _REGEL_B), ("c", _REGEL_C)):
+        if muster.search(text):
+            t[regel] = [_KUNDEN_DETAIL[regel]]
+    if _d_allgemein(text):
+        t["d"] = [_KUNDEN_DETAIL["d"]]
+    if _URL.search(text):
+        t["url"] = [_KUNDEN_DETAIL["url"]]
+    if "@" in text and _EMAIL.search(text):
+        t["email"] = [_KUNDEN_DETAIL["email"]]
+    return t
+
+
+def _treffer_liste(t: dict[str, list[str]], regeln: tuple[str, ...]) -> list[tuple[str, str]]:
+    aus: list[tuple[str, str]] = []
+    for regel in KUNDEN_REGELN:
+        if regel in regeln:
+            aus.extend((regel, d) for d in dict.fromkeys(t.get(regel, [])))
+    return aus
+
+
+def text_verstoesse(text: str) -> list[tuple[str, str]]:
+    """Treffer der textbezogenen Kundenregeln `du`, `b`, `c`, `d` (ohne Pfadteile), `url`, `email` als (regel, detail);
+    `detail` ist bei `du` das gefundene Wort, sonst ein fester Text. Ohne Bezug zum JSON (für feste Bausteine); wirft nie."""
+    try:
+        roh = _pruef_text(text)
+        return [] if roh is None else _treffer_liste(_regex_treffer(roh), ("du", "b", "c", "d", "url", "email"))
+    except Exception:  # noqa: BLE001 - die Prüfung darf nie scheitern
+        return []
+
+
+def _poc_token(poc: str) -> list[str]:
+    """Token eines `poc` nach Spec R2-B-1: Whitespace-getrennt, Rand `.,;:()"'` abgeschnitten, mindestens 6 Zeichen und
+    ein Zeichen aus `/ = ? & % < > { } _ @ $ \\ [ ]` oder `\\w.\\w`; Zahlen mit Tausenderpunkten zählen nie."""
+    aus: dict[str, None] = {}
+    for roh in unicodedata.normalize("NFC", poc[:10**6]).split():
+        tok = roh.strip(_A_RAND)
+        if (len(tok) >= 6 and (_A_ZEICHEN.intersection(tok) or _A_PUNKT.search(tok)) and not _TAUSENDER.fullmatch(tok)):
+            aus[tok] = None
+    return list(aus)
+
+
+def _kuerzen60(token: str) -> str:
+    kurz = _t(token, 60)
+    return kurz if len(kurz) <= 60 else kurz[:59] + "…"
+
+
+def _quellen(befunde: list) -> tuple[list[str], list[str], list[str]]:
+    """(Token aus allen `poc`, Pfadangaben mit `/` bzw. volle `code_pfad`-Einträge für e, alle Pfade und Basenames für d) über alle
+    Befunde, unabhängig vom Status."""
+    token: dict[str, None] = {}
+    e: dict[str, None] = {}
+    d: dict[str, None] = {}
+
+    def pfad(p: str, voll: bool = False) -> None:
+        p = unicodedata.normalize("NFC", p[:10**4])
+        if not p:
+            return
+        if voll or "/" in p:
+            e[p] = None
+        d[p] = None
+        d[p.rsplit("/", 1)[-1] or p] = None
+
+    for b in befunde:
+        if not isinstance(b, dict):
+            continue
+        if isinstance(b.get("poc"), str):
+            token.update(dict.fromkeys(_poc_token(b["poc"])))
+        if isinstance(b.get("datei"), str):
+            pfad(b["datei"])
+        cp = b.get("code_pfad")
+        for eintrag in (cp if isinstance(cp, list) else []):
+            if not isinstance(eintrag, str):
+                continue
+            e[unicodedata.normalize("NFC", eintrag[:10**4])] = None
+            if m := _CODE_PFAD.fullmatch(eintrag[:10**4]):
+                pfad(m.group(1))
+    e.pop("", None)
+    return list(token), list(e), list(d)
+
+
+def _pfad_zeile(pfad: str) -> re.Pattern:
+    return re.compile(r"(?<![\w./-])" + re.escape(pfad) + r"(?:\s*:\s*\d+|,?\s*(?:Zeile|Z\.)\s*\d+)", re.IGNORECASE)
+
+
+def kunden_verstoesse(daten: object) -> list[tuple[str, str, str, str]]:
+    """Verstöße der Kundenfelder gegen die Inhaltsregeln als (id, feld, regel, detail); wirft nie, egal welche Typen im JSON stehen.
+
+    Geprüft werden Befunde mit Status bestätigt/unbestätigt (NFC) und je Feld einzeln, was vorhanden und Text ist:
+    `zusammenfassung`, `massnahme` (alle Regeln) und `titel` (nur d, e, url, email). Fehlende Felder meldet erst kundenbericht.py.
+    Regeln (Werte von KUNDEN_REGELN): `du` Du-Form (detail: das Wort), `a` Token aus einem `poc` (detail: das Token, höchstens 60
+    Zeichen), `b` HTTP-Methode mit Pfad, `c` `{ } < > =` oder Backtick, `d` Datei mit Zeile (auch `Dockerfile:6`), `#L<n>`,
+    `Zeile <n>`, `e` Dateipfad oder `code_pfad`-Eintrag eines Befunds (ohne Ausnahme, auch die eigene `datei`), `url` Webadresse,
+    `email` E-Mail-Adresse. Quellen für a, d und e sind alle Befunde unabhängig vom Status. Sonst ist `detail` ein fester Text."""
+    try:
+        if not isinstance(daten, dict) or not isinstance(daten.get("befunde"), list):
+            return []
+        befunde = daten["befunde"]
+        token, pfade_e, pfade_d = _quellen(befunde)
+        zeilen = {p: None for p in pfade_d}
+        aus: list[tuple[str, str, str, str]] = []
+        for b in befunde:
+            if not (isinstance(b, dict) and isinstance(b.get("id"), str) and _ID.fullmatch(b["id"])):
+                continue
+            status = unicodedata.normalize("NFC", b["status"]) if isinstance(b.get("status"), str) else None
+            if status not in IN_LISTE:
+                continue
+            for feld, regeln in _KUNDEN_FELDER:
+                text = _pruef_text(b.get(feld))
+                if text is None:
+                    continue
+                klein = text.lower()
+                t = _regex_treffer(text)
+                if "a" in regeln and (hits := [k for k in token if k.lower() in klein]):
+                    t["a"] = [_kuerzen60(k) for k in hits]
+                if "e" in regeln and any(p.lower() in klein for p in pfade_e):
+                    t["e"] = [_KUNDEN_DETAIL["e"]]
+                if "d" not in t and any(p.lower() in klein and _pfad_zeile(p).search(text) for p in zeilen):
+                    t["d"] = [_KUNDEN_DETAIL["d"]]
+                aus.extend((b["id"], feld, regel, detail) for regel, detail in _treffer_liste(t, regeln))
+        return aus
+    except Exception:  # noqa: BLE001 - die Prüfung darf nie scheitern (kein Traceback für rendern und den Eval)
+        return []
 
 
 # ------------------------------------------------------------------------------------ Markdown
@@ -552,6 +741,17 @@ def _reservierung_abweichungen(marker: str, daten: dict) -> list[str]:
             for feld in ("sha", "repo", "teilpfad") if daten.get(feld) != erwartet.get(feld)]
 
 
+def _kundenwarnung(daten: dict) -> None:
+    """Treffer von `kunden_verstoesse` nur als Warnung auf stderr (ID, Feld, Regel; nie Wort, Token oder Treffertext): `rendern`
+    scheitert nie an Kundenregeln, `kundenbericht.py` entscheidet."""
+    treffer = kunden_verstoesse(daten)
+    if not treffer:
+        return
+    zeilen = list(dict.fromkeys(f"{i} {feld}: Regel {regel}" for (i, feld, regel, _d) in treffer))
+    print("Kundenbericht wird scheitern: " + "; ".join(zeilen[:30]) + (f"; … und {len(zeilen) - 30} weitere" if len(zeilen) > 30 else ""),
+          file=sys.stderr)
+
+
 def _rendern(pfad: str) -> int:
     try:
         if os.path.getsize(pfad) > MAX_JSON_BYTES:
@@ -589,6 +789,7 @@ def _rendern(pfad: str) -> int:
     finally:
         if tmp is not None and os.path.lexists(tmp):       # Fehler zwischen mkstemp und replace: keine Reste im Ausgabeordner
             os.unlink(tmp)
+    _kundenwarnung(daten)
     try:
         os.unlink(os.path.splitext(pfad)[0] + ".reserviert")       # Reservierung von `kontext` freigeben
     except FileNotFoundError:
