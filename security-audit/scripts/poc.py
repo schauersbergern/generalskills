@@ -88,8 +88,8 @@ APP_PORT_DB = 5432
 POSTGRES_IMAGE = "postgres:16-alpine"
 DB_URL = "postgres://poc:poc@db:5432/poc"
 ANTWORTEN_MAX = 20               # Einträge einer Antwortliste für den Modell-Mock
-ANTWORTEN_DATEI_MAX = 64 * 1024  # `--antworten-datei` (Grenze des Mocks für stdin)
-ANTWORT_TEXT_MAX = 16384         # Zeichen je `text` (Grenze des Mocks)
+ANTWORTEN_DATEI_MAX = 64 * 1024  # `--antworten-datei`: Größe der Datei (grobe Schranke; maßgeblich ist `STDIN_MAX_MOCK` für die Serialisierung)
+ANTWORT_TEXT_MAX = 16384         # UTF-16-Einheiten je `text` (Zählweise und Grenze des Mocks)
 MASKIER_WERTE_MAX = 200          # Grenze des Mocks für die Zahl der Werte (`modell --protokoll`); mehr: Exit 2
 MASKIER_WERT_MIN = 6             # kürzere --env-Werte werden nicht maskiert
 MASKIER_WERT_MAX = 4096          # Grenze des Mocks je Wert (Zeichen)
@@ -1100,6 +1100,11 @@ def cmd_anfrage(a: argparse.Namespace) -> int:
 
 # ------------------------------------------------------------------------------------ modell (Steuerung des Modell-Mocks)
 
+def _antworten_serialisieren(daten: object) -> str:
+    """Was der Mock auf stdin bekommt: kompaktes JSON (Trennzeichen ohne Leerzeichen), kein NaN und kein Infinity."""
+    return json.dumps(daten, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+
+
 def _antworten_lesen(pfad: str) -> list:
     """Antwortliste aus `--antworten-datei`: höchstens 64 KiB (+ 1 Byte gelesen), sonst Exit 2. Prüft Form und Netzregel
     (Rohtext und geparstes JSON) und gibt die geprüfte Liste zurück; jede Abweichung endet mit Exit 2 ohne Docker-Aufruf."""
@@ -1116,10 +1121,12 @@ def _antworten_lesen(pfad: str) -> list:
     except (ValueError, RecursionError):
         raise PocFehler("--antworten-datei: kein gültiges JSON (UTF-8)") from None
     try:
-        neu = json.dumps(daten, ensure_ascii=False)
-        neu.encode("utf-8")                                    # ein einzelnes Surrogat (\ud800) ist kein UTF-8
+        neu = _antworten_serialisieren(daten)                  # NaN und Infinity (auch aus `1e999`) kennt JSON nicht
+        eingabe = neu.encode("utf-8")                          # ein einzelnes Surrogat (\ud800) ist kein UTF-8
     except (ValueError, RecursionError):
         raise PocFehler("--antworten-datei: kein gültiges JSON (UTF-8)") from None
+    if len(eingabe) > STDIN_MAX_MOCK:                          # so viele Bytes bekäme der Mock auf stdin (`1e2` wird zu `100.0`)
+        raise PocFehler(f"--antworten-datei: nach dem Serialisieren größer als {STDIN_MAX_MOCK // 1024} KiB")
     for fremd in (netzregel.verstoesse_poc(text), netzregel.verstoesse_poc(neu)):        # Rohtext und geparster Inhalt
         if fremd:
             raise PocFehler(f"--antworten-datei: nicht erlaubter Host {_entschaerfen(fremd[0])[:100]}")
@@ -1128,7 +1135,7 @@ def _antworten_lesen(pfad: str) -> list:
 
 
 def _antworten_pruefen(daten: object) -> None:
-    """Form der Antwortliste (Exit 2 bei Abweichung): Liste mit höchstens 20 Einträgen; je Eintrag genau `text` (String) oder
+    """Form der Antwortliste (Exit 2 bei Abweichung): Liste mit höchstens 20 Einträgen; je Eintrag genau `text` (String, höchstens 16 384 UTF-16-Einheiten) oder
     `werkzeug` (`name` nach `[A-Za-z0-9_.-]{1,64}`, `argumente` ein Objekt, optional), optional `wenn_enthaelt` nach `POCMARKER-…`."""
     def falsch(grund: str) -> PocFehler:
         return PocFehler(f"--antworten-datei: {grund}")
@@ -1142,7 +1149,7 @@ def _antworten_pruefen(daten: object) -> None:
             raise falsch(f"Eintrag {i}: Objekt mit text oder werkzeug (und wenn_enthaelt) erwartet")
         if ("text" in e) == ("werkzeug" in e):
             raise falsch(f"Eintrag {i}: genau eines von text und werkzeug")
-        if "text" in e and not (isinstance(e["text"], str) and len(e["text"]) <= ANTWORT_TEXT_MAX):
+        if "text" in e and not (isinstance(e["text"], str) and _utf16_laenge(e["text"]) <= ANTWORT_TEXT_MAX):
             raise falsch(f"Eintrag {i}: text muss ein String mit höchstens {ANTWORT_TEXT_MAX} Zeichen sein")
         if "werkzeug" in e:
             w = e["werkzeug"]
@@ -1215,7 +1222,7 @@ def cmd_modell(a: argparse.Namespace) -> int:
         if not z["modell_mock"]:
             raise PocFehler(f"Rolle {a.rolle} läuft ohne Modell-Mock (`starten --modell-mock`)", code=1)
         if antworten is not None:
-            modus, eingabe = ["--setzen"], json.dumps(antworten, ensure_ascii=False).encode("utf-8")
+            modus, eingabe = ["--setzen"], _antworten_serialisieren(antworten).encode("utf-8")
         else:
             modus = ["--protokoll"] + (["--suche", a.suche] if a.suche else [])
             eingabe = _maskier_werte(z)

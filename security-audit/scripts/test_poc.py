@@ -2505,6 +2505,46 @@ def test_modell_rolle_nicht_gestartet_exit2(umg, tmp_path):
     assert not any(a["args"][0] in ("exec", "run") for a in umg.aufrufe())
 
 
+@pytest.mark.parametrize("zahl", ["NaN", "Infinity", "-Infinity", "1e999"])
+def test_modell_antworten_nan_und_unendlich_exit2_review_r1_6(umg, tmp_path, zahl):
+    """Review R1-6: Python liest NaN und Infinity, JSON (und der Mock) kennt sie nicht: Exit 2 („korrigieren“) statt Exit 1 („kein Beleg“)."""
+    mit_mock(umg, tmp_path)
+    roh = '[{"werkzeug": {"name": "t", "argumente": {"x": %s}}}]' % zahl
+    r = modell(umg, "--antworten-datei", antworten_datei(tmp_path, roh))
+    assert r.returncode == 2 and "kein gültiges JSON" in r.stderr, (r.returncode, r.stderr)
+    assert exec_aufrufe(umg) == []
+
+
+def test_modell_antworten_kompakte_datei_nahe_der_grenze_review_r1_6(umg, tmp_path):
+    """Review R1-6: Eine kompakt geschriebene Datei von 58 KB wurde mit den Standard-Trennzeichen von `json.dumps` über 64 KiB groß und vom
+    Mock abgelehnt. Jetzt geht kompakt serialisiertes JSON an den Mock (höchstens 64 KiB auf stdin)."""
+    mit_mock(umg, tmp_path)
+    argumente = {f"k{i:04d}": i for i in range(4600)}
+    roh = json.dumps([{"werkzeug": {"name": "t", "argumente": argumente}}], separators=(",", ":"))
+    assert 58000 < len(roh.encode()) < 64 * 1024 and len(json.dumps(json.loads(roh)).encode()) > 64 * 1024
+    r = modell(umg, "--antworten-datei", antworten_datei(tmp_path, roh))
+    assert r.returncode == 0, r.stderr
+    assert len(exec_aufrufe(umg)[0]["stdin"].encode()) <= 64 * 1024
+
+
+def test_modell_antworten_serialisierung_ueber_64kib_exit2_review_r1_6(umg, tmp_path):
+    """`1e2` (3 Bytes) wird als `100.0` (5 Bytes) serialisiert: Die Datei passt in 64 KiB, die Eingabe für den Mock nicht."""
+    mit_mock(umg, tmp_path)
+    roh = '[{"werkzeug": {"name": "t", "argumente": {"x": [' + ",".join(["1e2"] * 15000) + "]}}}]"
+    assert len(roh.encode()) < 64 * 1024
+    r = modell(umg, "--antworten-datei", antworten_datei(tmp_path, roh))
+    assert r.returncode == 2 and "64 KiB" in r.stderr, (r.returncode, r.stderr)
+    assert exec_aufrufe(umg) == []
+
+
+@pytest.mark.parametrize("emojis, rc", [(8192, 0), (8193, 2)])     # 2 UTF-16-Einheiten je Emoji: 16 384 sind erlaubt
+def test_modell_antworten_text_laenge_in_utf16_einheiten_review_r1_6(umg, tmp_path, emojis, rc):
+    mit_mock(umg, tmp_path)
+    r = modell(umg, "--antworten-datei", antworten_datei(tmp_path, json.dumps([{"text": "😀" * emojis}], ensure_ascii=False)))
+    assert r.returncode == rc, (r.returncode, r.stderr)
+    assert (exec_aufrufe(umg) == []) is (rc == 2)
+
+
 def test_modell_antworten_datei_zu_gross_exit2(umg, tmp_path):
     """K10: höchstens 64 KiB (+ 1 Byte gelesen); nicht lesbar (fehlt, Ordner) endet mit Exit 2."""
     mit_mock(umg, tmp_path)
