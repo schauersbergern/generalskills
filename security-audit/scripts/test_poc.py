@@ -730,6 +730,7 @@ def test_starten_env_dienst_seed(umg, tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     db = [a for a in laeufe(umg) if wert(a, "--name") == [f"security-audit-{LAUF}-p1-db"]][0]
     assert db[-1] == "postgres:16-alpine"
+    assert wert(db, "--network") == [f"security-audit-{LAUF}-p1"]      # R1-4: nie bridge/host, immer das interne Rollennetz
     assert wert(db, "--network-alias") == ["db"]
     assert wert(db, "--security-opt") == ["no-new-privileges"]
     assert wert(db, "--memory") == ["512m"] and wert(db, "--pids-limit") == ["256"]
@@ -835,6 +836,28 @@ def test_ausfuehren(umg):
     assert umg.aufrufe()[-1]["args"] == ["exec", f"security-audit-{LAUF}-p2-app", "cat", "/app/.netz", "-x"]
 
 
+def test_db_container_p2_haengt_im_netz_der_rolle_r1_4(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    umg.poc("starten", "--lauf", LAUF, "--rolle", "p2", "--start-befehl", "node s.js", "--port", "3001", "--dienst", "postgres")
+    db = [a for a in laeufe(umg) if wert(a, "--name") == [f"security-audit-{LAUF}-p2-db"]][0]
+    app = [a for a in laeufe(umg) if wert(a, "--name") == [f"security-audit-{LAUF}-p2-app"]][0]
+    assert wert(db, "--network") == wert(app, "--network") == [f"security-audit-{LAUF}-p2"]
+
+
+def test_neustart_p2_nutzt_netz_von_p2_r1_4(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    umg.poc("starten", "--lauf", LAUF, "--rolle", "p2", "--start-befehl", "node s.js", "--port", "3001")
+    umg.log_datei.unlink()
+    assert umg.poc("neustart", "--lauf", LAUF, "--rolle", "p2").returncode == 0
+    app = [a for a in laeufe(umg) if wert(a, "--name") == [f"security-audit-{LAUF}-p2-app"]][0]
+    assert wert(app, "--network") == [f"security-audit-{LAUF}-p2"]
+
+
+def test_ausfuehren_p2_trifft_nur_den_app_container_von_p2_r1_4(umg):
+    umg.poc("ausfuehren", "--lauf", LAUF, "--rolle", "p2", "--", "id")
+    assert [a["args"] for a in umg.aufrufe() if a["args"][0] == "exec"] == [["exec", f"security-audit-{LAUF}-p2-app", "id"]]
+
+
 def test_ausfuehren_fehlercode(umg):
     umg.konfig({"exec": {"rc": 3, "stderr": "nope\n"}})
     r = umg.poc("ausfuehren", "--lauf", LAUF, "--rolle", "p1", "--", "false")
@@ -867,6 +890,18 @@ def test_anfrage_nur_app(umg, tmp_path):
     assert wert(a, "--memory") == ["1g"] and wert(a, "--pids-limit") == ["256"]
     assert not {"-v", "--volume", "--mount", "-p", "--publish"} & set(a)
     assert wert(a, "--methode") == ["GET"]
+
+
+def test_anfrage_p2_laeuft_im_netz_von_p2_r1_4(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    gestartet(umg, "p1", port="3000")
+    gestartet(umg, "p2", port="3001")
+    r = umg.poc("anfrage", "--lauf", LAUF, "--rolle", "p2", "--pfad", "/x")
+    assert r.returncode == 0, r.stderr
+    (aufruf,) = anfrage_aufrufe(umg)
+    assert wert(aufruf["args"], "--network") == [f"security-audit-{LAUF}-p2"]
+    assert wert(aufruf["args"], "--name")[0].startswith(f"security-audit-{LAUF}-p2-anfrage-")
+    assert "http://app:3001/x" in aufruf["args"] or any("3001" in a for a in aufruf["args"])
 
 
 def test_anfrage_ohne_gestartete_rolle(umg):
