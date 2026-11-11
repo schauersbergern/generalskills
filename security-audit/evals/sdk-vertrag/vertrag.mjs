@@ -9,7 +9,8 @@ import "./waechter.mjs";
 //   node vertrag.mjs --faelle     die Fallliste als JSON (kein SDK-Import)
 //   node vertrag.mjs --antworten  die Antwortliste für `llm-mock.mjs --setzen` als JSON (kein SDK-Import)
 // Exit-Codes: 0 = alle Zeilen geschrieben (rot ist keine Fehlermeldung des Skripts), 3 = Selbsttest des Wächters
-// gescheitert (es wird kein SDK importiert), 4 = Umgebung ungültig (Basis-URL nicht 127.0.0.1 oder Schlüssel nicht poc-dummy-).
+// gescheitert (es wird kein SDK importiert), 4 = Umgebung ungültig (fremde Umgebungsvariable oder Node-Option, Basis-URL
+// nicht 127.0.0.1 oder Schlüssel nicht poc-dummy-). Die Prüfung der eigenen Umgebung läuft vor allem anderen, auch vor --faelle.
 
 import { treffer } from "./waechter.mjs";
 import http from "node:http";
@@ -19,6 +20,30 @@ const ARGUMENTE = { ort: "Berlin", tage: 3 };
 const SCHEMA = { type: "object", properties: { ort: { type: "string" }, tage: { type: "integer" } }, required: ["ort"] };
 const BESCHREIBUNG = "Gibt die Wettervorhersage für einen Ort zurück.";
 const FRIST_MS = 20000;
+
+// ------------------------------------------------------------------ Eigene Umgebung (strikte Whitelist)
+
+// Erlaubt sind nur diese Schlüssel. Alles andere (Proxys, NODE_OPTIONS, OPENAI_ORG_ID, AZURE_*, fremde Tokens ...) könnte
+// ein SDK vom Mock weg oder an fremde Ziele lenken und endet mit Exit 4. Der Name wird genannt, nie der Wert.
+// __CF_USER_TEXT_ENCODING setzt macOS selbst in jeden Prozess (nur die Zeichenkodierung), auch bei leerer Umgebung.
+const ERLAUBTE_SCHLUESSEL = new Set([
+  "PATH", "HOME", "TMPDIR", "LANG", "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+  "__CF_USER_TEXT_ENCODING",
+]);
+
+function eigeneUmgebungPruefen() {
+  if (process.execArgv.length) {
+    process.stderr.write(`Umgebung ungültig: Node-Optionen sind nicht erlaubt (execArgv: ${process.execArgv.map((a) => a.split("=")[0]).join(" ")}).\n`);
+    process.exit(4);
+  }
+  const fremd = Object.keys(process.env).filter((k) => !ERLAUBTE_SCHLUESSEL.has(k));
+  if (fremd.length) {
+    process.stderr.write(`Umgebung ungültig: nicht erlaubte Variablen: ${fremd.join(", ")} (erlaubt sind nur ${[...ERLAUBTE_SCHLUESSEL].join(", ")}).\n`);
+    process.exit(4);
+  }
+}
+
+eigeneUmgebungPruefen();
 
 // ------------------------------------------------------------------ Selbsttest (vor jedem SDK-Import)
 
@@ -222,10 +247,10 @@ async function openaiResponses(f, i) {
   return { text, werkzeuge, probleme };
 }
 
-async function openaiEmbeddings() {
+async function openaiEmbeddings(f, i) {
   const { default: OpenAI } = await import("openai");
   const client = new OpenAI({ maxRetries: 0, timeout: FRIST_MS });
-  const res = await client.embeddings.create({ model: "poc-mock", input: "hallo" });
+  const res = await client.embeddings.create({ model: "poc-mock", input: `${marker(i)} hallo` });
   const v = res.data?.[0]?.embedding;
   const probleme = [];
   if (!Array.isArray(v) || v.length !== 1536 || !v.every((x) => typeof x === "number")) probleme.push("Vektor ungültig");

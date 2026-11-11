@@ -1329,6 +1329,15 @@ FAELLE = [
 ] + [("openai", "embeddings", False, "embedding")]
 
 
+# Erlaubte Schlüssel der Umgebung eines Vertrags-Prozesses (Whitelist von vertrag_umgebung). Dazu kommt auf macOS
+# __CF_USER_TEXT_ENCODING, den das System selbst setzt (reine Kodierung).
+UMGEBUNG_ERLAUBT = {"PATH", "HOME", "TMPDIR", "LANG", "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "OPENAI_API_KEY",
+                    "ANTHROPIC_API_KEY", "__CF_USER_TEXT_ENCODING"}
+
+
+TRICK_HOSTS = ("127.0.0.1.poc-fremd.invalid", "127.0.0.1@poc-fremd.invalid", "poc-fremd.invalid#127.0.0.1")
+
+
 def fall_id(f):
     paket, weg, stream, art = f
     return f"{paket}-{weg}-{'stream' if stream else 'ohne'}-{art}"
@@ -1430,6 +1439,7 @@ import net from "node:net";
 import tls from "node:tls";
 
 const FREMD = ["poc-fremd.invalid", "192.0.2.1"];
+const TRICKS = ["127.0.0.1.poc-fremd.invalid", "127.0.0.1@poc-fremd.invalid", "poc-fremd.invalid#127.0.0.1"];
 const ergebnisse = {};
 
 async function versuch(name, f) {
@@ -1490,8 +1500,26 @@ for (const ziel of FREMD) {
 }
 // Ohne Host gilt localhost, nicht 127.0.0.1: ebenfalls abgewiesen. Tricks mit dem Hostnamen ebenso.
 await versuch("ohne_host.http.request", () => http.request({ port: 9 }));
-await versuch("trick.userinfo", () => fetch("http://127.0.0.1@poc-fremd.invalid/", { signal: AbortSignal.timeout(2000) }));
-await versuch("trick.praefix", () => fetch("http://127.0.0.1.poc-fremd.invalid/", { signal: AbortSignal.timeout(2000) }));
+// Trickhosts (Präfix, Userinfo, Fragment) über ALLE Wege: der Wächter vergleicht den Host exakt mit 127.0.0.1.
+for (const h of TRICKS) {
+  const url = `http://${h}/`;
+  const surl = `https://${h}/`;
+  await versuch(`trick.${h}.fetch`, () => fetch(url, { signal: AbortSignal.timeout(2000) }));
+  await versuch(`trick.${h}.http.request`, () => http.request({ host: h, port: 9, path: "/" }));
+  await versuch(`trick.${h}.http.request.url`, () => http.request(url));
+  await versuch(`trick.${h}.http.get`, () => http.get({ hostname: h, port: 9 }));
+  await versuch(`trick.${h}.https.request`, () => https.request(surl));
+  await versuch(`trick.${h}.https.get`, () => https.get({ host: h, port: 9 }));
+  await versuch(`trick.${h}.net.connect`, () => net.connect({ host: h, port: 9 }));
+  await versuch(`trick.${h}.net.createConnection`, () => net.createConnection(9, h));
+  await versuch(`trick.${h}.tls.connect`, () => tls.connect({ host: h, port: 9 }));
+  await versuch(`trick.${h}.socket.connect`, () => new net.Socket().connect(9, h));
+}
+// Nicht lesbare Ziele werden abgewiesen (fail-closed), nie durchgelassen.
+await versuch("unlesbar.fetch.objekt", () => fetch({}));
+await versuch("unlesbar.fetch.undefined", () => fetch(undefined));
+await versuch("unlesbar.fetch.text", () => fetch("::keine url::"));
+await versuch("unlesbar.http.request.text", () => http.request("::keine url::"));
 {
   const n = treffer.length;
   await versuch("trick.ipc", () => net.connect({ path: "/tmp/poc-nicht-vorhanden.sock" }));
@@ -1503,7 +1531,7 @@ const vorher = treffer.length;
 try { await fetch("http://poc-fremd.invalid/", { signal: AbortSignal.timeout(2000) }); } catch {}
 ergebnisse["liste.waechst_trotz_fang"] = treffer.length === vorher + 1 ? "ja" : "nein";
 
-process.stdout.write(JSON.stringify({ ergebnisse, treffer }) + "\n");
+process.stdout.write(JSON.stringify({ ergebnisse, treffer, umgebung: Object.keys(process.env).sort(), execArgv: process.execArgv }) + "\n");
 """
 
 
@@ -1512,8 +1540,12 @@ def vertrag_dateien_kopieren(ziel, namen=("vertrag.mjs", "waechter.mjs")):
         shutil.copy(os.path.join(VERTRAG, n), os.path.join(str(ziel), n))
 
 
-def node_lauf(skript, cwd, env, args=(), timeout=60):
-    return subprocess.run([NODE, skript, *args], cwd=str(cwd), env=env, capture_output=True, timeout=timeout)
+# Die Wächter- und Exit-Tests laufen mit demselben node wie der Opt-in-Lauf (SECURITY_AUDIT_SDK_NODE), falls gesetzt.
+VERTRAG_NODE = os.environ.get("SECURITY_AUDIT_SDK_NODE") or NODE
+
+
+def node_lauf(skript, cwd, env, args=(), timeout=60, node_args=()):
+    return subprocess.run([VERTRAG_NODE, *node_args, skript, *args], cwd=str(cwd), env=env, capture_output=True, timeout=timeout)
 
 
 def test_vertrag_waechter_blockiert_fremden_host(tmp_path):
@@ -1535,6 +1567,13 @@ def test_vertrag_waechter_blockiert_fremden_host(tmp_path):
         else:
             assert wert == "blockiert", (name, wert)
     assert len([n for n in erg if n.startswith("lokal.")]) == 5
+    assert len([n for n in erg if n.startswith("trick.") and n != "trick.ipc"]) == 3 * 10  # drei Trickhosts über zehn Wege
+    for h in TRICK_HOSTS:
+        assert sum(1 for n in erg if n.startswith(f"trick.{h}.")) == 10, h
+    assert len([n for n in erg if n.startswith("unlesbar.")]) == 4
+    # Die Probe lief mit der Umgebung aus vertrag_umgebung und ohne Node-Optionen (belegt, dass der Test sie verwendet).
+    assert set(daten["umgebung"]) <= UMGEBUNG_ERLAUBT, daten["umgebung"]
+    assert daten["execArgv"] == []
     for ziel in FREMDE_ZIELE:
         assert sum(1 for n in erg if n.startswith(ziel + ".")) == 13, ziel
     # jeder Treffer steht in der Liste, mit Art und Ziel (nur Host, ohne Pfad und Query)
@@ -1543,7 +1582,8 @@ def test_vertrag_waechter_blockiert_fremden_host(tmp_path):
                      "net.createConnection", "tls.connect", "socket.connect"}, arten
     for t in daten["treffer"]:
         assert set(t) == {"art", "ziel"}, t
-        if not t["ziel"].startswith("ipc:"):  # Socket-Pfade (ipc:) sind keine Hosts
+        # Socket-Pfade (ipc:) sind keine Hosts; die Trickhosts stehen als host-Option roh (so, wie der Aufrufer sie übergab)
+        if not t["ziel"].startswith("ipc:") and t["ziel"] not in TRICK_HOSTS:
             assert "/" not in t["ziel"] and "?" not in t["ziel"] and "@" not in t["ziel"], t
     ziele = {t["ziel"] for t in daten["treffer"]}
     assert set(FREMDE_ZIELE) <= ziele
@@ -1556,7 +1596,7 @@ def test_vertrag_faelle_stimmen_mit_dem_skript(tmp_path):
     assert r.returncode == 0, (r.stdout, r.stderr)
     assert r.stdout.isascii()
     ist = [(z["paket"], z["weg"], z["stream"], z["art"]) for z in json.loads(r.stdout)]
-    assert sorted(ist) == sorted(FAELLE)
+    assert ist == FAELLE  # auch die Reihenfolge: die Fallnummer (Index) steckt im Marker
 
 
 def test_vertrag_antworten_je_fall_mit_eigenem_marker(tmp_path, mock):
@@ -1572,15 +1612,30 @@ def test_vertrag_antworten_je_fall_mit_eigenem_marker(tmp_path, mock):
     setzen(mock, liste)  # der Mock nimmt die Liste an
 
 
-def test_vertrag_ohne_wirksamen_waechter_exit3_und_kein_sdk(tmp_path):
-    # Attrappe statt Wächter: lässt alles scheinbar durch, ohne dass ein Request das Netz erreicht.
+ATTRAPPEN = {
+    # lässt beides scheinbar durch
+    "beides_offen": (
+        'globalThis.fetch = async () => new Response("x");\n'
+        'http.request = () => ({ on() { return this; }, end() {}, destroy() {} });\n'),
+    # weist nur fetch ab, http.request bleibt offen (ein Selbsttest nur für fetch würde das übersehen)
+    "nur_fetch_zu": (
+        'globalThis.fetch = async () => { const e = new Error("waechter"); e.code = "EWAECHTER"; throw e; };\n'
+        'http.request = () => ({ on() { return this; }, end() {}, destroy() {} });\n'),
+    # weist nur http.request ab, fetch bleibt offen (ein Selbsttest nur für http.request würde das übersehen)
+    "nur_http_zu": (
+        'globalThis.fetch = async () => new Response("x");\n'
+        'http.request = () => { const e = new Error("waechter"); e.code = "EWAECHTER"; throw e; };\n'),
+}
+
+
+@pytest.mark.parametrize("attrappe", sorted(ATTRAPPEN))
+def test_vertrag_ohne_wirksamen_waechter_exit3_und_kein_sdk(tmp_path, attrappe):
+    # Attrappe statt Wächter, ohne dass ein Request das Netz erreicht. Jede Attrappe lässt mindestens einen der beiden
+    # Wege (fetch, http.request) offen: Der Selbsttest muss beide prüfen und mit Exit 3 enden.
     (tmp_path / "waechter.mjs").write_text(
         'import http from "node:http";\n'
         'import module from "node:module";\n'
-        'export const treffer = [];\n'
-        'globalThis.fetch = async () => new Response("x");\n'
-        'http.request = () => ({ on() { return this; }, end() {}, destroy() {} });\n'
-        'module.syncBuiltinESMExports();\n', encoding="utf-8")
+        'export const treffer = [];\n' + ATTRAPPEN[attrappe] + 'module.syncBuiltinESMExports();\n', encoding="utf-8")
     vertrag_dateien_kopieren(tmp_path, ("vertrag.mjs",))
     r = node_lauf("vertrag.mjs", tmp_path, vertrag_umgebung(tmp_path, 1))
     assert r.returncode == 3, (r.returncode, r.stdout, r.stderr)
@@ -1598,14 +1653,69 @@ def test_vertrag_ohne_basis_url_in_der_umgebung_exit4(tmp_path, fehlt):
     assert r.stdout == b""
 
 
-@pytest.mark.parametrize("url", ["http://poc-fremd.invalid/v1", "http://192.0.2.1:9/v1", "http://localhost:1/v1"])
-def test_vertrag_basis_url_nicht_loopback_exit4(tmp_path, url):
+@pytest.mark.parametrize("name", ["OPENAI_BASE_URL", "ANTHROPIC_BASE_URL"])
+@pytest.mark.parametrize("url", [
+    "http://poc-fremd.invalid/v1", "http://192.0.2.1:9/v1", "http://localhost:1/v1",
+    "http://127.0.0.1/v1",                  # ohne Port: der Mock-Port muss in der Umgebung stehen
+    "http://u:p@127.0.0.1:1/v1",            # Userinfo
+    "http://127.0.0.1:1@poc-fremd.invalid/v1", "https://127.0.0.1:1/v1",
+])
+def test_vertrag_basis_url_ungueltig_exit4(tmp_path, name, url):
     vertrag_dateien_kopieren(tmp_path)
     env = vertrag_umgebung(tmp_path, 1)
-    env["OPENAI_BASE_URL"] = url
+    env[name] = url
     r = node_lauf("vertrag.mjs", tmp_path, env)
     assert r.returncode == 4, (r.returncode, r.stdout, r.stderr)
     assert r.stdout == b""
+
+
+@pytest.mark.parametrize("name", ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"])
+@pytest.mark.parametrize("wert", ["", "sk-echt-wirkend", "dummy-poc-", "xpoc-dummy-1"])
+def test_vertrag_schluessel_ohne_poc_dummy_praefix_exit4(tmp_path, name, wert):
+    vertrag_dateien_kopieren(tmp_path)
+    env = vertrag_umgebung(tmp_path, 1)
+    env[name] = wert
+    r = node_lauf("vertrag.mjs", tmp_path, env)
+    assert r.returncode == 4, (r.returncode, r.stdout, r.stderr)
+    assert r.stdout == b""
+
+
+FREMDE_SCHLUESSEL = [
+    "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY", "NODE_OPTIONS", "NODE_EXTRA_CA_CERTS",
+    "NODE_TLS_REJECT_UNAUTHORIZED", "OPENAI_ORG_ID", "OPENAI_PROJECT_ID", "OPENAI_API_BASE", "ANTHROPIC_AUTH_TOKEN",
+    "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY", "NPM_CONFIG_REGISTRY", "AWS_ACCESS_KEY_ID", "POC_IRGENDWAS",
+]
+
+
+@pytest.mark.parametrize("schluessel", FREMDE_SCHLUESSEL)
+@pytest.mark.parametrize("modus", ["--faelle", "--antworten", None])
+def test_vertrag_fremde_umgebungsvariable_exit4(tmp_path, schluessel, modus):
+    """Der Prozess prüft seine eigene Umgebung: nur die Whitelist ist erlaubt, alles andere endet mit Exit 4 (ohne SDK)."""
+    vertrag_dateien_kopieren(tmp_path)
+    env = vertrag_umgebung(tmp_path, 1)
+    wert = "--no-warnings" if schluessel == "NODE_OPTIONS" else "poc-wert-fremd"
+    env[schluessel] = wert
+    r = node_lauf("vertrag.mjs", tmp_path, env, [modus] if modus else [])
+    assert r.returncode == 4, (r.returncode, r.stdout, r.stderr)
+    assert r.stdout == b""
+    assert schluessel.encode() in r.stderr  # der Name wird genannt, nie der Wert
+    if schluessel not in ("NODE_OPTIONS", "NODE_EXTRA_CA_CERTS"):  # diese Werte meldet Node selbst, noch vor dem Skript
+        assert wert.encode() not in r.stderr
+
+
+def test_vertrag_node_optionen_exit4(tmp_path):
+    vertrag_dateien_kopieren(tmp_path)
+    for optionen in (["--no-warnings"], ["--require", "./waechter.mjs"], ["--max-old-space-size=512"]):
+        r = node_lauf("vertrag.mjs", tmp_path, vertrag_umgebung(tmp_path, 1), ["--faelle"], node_args=optionen)
+        assert r.returncode == 4, (optionen, r.returncode, r.stdout, r.stderr)
+        assert r.stdout == b""
+
+
+def test_vertrag_umgebung_der_whitelist_laeuft(tmp_path):
+    """Gegenprobe: genau die Whitelist (wie vom Test gebaut) wird akzeptiert."""
+    vertrag_dateien_kopieren(tmp_path)
+    r = node_lauf("vertrag.mjs", tmp_path, vertrag_umgebung(tmp_path, 1), ["--faelle"])
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
 
 
 # Opt-in: SECURITY_AUDIT_SDK_VERTRAG=1 (braucht npm, Node >= 22 und Netz zur npm-Registry). Node >= 22 verlangen die
@@ -1615,6 +1725,24 @@ def _node_major(pfad):
     r = subprocess.run([pfad, "--version"], capture_output=True, timeout=20)
     m = re.match(rb"v(\d+)\.", r.stdout)
     return int(m.group(1)) if m else 0
+
+
+# Endpunkt je Fall: das Mock-Protokoll belegt den Weg, den der Client wirklich genommen hat (genau ein Request je Fall).
+# Das AI SDK für Anthropic hängt /messages an die Basis-URL (ohne /v1) an, der Anthropic-Client /v1/messages.
+ERWARTETER_PFAD = {
+    ("openai", "chat"): "/v1/chat/completions",
+    ("openai", "responses"): "/v1/responses",
+    ("openai", "embeddings"): "/v1/embeddings",
+    ("@anthropic-ai/sdk", "messages"): "/v1/messages",
+    ("ai+@ai-sdk/openai", "responses"): "/v1/responses",
+    ("ai+@ai-sdk/openai", "chat"): "/v1/chat/completions",
+    ("ai+@ai-sdk/anthropic", "messages"): "/messages",
+}
+
+
+def vertrag_npm_umgebung(home):
+    """Umgebung für `npm ci`: Whitelist, kein ~/.npmrc, keine npm_config_*-Variablen, kein Proxy aus dem Testlauf."""
+    return {"PATH": os.environ.get("PATH") or "/usr/bin:/bin", "HOME": str(home), "TMPDIR": str(home)}
 
 
 @pytest.fixture(scope="module")
@@ -1628,37 +1756,55 @@ def vertrag_zeilen(tmp_path_factory):
     if _node_major(node) < 22:
         pytest.skip("Node >= 22 nötig (SECURITY_AUDIT_SDK_NODE=<pfad>)")
     arbeit = tmp_path_factory.mktemp("sdk-vertrag")
-    shutil.copy(os.path.join(VERTRAG, "package.json.tmpl"), arbeit / "package.json")
-    shutil.copy(os.path.join(VERTRAG, "package-lock.json.tmpl"), arbeit / "package-lock.json")
-    vorher = (arbeit / "package-lock.json").read_bytes()
-    # einzige Netzaktion: npm ci gegen die npm-Registry (ausdrücklich per Flag, ohne Skripte)
-    i = subprocess.run([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--registry", REGISTRY],
-                       cwd=str(arbeit), capture_output=True, timeout=300)
-    assert i.returncode == 0, i.stderr.decode("utf-8", "replace")[-2000:]
-    assert (arbeit / "package-lock.json").read_bytes() == vorher
-    vertrag_dateien_kopieren(arbeit)
-    m = Mock()
+    npm_home = tmp_path_factory.mktemp("sdk-vertrag-npm")
+    leer, leer_global = npm_home / "leer.npmrc", npm_home / "leer-global.npmrc"  # npm lädt dieselbe Datei nicht doppelt
+    leer.write_text("", encoding="utf-8")
+    leer_global.write_text("", encoding="utf-8")
     try:
-        home = tmp_path_factory.mktemp("sdk-vertrag-home")
-        env = vertrag_umgebung(home, m.api)
-        env["PATH"] = os.path.dirname(node) + os.pathsep + env["PATH"]
-        a = subprocess.run([node, "vertrag.mjs", "--antworten"], cwd=str(arbeit), env=env, capture_output=True, timeout=60)
-        assert a.returncode == 0, a.stderr
-        setzen(m, json.loads(a.stdout))
-        r = subprocess.run([node, "vertrag.mjs"], cwd=str(arbeit), env=env, capture_output=True, timeout=600)
+        shutil.copy(os.path.join(VERTRAG, "package.json.tmpl"), arbeit / "package.json")
+        shutil.copy(os.path.join(VERTRAG, "package-lock.json.tmpl"), arbeit / "package-lock.json")
+        vorher = (arbeit / "package-lock.json").read_bytes()
+        # einzige Netzaktion: npm ci gegen die npm-Registry, mit Whitelist-Umgebung, leerer npm-Konfiguration, eigenem Cache,
+        # ausdrücklicher Registry und ohne Skripte
+        i = subprocess.run([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--registry", REGISTRY,
+                            "--userconfig", str(leer), "--globalconfig", str(leer_global), "--cache", str(npm_home / "cache")],
+                           cwd=str(arbeit), env=vertrag_npm_umgebung(npm_home), capture_output=True, timeout=300)
+        assert i.returncode == 0, i.stderr.decode("utf-8", "replace")[-2000:]
+        assert (arbeit / "package-lock.json").read_bytes() == vorher
+        vertrag_dateien_kopieren(arbeit)
+        m = Mock()
+        try:
+            home = tmp_path_factory.mktemp("sdk-vertrag-home")
+            env = vertrag_umgebung(home, m.api)
+            env["PATH"] = os.path.dirname(node) + os.pathsep + env["PATH"]
+            a = subprocess.run([node, "vertrag.mjs", "--antworten"], cwd=str(arbeit), env=env, capture_output=True, timeout=60)
+            assert a.returncode == 0, a.stderr
+            setzen(m, json.loads(a.stdout))
+            # 25 Fälle mit je höchstens 20 s Frist plus 10 s Reserve
+            r = subprocess.run([node, "vertrag.mjs"], cwd=str(arbeit), env=env, capture_output=True, timeout=900)
+            pfade = {}
+            for nr in range(len(FAELLE)):
+                p = cli("--protokoll", m.steuer, json.dumps({"werte": []}), ["--suche", f"POCMARKER-vertrag-{nr:02d}"])
+                pfade[nr] = sorted(e["pfad"] for e in json.loads(p.stdout)["eintraege"]) if p.returncode == 0 else None
+        finally:
+            m.beenden()
+        assert r.returncode == 0, (r.returncode, r.stdout.decode("utf-8", "replace")[-2000:], r.stderr.decode("utf-8", "replace")[-2000:])
+        ausgabe = os.environ.get("SECURITY_AUDIT_SDK_VERTRAG_AUSGABE")
+        if ausgabe:
+            with open(ausgabe, "wb") as f:
+                f.write(r.stdout)
+        zeilen = {}
+        for z in r.stdout.decode("utf-8").splitlines():
+            d = json.loads(z)
+            assert set(d) == {"paket", "weg", "stream", "art", "ergebnis", "waechter"}, d
+            zeilen[(d["paket"], d["weg"], d["stream"], d["art"])] = d
+        for nr, f in enumerate(FAELLE):  # die Reihenfolge der Zeilen ist die der Fälle (--faelle, Nummer = Index)
+            if f in zeilen:
+                zeilen[f]["pfade"] = pfade[nr]
+        return zeilen
     finally:
-        m.beenden()
-    assert r.returncode == 0, (r.returncode, r.stdout.decode("utf-8", "replace")[-2000:], r.stderr.decode("utf-8", "replace")[-2000:])
-    ausgabe = os.environ.get("SECURITY_AUDIT_SDK_VERTRAG_AUSGABE")
-    if ausgabe:
-        with open(ausgabe, "wb") as f:
-            f.write(r.stdout)
-    zeilen = {}
-    for z in r.stdout.decode("utf-8").splitlines():
-        d = json.loads(z)
-        assert set(d) == {"paket", "weg", "stream", "art", "ergebnis", "waechter"}, d
-        zeilen[(d["paket"], d["weg"], d["stream"], d["art"])] = d
-    return zeilen
+        shutil.rmtree(arbeit, ignore_errors=True)  # node_modules (rund 95 MB) nicht liegen lassen
+        shutil.rmtree(npm_home, ignore_errors=True)
 
 
 def test_vertrag_sdk_vollstaendig(vertrag_zeilen):
@@ -1670,3 +1816,5 @@ def test_vertrag_sdk(vertrag_zeilen, fall):
     z = vertrag_zeilen[fall]
     assert z["ergebnis"] == "gruen", z  # sonst "rot: <Grund>" oder "liest Env nicht" (Wächter hat ausgelöst)
     assert z["waechter"] == [], z
+    # der Weg ist belegt, nicht nur benannt: genau ein Request, auf dem erwarteten Endpunkt
+    assert z["pfade"] == [ERWARTETER_PFAD[(fall[0], fall[1])]], (fall, z["pfade"])

@@ -6,6 +6,10 @@
 // und als unterste Schicht net.Socket.prototype.connect (dort laufen auch Agents, undici und TLS vorbei).
 // Danach gleicht module.syncBuiltinESMExports() die benannten ESM-Exporte (`import { request } from "node:http"`) an.
 // Ein Treffer ist {art, ziel} mit dem reinen Host (ohne Pfad, Query und Zugangsdaten) und nie ein Request-Inhalt.
+//
+// Reichweite: Der Wächter schützt vor Fehlkonfiguration (ein SDK, das eine Basis-URL oder einen Proxy anders liest als
+// gedacht), nicht vor bösartigem Code. `dgram`, `dns`, `worker_threads` und `child_process` sind nicht gesperrt: Ein
+// Worker oder Kindprozess läuft ohne Wächter, UDP und DNS-Abfragen werden nicht erfasst. Es ist keine Sandbox.
 
 import http from "node:http";
 import https from "node:https";
