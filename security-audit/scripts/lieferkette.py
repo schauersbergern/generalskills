@@ -87,7 +87,7 @@ MAX_BEFUNDE_ROH = 200          # Einträge in `befunde_roh` (Rest als Hinweis; d
 MAX_NENNUNGEN = 10             # Dateien je Hinweis zur Repo-Konfiguration
 GITLEAKS_TOML = "[extend]\nuseDefault = true\n"
 KONFIG_NAMEN = (".gitleaks.toml", ".gitleaksignore")     # `osv-scanner.toml` meldet `abhaengigkeiten` selbst
-ARBEIT = ("leer", "leer-ignore", "gitleaks.toml", "gl-dir.json", "gl-git.json", "spiegel.git", "abh")   # unter <zustand>/lieferkette/
+ARBEIT = ("spiegel.git", "leer", "leer-ignore", "gitleaks.toml", "gl-dir.json", "gl-git.json", "abh")   # unter <zustand>/lieferkette/; der Spiegel (ungeschwärzte Historie) zuerst
 VOLLER_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 ALLOW_MARKE = b"gitleaks:allow"
 
@@ -227,9 +227,18 @@ def _sperre(lk: str):
 
 
 def _aufraeumen(lk: str) -> None:
-    """Arbeitsdateien unter `<zustand>/lieferkette/` löschen (Spiegel, Reports, Config, leere Ordner); der Marker bleibt."""
+    """Arbeitsdateien unter `<zustand>/lieferkette/` löschen (Spiegel zuerst, dann Reports, Config, leere Ordner); der Marker
+    bleibt. Jeder Eintrag wird versucht, auch nach einem Fehler (der Spiegel mit der ungeschwärzten Historie darf nicht an einem
+    anderen Eintrag hängen bleiben); danach wirft die Funktion einen PocFehler (Exit 1) mit allen Fehlern. Auch rohe OSErrors
+    aus dem Löschen sind PocFehler."""
+    fehler = []
     for name in ARBEIT:
-        poc._entferne(os.path.join(lk, name), lk)
+        try:
+            poc._entferne(os.path.join(lk, name), lk)
+        except (PocFehler, OSError) as e:
+            fehler.append(f"{name}: {_t(e, 150)}")
+    if fehler:
+        raise PocFehler("; ".join(fehler), code=1)
 
 
 def _ausgabe(daten: dict) -> None:
@@ -500,11 +509,12 @@ def schwaerzen(datei: str, treffer: list[dict], wurzel: str | None = None, ganze
 
 
 def _schwaerze_arbeitskopie(quelle: str, bericht: list[dict], ende: float | None = None,
-                             ganze_zeilen: bool = False) -> tuple[int, list[str]]:
+                             ganze_zeilen: bool = False, zaehlhinweis: bool = True) -> tuple[int, list[str]]:
     """Alle Fundstellen des `dir`-Berichts in der Arbeitskopie schwärzen. `File` wird aufgelöst (realpath) und muss innerhalb
     der Arbeitskopie liegen, sonst wird nichts geschrieben. Je Datei wird vorher die Frist `ende` (Wert von `time.monotonic()`)
     geprüft: ein Ablauf ist ein SchwaerzFehler (Teile der Arbeitskopie sind dann schon geschwärzt, es gibt keinen Marker).
-    Rückgabe: (Anzahl geschwärzter Fundstellen, Hinweise)."""
+    Rückgabe: (Anzahl geschwärzter Fundstellen, Hinweise); `zaehlhinweis=False` lässt den Hinweis mit der Anzahl weg.
+    Hinweise „Schwärzung unscharf“ stehen je (Datei, Zeile) einmal."""
     je_datei: dict[str, list[dict]] = {}
     draussen = 0
     for t in bericht:
@@ -526,9 +536,9 @@ def _schwaerze_arbeitskopie(quelle: str, bericht: list[dict], ende: float | None
         anzahl += len(je_datei[real])
     if draussen:
         hinweise.append(f"{draussen} Fundstellen außerhalb der Arbeitskopie ignoriert (nichts geschrieben)")
-    if anzahl:
+    if anzahl and zaehlhinweis:
         hinweise.insert(0, f"{anzahl} Secret-Fundstellen in der Arbeitskopie geschwärzt")
-    return anzahl, hinweise
+    return anzahl, list(dict.fromkeys(hinweise))
 
 
 def _innerhalb(quelle: str, bericht: list[dict]) -> list[dict]:
@@ -548,11 +558,14 @@ def _nachpruefen(quelle: str, lk: str, ende: float) -> list[str]:
     """Fail-closed nach der Schwärzung: ein zweiter `gitleaks dir`-Lauf auf der Arbeitskopie darf nichts mehr finden. Die
     Spalten von gitleaks sind nicht verlässlich (lange Zeilen), die Schwärzung kann daneben liegen. Restfunde werden deshalb
     zeilenweise ganz geschwärzt und noch einmal geprüft; bleibt dann ein Fund (oder läuft die Frist ab), ist das ein
-    SchwaerzFehler (Exit 4, kein Marker). Rückgabe: Hinweise."""
+    SchwaerzFehler (Exit 4, kein Marker). Rückgabe: Hinweise; die Nachschwärzung steht in einem eigenen Hinweis und zählt nicht
+    in `geschwaerzt` (das ist die Anzahl des ersten Laufs)."""
     rest = _innerhalb(quelle, _gitleaks_dir(quelle, lk, ende))
     if not rest:
         return []
-    _, hinweise = _schwaerze_arbeitskopie(quelle, rest, ende, ganze_zeilen=True)
+    anzahl, hinweise = _schwaerze_arbeitskopie(quelle, rest, ende, ganze_zeilen=True, zaehlhinweis=False)
+    hinweise.insert(0, f"{anzahl} weitere Secret-Fundstellen bei der Nachprüfung zeilenweise geschwärzt "
+                       f"(nicht in `geschwaerzt` enthalten)")
     uebrig = _innerhalb(quelle, _gitleaks_dir(quelle, lk, ende))
     if uebrig:
         raise SchwaerzFehler(f"nach der Schwärzung bleiben {len(uebrig)} Secret-Fundstellen in der Arbeitskopie")

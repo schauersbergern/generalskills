@@ -1800,3 +1800,65 @@ def test_spiegel_klont_ohne_hardlinks_mit_no_local_r1_10e(umg, tmp_path, monkeyp
     assert "--no-local" in klon and "--mirror" in klon and klon.index("--no-local") < klon.index("--")
     objekte = [os.path.join(d, f) for d, _, fs in os.walk(os.path.join(ziel, "objects")) for f in fs]
     assert objekte and all(os.stat(o).st_nlink == 1 for o in objekte)             # keine Hardlinks auf das Kundenrepo
+
+
+# ------------------------------------------------------------------------------------ Aufräumen: alle Einträge, Spiegel zuerst (Review R2-1)
+
+def _entferne_mit_fehlern(monkeypatch, scheitern: dict, nur_mit_marker=None):
+    """`poc._entferne` ersetzen: Namen in `scheitern` werfen die genannte Ausnahme, alle anderen laufen echt. Rückgabe: die
+    Liste der versuchten Namen. Mit `nur_mit_marker` (Pfad) scheitert es erst, wenn der Marker existiert."""
+    versucht = []
+    echt = lieferkette.poc._entferne
+
+    def attrappe(pfad, wurzel):
+        name = os.path.basename(pfad)
+        versucht.append(name)
+        if name in scheitern and (nur_mit_marker is None or os.path.exists(nur_mit_marker)):
+            raise scheitern[name]
+        echt(pfad, wurzel)
+    monkeypatch.setattr(lieferkette.poc, "_entferne", attrappe)
+    return versucht
+
+
+def test_aufraeumen_versucht_alle_eintraege_und_den_spiegel_zuerst_r2_1(tmp_path, monkeypatch):
+    lk = tmp_path / "lieferkette"
+    lk.mkdir()
+    for name in lieferkette.ARBEIT:
+        (lk / name).mkdir()
+    versucht = _entferne_mit_fehlern(monkeypatch, {"leer": OSError(13, "Permission denied"),
+                                                   "gl-dir.json": lieferkette.PocFehler("gl-dir.json nicht entfernt", code=1)})
+    with pytest.raises(lieferkette.PocFehler) as e:
+        lieferkette._aufraeumen(str(lk))
+    assert versucht[0] == "spiegel.git" and sorted(versucht) == sorted(lieferkette.ARBEIT)       # nach dem ersten Fehler weiter
+    assert not (lk / "spiegel.git").exists() and not (lk / "abh").exists()
+    assert (lk / "leer").exists() and (lk / "gl-dir.json").exists()
+    assert e.value.code == 1 and "leer" in str(e.value) and "gl-dir.json" in str(e.value)       # beide Fehler gesammelt
+
+
+def test_aufraeumfehler_fruehen_eintrags_laesst_den_spiegel_nicht_liegen_r2_1(umg, monkeypatch, capsys):
+    """Scheitert nach gesetztem Marker das Löschen von `gl-dir.json` (PocFehler) und von `leer` (roher OSError), ist
+    `spiegel.git` trotzdem weg; `secrets` endet mit Exit 0, JSON und Hinweis (kein Traceback)."""
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    _entferne_mit_fehlern(monkeypatch, {"gl-dir.json": lieferkette.PocFehler("gl-dir.json nicht entfernt", code=1),
+                                        "leer": OSError(13, "Permission denied")}, nur_mit_marker=umg.marker())
+    rc, aus = inproc_secrets(umg, v, monkeypatch, capsys)
+    assert rc == 0, aus.out + aus.err
+    out = json.loads(aus.out)
+    assert any(h.startswith("Aufräumen der Arbeitsdateien unvollständig") for h in out["hinweise"])
+    assert not os.path.lexists(os.path.join(umg.lieferkette_ordner(), "spiegel.git"))
+    assert os.path.isfile(umg.marker())
+
+
+def test_nachpruefung_hinweise_stehen_einmal_je_zeile_und_zaehlung_nicht_doppelt_r2_2(umg):
+    inhalt = 'var a=1;var t="x";var u="y";\nvar b=2;\n'
+    v = vorbereiten(umg, [{"src/a.js": inhalt, "package.json": "{}"}])
+    erster = [_lang_treffer(inhalt), _lang_treffer(inhalt)]                            # zwei Funde in Zeile 1
+    umg.fake_gitleaks(dir={"report": erster, "nach": [{"report": erster}, {"report": []}]}, git={"report": []})
+    out = ausgabe(secrets(umg, v))
+    h = out["hinweise"]
+    assert [x for x in h if x.endswith("Secret-Fundstellen in der Arbeitskopie geschwärzt")] == [
+        "2 Secret-Fundstellen in der Arbeitskopie geschwärzt"]                         # Zählhinweis genau einmal
+    assert h.count("Schwärzung unscharf: src/a.js:1 (ganze Zeile)") == 1               # je (Datei, Zeile), nicht je Treffer
+    assert "2 weitere Secret-Fundstellen bei der Nachprüfung zeilenweise geschwärzt (nicht in `geschwaerzt` enthalten)" in h
+    assert out["geschwaerzt"] == 2
