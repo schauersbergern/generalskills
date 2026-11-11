@@ -1501,11 +1501,23 @@ def test_kunden_verstoesse_a_versionsnummern_zaehlen_nicht_review1_i1():
     d = kd(massnahme="Aktualisieren Sie Express von Version 4.17.1 auf 4.19.2, um die Lücke zu schließen.",
            poc="X-Powered-By: Express 4.17.1 (12.0.3.7)")
     assert bericht.kunden_verstoesse(d) == []
+    d = kd(massnahme="Aktualisieren Sie Express von Version v4.17.1 auf v10.20.30, um die Lücke zu schließen.", poc="Express v4.17.1 v10.20.30")
+    assert bericht.kunden_verstoesse(d) == []
+
+
+@pytest.mark.parametrize("ip", ["10.0.0.5", "192.168.1.10", "1.2.3.4", "12.0.3.7"])
+def test_kunden_verstoesse_a_ipv4_adressen_bleiben_token_review2_n2(ip):
+    """TF4 Review 2 (N-2): Versionsnummern haben höchstens drei Teile; Adressen mit vier Teilen sind Spuren."""
+    d = kd(massnahme=f"{KD_VORSPANN}Sperren Sie den Zugriff auf {ip} im Netz.", poc=f"poc.py anfrage http://{ip}/x fertig {ip}")
+    assert [t[2:] for t in bericht.kunden_verstoesse(d)] == [("a", ip)]
 
 
 @pytest.mark.parametrize("token,satz", [
     ("Node.js", "Aktualisieren Sie Node.js auf Version 22."), ("package.json", "Passen Sie die Datei package.json an."),
-    ("poc.py", "Das Skript poc.py ist nicht Teil des Berichts."), ("und/oder", "Konten und/oder Daten sind betroffen."),
+    ("index.ts", "Passen Sie die Datei index.ts an."), ("server.cjs", "Passen Sie die Datei server.cjs an."),
+    ("app.mjs", "Passen Sie die Datei app.mjs an."), ("README.md", "Siehe die Datei README.md."),
+    ("index.html", "Passen Sie die Datei index.html an."), ("style.css", "Passen Sie die Datei style.css an."),
+    ("und/oder", "Konten und/oder Daten sind betroffen."),
     ("UND/ODER", "Konten und/oder Daten sind betroffen."), ("Next.js,", "Aktualisieren Sie Next.js auf Version 15."),
 ])
 def test_kunden_verstoesse_a_woerter_mit_endung_und_und_oder_zaehlen_nicht_review1_i1(token, satz):
@@ -1513,7 +1525,9 @@ def test_kunden_verstoesse_a_woerter_mit_endung_und_und_oder_zaehlen_nicht_revie
     assert regeln(d) == []
 
 
-@pytest.mark.parametrize("token", ["/api/orders/9", "org_id", "api.example/x", "app.js?id", "a.b&cdef", "dto.org_id", "config.secret_key"])
+@pytest.mark.parametrize("token", ["/api/orders/9", "org_id", "api.example/x", "app.js?id", "a.b&cdef", "dto.org_id", "config.secret_key",
+                                   "admin.php", "shell.sh", "config.yml", "backup.sql", "key.pem", "secrets.env", "os.system", "evil.com",
+                                   "poc.py", "passwd.txt", "wp-config.php", "id_rsa.pub", "Cmd.exe", "fs.unlink", "req.body"])
 def test_kunden_verstoesse_a_echte_token_treffen_weiterhin_review1_i1(token):
     d = kd(massnahme=f"{KD_VORSPANN}Die Stelle {token} wird geändert.", poc=f"anfrage {token} fertig")
     assert regeln(d) == ["a"]
@@ -1683,15 +1697,34 @@ def test_kunden_verstoesse_fehlende_felder_einzeln_uebersprungen():
     assert regeln(d) == ["du"]
 
 
-def test_kunden_verstoesse_titel_nur_d_e_url_email():
-    harmlos = "Bring dir GET /x {a} <b> = org_id und /api/orders/9 deine Daten"
-    assert bericht.kunden_verstoesse(kd(titel=harmlos)) == []
+def test_kunden_verstoesse_titel_regeln_a_b_c_d_e_url_email():
+    """TF4 Review 2 (I1): der Titel steht in jeder Befundüberschrift und wird wie Freitext geprüft; ausgenommen sind nur `du` und
+    die Zeichen `<` und `>` (Werkzeugtitel wie `name@1.2.3` oder Vergleiche)."""
+    probe = "Fehlende Prüfung bei GET /api/orders/9 mit org_id und `X-Token`"
+    treffer = bericht.kunden_verstoesse(kd(titel=probe))
+    assert {(f, r) for (_i, f, r, _d) in treffer} == {("titel", "a"), ("titel", "b"), ("titel", "c")}
+    assert [(t[3]) for t in treffer if t[2] == "a"] == ["/api/orders/9", "org_id"]
+    assert regeln(kd(titel="Fehlende Prüfung bei org_id"), "titel") == ["a"]                      # a: Token aus einem poc
+    assert regeln(kd(titel="Fehlende Prüfung bei GET /status"), "titel") == ["b"]                 # b: Methode mit Pfad
     assert regeln(kd(titel="Fehler Zeile 42")) == ["d"]
     assert regeln(kd(titel="Fehler in Dockerfile:6", datei="Dockerfile")) == ["d"]
     assert regeln(kd(titel="Fehler in src/api/orders.ts")) == ["e"]
     assert regeln(kd(titel="Fehler bei https://beispiel.de")) == ["url"]
     assert regeln(kd(titel="Fehler bei a@beispiel.de")) == ["email"]
     assert regeln(kd(titel="Fehler bei www.beispiel.de")) == ["url"]
+
+
+@pytest.mark.parametrize("titel", ["Wert `x` offen", "Konfiguration {a} offen", "Wert a=b offen", "Offen }", "Offen {", "Wert = 5 offen"])
+def test_kunden_verstoesse_titel_regel_c_nur_backtick_geschweifte_klammern_und_gleich(titel):
+    assert regeln(kd(titel=titel), "titel") == ["c"]
+
+
+@pytest.mark.parametrize("titel", [
+    "Verwundbare Abhängigkeit name@1.2.3", "Zugangsschlüssel in der Versionsgeschichte (generic-api-key)", "lodash 4.17.20 verwundbar",
+    "Version < 2.0 und Größe > 5 nicht geprüft", "Bring dir deine Daten", "Fehlende Zugriffsprüfung bei Bestellungen",
+])
+def test_kunden_verstoesse_titel_gegenproben_ohne_treffer(titel):
+    assert bericht.kunden_verstoesse(kd(titel=titel)) == []
 
 
 @pytest.mark.parametrize("daten", [
@@ -1734,15 +1767,37 @@ def test_kunden_verstoesse_laufzeit_3000_befunde_review1_m1():
     assert time.monotonic() - t0 < 2
 
 
-def test_kunden_verstoesse_mehr_als_5000_token_keine_regel_a_aber_warntext_review1_m1(capsys):
+def test_kunden_verstoesse_5100_token_mit_leck_werden_gemeldet_review2_n1(capsys):
+    """TF4 Review 2 (N-1): die frühere Grenze von 5000 Token schaltete Regel a ab; jetzt wird auch bei 5100 Token das Leck gemeldet."""
     d = kd(massnahme=KD_VORSPANN + "Die Stelle /api/orders/9 wird geändert.", poc="x")
-    d["befunde"][0]["poc"] = " ".join(f"/api/pfad/{i}" for i in range(5001)) + " /api/orders/9"
-    t = bericht.kunden_verstoesse(d)
-    assert [x for x in t if x[2] == "a"] == []
-    assert "5000" in capsys.readouterr().err
-    d["befunde"][0]["poc"] = " ".join(f"/api/pfad/{i}" for i in range(4999)) + " /api/orders/9"      # genau 5000: geprüft
-    assert regeln(d) == ["a"]
+    d["befunde"][0]["poc"] = " ".join(f"/api/pfad/{i}" for i in range(5100)) + " /api/orders/9"
+    assert [t[1:] for t in bericht.kunden_verstoesse(d)] == [("massnahme", "a", "/api/orders/9")]
     assert capsys.readouterr().err == ""
+
+
+def test_kunden_verstoesse_token_grenze_ist_fail_closed_review2_n1(capsys, monkeypatch):
+    """Greift die Obergrenze, gilt jedes geprüfte Feld mit festem Detail als Verstoß gegen Regel a; keine Warnung auf stderr."""
+    assert bericht._MAX_TOKEN == 200000
+    monkeypatch.setattr(bericht, "_MAX_TOKEN", 10)
+    d = kd(massnahme=KD_VORSPANN + "Harmloser Satz ohne Spuren.", poc=" ".join(f"/api/pfad/{i}" for i in range(11)))
+    assert bericht.kunden_verstoesse(d) == [("S-1", "zusammenfassung", "a", "zu viele Token zum Prüfen"),
+                                            ("S-1", "massnahme", "a", "zu viele Token zum Prüfen"),
+                                            ("S-1", "titel", "a", "zu viele Token zum Prüfen")]
+    d = kd(titel="Ein Titel", poc=" ".join(f"/api/pfad/{i}" for i in range(10)))                 # genau an der Grenze: geprüft
+    assert bericht.kunden_verstoesse(d) == []
+    assert capsys.readouterr().err == ""
+    d = kd(titel="Ein Titel", poc=" ".join(f"/api/pfad/{i}" for i in range(11)))
+    assert [t[1:] for t in bericht.kunden_verstoesse(d)] == [("zusammenfassung", "a", "zu viele Token zum Prüfen"),
+                                                              ("massnahme", "a", "zu viele Token zum Prüfen"),
+                                                              ("titel", "a", "zu viele Token zum Prüfen")]
+
+
+def test_kunden_verstoesse_token_grenze_nur_gelistete_befunde_review2_n1(monkeypatch):
+    monkeypatch.setattr(bericht, "_MAX_TOKEN", 10)
+    d = kd(poc=" ".join(f"/api/pfad/{i}" for i in range(11)))
+    d["befunde"][0]["status"] = "verworfen"
+    d["befunde"][0]["grund"] = "Kein Fehler"
+    assert bericht.kunden_verstoesse(d) == []
 
 
 @pytest.mark.parametrize("satz", ["Im Ordner src/dir bleibt das.", "Die Datei x.dir bleibt.", "Der Name @dir bleibt.", "Das Paket pre-dir bleibt."])

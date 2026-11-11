@@ -3,16 +3,21 @@
   kundenbericht.py erstellen --json <ausgabe_ordner>/<basisname>.json
       schreibt <basisname>-kunde.md (und danach <basisname>-kunde.pdf) neben das Bericht-JSON.
 
-Exit-Codes (bei Exit != 0 ist die erste Zeile auf stdout `kategorie: <wert>`; Meldungen stehen auf stdout, höchstens 30 Zeilen):
+Exit-Codes (bei Exit != 0 ist die erste Zeile auf stdout `kategorie: <wert>`; danach `kunde-md:`, wenn das Markdown liegt, und die Meldungen):
+Zeilengrenze: höchstens 30 Meldungszeilen, ohne `kategorie:`, `kunde-md:` und `kunde-pdf:`; jede weitere Meldung ersetzt die Zeile
+`… und <n> weitere` (sie kommt zu den 30 hinzu und fehlt bei genau 30 Meldungen).
   0  Markdown und PDF erstellt (stdout: `kunde-md: <pfad>`, `kunde-pdf: <pfad>`)
-  1  `intern`            unerwarteter Fehler (eine Zeile ohne Traceback)
+  1  `intern`            unerwarteter Fehler (eine Zeile ohne Traceback); liegt das Markdown schon, steht `kunde-md:` davor
   2  `inhalt`            Kundenfelder fehlen oder verstoßen gegen die Inhaltsregeln; mit Feldkorrektur behebbar; keine Kundendateien
   3  `pdf-werkzeug-fehlt` pandoc oder weasyprint fehlt oder ist nicht startbar; nur das Markdown liegt (zweite Zeile `kunde-md:`)
   4  `pdf-fehler`        PDF-Kette gescheitert (HTML-Prüfung, stderr, leere Datei, Timeout); nur das Markdown liegt
-  5  `eingabe`           Argumente, Eingabedatei, Kollision, Ziel, Schema außerhalb der Kundenfelder, Schreiben; keine Korrektur
+  5  `eingabe`           Argumente, Eingabedatei, Kollision, Ziel, Schema außerhalb der Kundenfelder (nur ID und Feld, nie ein Wert), Schreiben;
+                         keine Korrektur
 
 Die Meldungen zu Exit 2 haben die Form `<id> <feld>: Regel <regel>[ (<detail>)]` und nennen nie den Treffertext; ausgenommen sind
-das Du-Wort und das Token bei Regel a (siehe bericht.kunden_verstoesse). Nur Standardbibliothek.
+das Du-Wort und das Token bei Regel a (siehe bericht.kunden_verstoesse); bei mehr als 200000 Token in den `poc`-Feldern meldet jedes
+geprüfte Feld Regel a mit dem festen Detail „zu viele Token zum Prüfen“ (fail-closed). Alle Meldungen stehen auf stdout, stderr bleibt
+für Argumentfehler (Usage). Nur Standardbibliothek.
 """
 import argparse
 import json
@@ -36,10 +41,11 @@ KUNDE_BUDGET = 90         # Sekunden für `erstellen` insgesamt (Frist ab Beginn
 PANDOC_MAX = 20           # Anteil von pandoc; jeder Timeout ist min(Anteil, Restbudget)
 WEASYPRINT_MAX = 60       # Anteil von weasyprint
 TEMPLATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kundenbericht.html5")
-MAX_ZEILEN = 30           # Meldungszeilen auf stdout; mehr werden zu `… und <n> weitere`
+MAX_ZEILEN = 30           # Meldungszeilen auf stdout (ohne `kategorie:`/`kunde-md:`); mehr werden zu `… und <n> weitere`
 _FELDER = tuple(bericht.KUNDENFELDER)                      # ("zusammenfassung", "massnahme")
 _FELD_REIHENFOLGE = {"zusammenfassung": 0, "massnahme": 1, "titel": 2}
 _ESCAPE = frozenset("\\`*_{}[]<>!$^~@&|#")                 # K1-Menge (R1), `<` und `>` mit Backslash (R2-K-7)
+_STELLE = re.compile(r"(?:(S-[0-9]+|befunde\[[0-9]+\]): )?(?:Pflichtfeld fehlt: )?([a-z_]+(?:\[[0-9]+\])?)")
 _SCHEMA_KUNDENFELD = re.compile(r"(S-[0-9]+): (zusammenfassung|massnahme) (.+)", re.DOTALL)
 
 
@@ -126,11 +132,19 @@ def _lesen(pfad: str) -> object:
         raise Abbruch(5, "eingabe", ["Die Eingabedatei ist kein gültiges JSON."]) from None
 
 
+def _modus() -> int:
+    """Rechte der Kundendateien wie beim Bericht-JSON: 0644, maskiert mit der umask (`mkstemp` legt sonst 0600 an)."""
+    maske = os.umask(0)
+    os.umask(maske)
+    return 0o644 & ~maske
+
+
 def _ablegen(ziel: str, text: str) -> None:
     """Atomar schreiben: Temp-Datei im Zielordner, dann `os.replace`; nach einem Fehler bleibt keine Temp-Datei."""
     tmp = None
     try:
         fd, tmp = tempfile.mkstemp(prefix=".kunde-", suffix=".tmp", dir=os.path.dirname(ziel))
+        os.fchmod(fd, _modus())
         with os.fdopen(fd, "wb") as fh:
             fh.write(text.encode("utf-8", "replace"))
         os.replace(tmp, ziel)
@@ -161,6 +175,17 @@ def _gelistet(b: object) -> bool:
             and unicodedata.normalize("NFC", b["status"]) in bericht.IN_LISTE)
 
 
+def _stelle(meldung: str) -> str:
+    """Ort einer Schemameldung aus `bericht.pruefe_schema` ohne Datenwerte: `<ID> <Feld>` bzw. `<Feld>`; sonst `Schemafehler`.
+    Die Meldungen beginnen immer mit einem festen Namen (ID-Label und Feldname stammen aus dem Code, nie aus den Daten)."""
+    m = _STELLE.match(meldung)
+    return " ".join(x for x in m.groups() if x) if m else "Schemafehler"
+
+
+def _stellen(meldungen: list[str]) -> list[str]:
+    return [f"- {x}" for x in dict.fromkeys(_stelle(m) for m in meldungen)]
+
+
 def _kappen(zeilen: list[str]) -> list[str]:
     return zeilen if len(zeilen) <= MAX_ZEILEN else zeilen[:MAX_ZEILEN] + [f"… und {len(zeilen) - MAX_ZEILEN} weitere"]
 
@@ -169,7 +194,7 @@ def _pruefen(daten: object) -> None:
     """Schema außerhalb der Kundenfelder (Exit 5), dann fehlende Felder, Feldschema und Inhaltsregeln (Exit 2)."""
     fehler = bericht.pruefe_schema(_ohne_kundenfelder(daten))
     if fehler:
-        raise Abbruch(5, "eingabe", _kappen([f"Schemafehler außerhalb der Kundenfelder ({len(fehler)}):"] + [f"- {x}" for x in fehler]))
+        raise Abbruch(5, "eingabe", _kappen([f"Schemafehler außerhalb der Kundenfelder ({len(fehler)}):"] + _stellen(fehler)))
     schema: dict[tuple[str, str], str] = {}
     fremd = []
     for meldung in bericht.pruefe_schema(daten):
@@ -177,9 +202,9 @@ def _pruefen(daten: object) -> None:
         if m:
             schema[(m.group(1), m.group(2))] = m.group(3)
         else:
-            fremd.append(f"- {meldung}")
+            fremd.append(meldung)
     if fremd:           # kann nach der ersten Prüfung nicht vorkommen; ohne Ausweg wäre es ein Eingabefehler
-        raise Abbruch(5, "eingabe", _kappen(["Schemafehler:"] + fremd))
+        raise Abbruch(5, "eingabe", _kappen(["Schemafehler:"] + _stellen(fremd)))
     treffer: list[tuple[str, str, str, str | None]] = []
     reihenfolge: dict[str, int] = {}
     for i, b in enumerate(daten["befunde"]):
@@ -219,35 +244,48 @@ _NACHWEIS_WERKZEUG = {
 }
 _NACHWEIS_NACHGESTELLT = "im Test nachgestellt"
 _NACHWEIS_ANNAHME = "im Test nachgestellt unter der Annahme, dass das KI-Modell einer eingeschleusten Anweisung folgt"
-_NACHWEIS_ABGELEITET = "aus dem Quellcode abgeleitet"
+_NACHWEIS_ABGELEITET = "aus dem Quellcode abgeleitet, im Test nicht bestätigt (mögliche Schwachstelle)"
 
-# Management-Zusammenfassung: je Stufe Adjektiv, Auswirkung (nur bei `bestätigt`, enthält „ausnutzbar“) und die Empfehlung (R1-K11, K13).
-# Plural der Auswirkung steht in der zweiten Form. „ausnutzbar“ steht nie in einem Satz zu `unbestätigt`.
+# Management-Zusammenfassung: je Stufe die Auswirkung (nur bei `bestätigt`, enthält „ausnutzbar“, Singular und Plural) und die Empfehlung
+# für bestätigte und für nur unbestätigte Lagen (R1-K11, K13). „ausnutzbar“ steht nie in einem Satz zu `unbestätigt`.
+# Jede Empfehlung enthält „Sie“ oder beginnt mit „Wir empfehlen“ (ein Test sichert die Sie-Form: Du-Imperative erkennt text_verstoesse nicht).
 _STUFE_TEXT = {
-    "Kritisch": ("kritische", ("die ohne Anmeldung oder über Mandantengrenzen hinweg ausnutzbar ist",
-                               "die ohne Anmeldung oder über Mandantengrenzen hinweg ausnutzbar sind"),
+    "Kritisch": (("die ohne Anmeldung oder über die Grenzen zwischen Kundenkonten hinweg ausnutzbar ist",
+                  "die ohne Anmeldung oder über die Grenzen zwischen Kundenkonten hinweg ausnutzbar sind"),
                  "Lassen Sie die betroffenen Stellen umgehend beheben.",
-                 "Prüfen Sie die betroffenen Stellen und lassen Sie bestätigte Schwachstellen umgehend beheben."),
-    "Hoch": ("hohe", ("die ausnutzbar ist und erheblichen Schaden verursachen kann", "die ausnutzbar sind und erheblichen Schaden verursachen können"),
+                 "Lassen Sie diese Stellen umgehend prüfen und, falls sie sich bestätigen, beheben."),
+    "Hoch": (("die ausnutzbar ist und erheblichen Schaden verursachen kann", "die ausnutzbar sind und erheblichen Schaden verursachen können"),
              "Wir empfehlen, die betroffenen Stellen vor dem nächsten Release zu beheben.",
              "Wir empfehlen, die betroffenen Stellen vor dem nächsten Release zu prüfen und bei Bestätigung zu beheben."),
-    "Mittel": ("mittlere", ("die ausnutzbar ist, deren Auswirkung aber begrenzt bleibt", "die ausnutzbar sind, deren Auswirkung aber begrenzt bleibt"),
+    "Mittel": (("die ausnutzbar ist, deren Auswirkung aber begrenzt bleibt", "die ausnutzbar sind, deren Auswirkungen aber begrenzt bleiben"),
                "Wir empfehlen, die betroffenen Stellen zeitnah einzuplanen und zu beheben.",
                "Wir empfehlen, die betroffenen Stellen zeitnah zu prüfen und bei Bestätigung zu beheben."),
-    "Niedrig": ("niedrige", ("die ausnutzbar ist, deren Auswirkung aber gering ist", "die ausnutzbar sind, deren Auswirkung aber gering ist"),
+    "Niedrig": (("die ausnutzbar ist, deren Auswirkung aber gering ist", "die ausnutzbar sind, deren Auswirkungen aber gering sind"),
                 "Wir empfehlen, die betroffenen Stellen bei nächster Gelegenheit zu beheben.",
                 "Wir empfehlen, die betroffenen Stellen bei nächster Gelegenheit zu prüfen und bei Bestätigung zu beheben."),
 }
+# Einordnung der Kundenstufen (fester Text unter der Stufentabelle)
+_EINORDNUNG = (
+    ("Kritisch", "von außen ohne Anmeldung oder über Kundengrenzen ausnutzbar."),
+    ("Hoch", "ausnutzbar mit Anmeldung."),
+    ("Mittel", "begrenzte Auswirkung."),
+    ("Niedrig", "geringe Auswirkung oder nur in Entwicklungsumgebungen."),
+)
+_ZAHLWOERTER = ("", "eine", "zwei", "drei", "vier", "fünf", "sechs", "sieben", "acht", "neun", "zehn", "elf", "zwölf")
 _KEINE_SCHWACHSTELLEN = "In der geprüften Version wurden keine ausnutzbaren Schwachstellen gefunden."
 
 # Eingeschränkte Prüfung: abschließende Tabelle aus Spec R2-W-5 (Teilstring in `hinweise`, ohne Beachtung der Schreibweise -> Kundentext).
 # „nicht geschwärzt“ entfällt (R2-K-12). Jeder Text erscheint höchstens einmal, in der Reihenfolge der Tabelle.
+# Die Kundentexte „Nachstellung in einer Testumgebung“ und „Abschluss einzelner Prüfungen (Zeitlimit)“ ändern R2-W-5 bewusst (TF4 Review 2).
+# Die gitleaks-Standardausnahmen (`gitleaks-Standardausnahmen nicht geprüft`) stehen bewusst nicht in der Tabelle: sie treten fast immer auf
+# (Lockfiles) und würden fast jeden Bericht als eingeschränkt kennzeichnen.
 _EINGESCHRAENKT = (
     (("gitleaks fehlt",), "Suche nach Zugangsschlüsseln"),
     (("osv-scanner fehlt", "abhaengigkeiten fehlgeschlagen"), "Abgleich der Abhängigkeiten"),
     (("lieferkette fehlgeschlagen",), "Prüfung der Build-Konfiguration"),
-    (("docker-fehlt", "build-fehler", "build-timeout", "start-fehler", "lockfile-fehlt", "lockfile-fremde-quelle", "nicht-npm"), "Nachweis im Test"),
-    (("zeitbudget",), "vollständige Laufzeit einzelner Prüfungen"),
+    (("docker-fehlt", "build-fehler", "build-timeout", "start-fehler", "lockfile-fehlt", "lockfile-fremde-quelle", "nicht-npm"),
+     "Nachstellung in einer Testumgebung"),
+    (("zeitbudget",), "Abschluss einzelner Prüfungen (Zeitlimit)"),
     (("ki.py erkennen fehlgeschlagen", "modell-mock nicht möglich"), "Prüfung der KI-Funktionen"),
 )
 
@@ -256,6 +294,7 @@ _GRENZEN = (
     "Methode: Code-Analyse durch KI-Agenten; Nachweise entstanden nur in einer isolierten Testumgebung ohne Zugriff auf Produktivsysteme.",
     "Es besteht keine Garantie auf Vollständigkeit.",
     "Der technische Bericht mit Details liegt Manibase vor.",
+    "Nach Umsetzung der Maßnahmen empfehlen wir eine erneute Prüfung.",
 )
 _FUSS = "Manibase · vertraulich"
 
@@ -331,20 +370,26 @@ def _eingeschraenkt_satz(texte: list[str]) -> str:
     return f"Die Prüfung war eingeschränkt ({', '.join(texte)}); das Ergebnis ist deshalb nicht vollständig."
 
 
+def _zahl(n: int) -> str:
+    return _ZAHLWOERTER[n] if n <= 12 else str(n)
+
+
 def _zusammenfassung(zaehler: dict[tuple[str, str], int]) -> list[str]:
-    """Tabelle der Anzahlen und je Stufe ein Absatz: ein Satz je Status mit Anzahl > 0, danach die Empfehlung."""
+    """Tabelle der Anzahlen, die Einordnung der Stufen und je Stufe ein Absatz: ein Satz je Status mit Anzahl > 0, danach die Empfehlung
+    (bei gemischtem Status die für bestätigte Lagen)."""
     z = ["| Kundenstufe | Anzahl |", "|---|---|"]
     z += [f"| {st} | {zaehler.get((st, 'bestätigt'), 0) + zaehler.get((st, 'unbestätigt'), 0)} |" for st in KUNDENSTUFEN]
+    z += [""] + [f"- {st}: {text}" for st, text in _EINORDNUNG]
     for st in KUNDENSTUFEN:
-        adjektiv, (auswirkung_sg, auswirkung_pl), empfehlung_best, empfehlung_unbest = _STUFE_TEXT[st]
+        (auswirkung_sg, auswirkung_pl), empfehlung_best, empfehlung_unbest = _STUFE_TEXT[st]
         n_best, n_unbest = zaehler.get((st, "bestätigt"), 0), zaehler.get((st, "unbestätigt"), 0)
         saetze = []
         if n_best:
-            saetze.append(f"Es besteht 1 {adjektiv} Schwachstelle, {auswirkung_sg}." if n_best == 1
-                          else f"Es bestehen {n_best} {adjektiv} Schwachstellen, {auswirkung_pl}.")
+            saetze.append(f"Es besteht eine Schwachstelle der Stufe {st}, {auswirkung_sg}." if n_best == 1
+                          else f"Es bestehen {_zahl(n_best)} Schwachstellen der Stufe {st}, {auswirkung_pl}.")
         if n_unbest:
-            saetze.append(f"Es besteht 1 mögliche Schwachstelle der Stufe {st}, die im Test nicht nachgestellt werden konnte." if n_unbest == 1
-                          else f"Es bestehen {n_unbest} mögliche Schwachstellen der Stufe {st}, die im Test nicht nachgestellt werden konnten.")
+            saetze.append(f"Es besteht eine mögliche Schwachstelle der Stufe {st}, die im Test nicht nachgestellt werden konnte." if n_unbest == 1
+                          else f"Es bestehen {_zahl(n_unbest)} mögliche Schwachstellen der Stufe {st}, die im Test nicht nachgestellt werden konnten.")
         if saetze:
             z += ["", " ".join(saetze + [empfehlung_best if n_best else empfehlung_unbest])]
     return z
@@ -364,19 +409,23 @@ def markdown_erzeugen(daten: dict) -> str:
     eingeschraenkt = _eingeschraenkt(daten)
 
     z = [f"# Manibase · Sicherheitsprüfung {escape(name)}", "", f"**Datum:** {_datum(daten.get('datum'))}", "",
-         f"**Geprüfter Commit:** {escape(str(daten.get('sha'))[:7])}"]
+         f"**Geprüfter Stand (Commit):** {escape(str(daten.get('sha'))[:7])}"]
     if teilpfad := _text(daten.get("teilpfad")):
         z += ["", f"**Geprüfter Bereich:** nur der Teilbereich {escape(teilpfad)}"]
     if hinweis:
         z += ["", hinweis]
 
     z += ["", "## Management-Zusammenfassung", ""] + _zusammenfassung(zaehler)
-    if not gelistet:
-        z += ["", _eingeschraenkt_satz(eingeschraenkt) if eingeschraenkt else _KEINE_SCHWACHSTELLEN]
+    if eingeschraenkt:          # am Ende der Zusammenfassung, nicht nur unter „Umfang und Grenzen“; ersetzt die Entwarnung
+        z += ["", _eingeschraenkt_satz(eingeschraenkt)]
+    elif not gelistet:
+        z += ["", _KEINE_SCHWACHSTELLEN]
 
     z += ["", "## Befunde"]
     if not gelistet:
         z += ["", "In diesem Bericht sind keine Befunde aufgeführt."]
+    else:
+        z += ["", "Die Befunde sind nach Dringlichkeit sortiert."]
     for b in gelistet:
         datei = _text(b.get("datei"))
         z += ["", f"### {b['id']} · {_kundenstufe(b)} · {escape(_titel(b))}",
@@ -522,6 +571,7 @@ def _pdf_ablegen(roh: bytes, ziel: str) -> None:
     tmp = None
     try:
         fd, tmp = tempfile.mkstemp(prefix=".kunde-", suffix=".tmp", dir=os.path.dirname(ziel))
+        os.fchmod(fd, _modus())
         with os.fdopen(fd, "wb") as fh:
             fh.write(roh)
         os.replace(tmp, ziel)
@@ -600,8 +650,11 @@ def _erstellen(pfad: str, ende: float) -> tuple[int, str | None, list[str]]:
         _ablegen(md, markdown_erzeugen(daten))
     except Abbruch as a:
         return a.code, a.kategorie, a.zeilen
-    code, kategorie, meldungen = pdf_erstellen(md, pdf, pagetitle(daten), ende)
     zeilen = [f"kunde-md: {_t(md, 4096)}"]
+    try:
+        code, kategorie, meldungen = pdf_erstellen(md, pdf, pagetitle(daten), ende)
+    except Exception as ex:  # noqa: BLE001 - das Markdown liegt schon: Exit 1, aber `kunde-md:` nennen und nichts aus der Ausnahme ausgeben
+        return 1, "intern", zeilen + [f"Unerwarteter Fehler ({type(ex).__name__})."]
     if code == 0:
         return 0, None, zeilen + [f"kunde-pdf: {_t(pdf, 4096)}"]
     return code, kategorie, zeilen + _kappen(list(meldungen))

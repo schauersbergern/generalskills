@@ -99,6 +99,46 @@ def test_poc_text_exit2_keine_datei(tmp_path):
     assert inhalt(tmp_path / "out") == [BASIS + ".json"], "bei Exit 2 entstehen keine Kundendateien"
 
 
+def test_titel_mit_exploit_text_exit2_keine_datei(tmp_path):
+    """TF4 Review 2 (I1): der Titel steht in jeder Befundüberschrift und darf keinen Exploit-Text tragen (Regeln a, b, c)."""
+    pfad = schreibe(tmp_path / "out", bericht_daten(befund(titel="Fehlende Prüfung bei GET /api/orders/9 mit org_id und `X-Token`")))
+    p = lauf(pfad)
+    assert p.returncode == 2, p.stdout + p.stderr
+    assert zeilen(p)[0] == "kategorie: inhalt"
+    regeln = [z.split(": Regel ")[1][0] for z in zeilen(p)[1:] if z.startswith("S-1 titel: Regel ")]
+    assert sorted(set(regeln)) == ["a", "b", "c"], zeilen(p)
+    assert inhalt(tmp_path / "out") == [BASIS + ".json"], "bei Exit 2 entstehen keine Kundendateien"
+
+
+@pytest.mark.parametrize("titel", ["Verwundbare Abhängigkeit name@1.2.3", "Zugangsschlüssel in der Versionsgeschichte (generic-api-key)",
+                                   "Version < 2.0 und Größe > 5 nicht geprüft"])
+def test_werkzeugtitel_bleiben_erlaubt(tmp_path, titel):
+    pfad = schreibe(tmp_path / "out", bericht_daten(befund(titel=titel)))
+    p = lauf(pfad)
+    assert p.returncode == 3, p.stdout + p.stderr          # Titelprüfung ohne Treffer: weiter bis zur PDF-Stufe (ohne Werkzeuge: Exit 3)
+    assert os.path.isfile(kunde_pfad(pfad, "md"))
+
+
+def test_5100_poc_token_mit_leck_exit2(tmp_path):
+    """TF4 Review 2 (N-1): auch bei mehr als 5000 Token im poc wird das Leck gemeldet (früher fiel Regel a still aus)."""
+    poc = " ".join(f"/api/pfad/{i}" for i in range(5100)) + " /api/orders/9"
+    pfad = schreibe(tmp_path / "out", bericht_daten(befund(poc=poc, massnahme=VORSPANN + "Die Stelle /api/orders/9 wird geändert.")))
+    p = lauf(pfad)
+    assert p.returncode == 2, p.stdout + p.stderr
+    assert zeilen(p) == ["kategorie: inhalt", "S-1 massnahme: Regel a (/api/orders/9)"] and p.stderr == ""
+    assert inhalt(tmp_path / "out") == [BASIS + ".json"]
+
+
+def test_zu_viele_poc_token_fail_closed_exit2(tmp_path, monkeypatch, capsys):
+    pfad = schreibe(tmp_path / "out", bericht_daten(befund(poc=" ".join(f"/api/pfad/{i}" for i in range(11)))))
+    monkeypatch.setattr(bericht, "_MAX_TOKEN", 10)
+    assert kundenbericht.main(["erstellen", "--json", str(pfad)]) == 2
+    aus = capsys.readouterr()
+    assert aus.out.splitlines() == ["kategorie: inhalt", "S-1 zusammenfassung: Regel a (zu viele Token zum Prüfen)",
+                                    "S-1 massnahme: Regel a (zu viele Token zum Prüfen)", "S-1 titel: Regel a (zu viele Token zum Prüfen)"]
+    assert aus.err == "" and inhalt(tmp_path / "out") == [BASIS + ".json"]
+
+
 def test_code_pfad_exit2_keine_datei(tmp_path):
     pfad = schreibe(tmp_path / "out", bericht_daten(befund(massnahme=VORSPANN + "Ändern Sie die Datei src/lib/fetch.ts im Projekt.")))
     p = lauf(pfad)
@@ -210,6 +250,24 @@ def test_meldungen_hoechstens_30(tmp_path):
     assert len(z) == 1 + 30 + 1
     assert z[1] == "S-1 massnahme: Regel du (du)" and z[30] == "S-30 massnahme: Regel du (du)"
     assert z[-1] == "… und 10 weitere"
+
+
+@pytest.mark.parametrize("n,weitere", [(29, None), (30, None), (31, 1), (32, 2)])
+def test_meldungszeilen_grenze_30_ohne_kategorie_zeile(tmp_path, n, weitere):
+    """TF4 Review 2 (I3): höchstens 30 Meldungszeilen, ohne `kategorie:` (und `kunde-md:`/`kunde-pdf:`); der Rest wird zu `… und <n> weitere`.
+    Genau 30 Treffer erscheinen vollständig, ohne `… und 0 weitere`."""
+    pfad = schreibe(tmp_path / "out", bericht_daten(*[befund(i, massnahme="Prüfe, ob du Zugriff auf die Daten hast.") for i in range(1, n + 1)]))
+    p = lauf(pfad)
+    assert p.returncode == 2, p.stdout + p.stderr
+    z = zeilen(p)
+    assert z[0] == "kategorie: inhalt"
+    meldungen = z[1:]
+    if weitere is None:
+        assert len(meldungen) == n and all(m.startswith("S-") for m in meldungen)
+        assert not any("weitere" in m for m in meldungen)
+    else:
+        assert len(meldungen) == 30 + 1 and meldungen[-1] == f"… und {weitere} weitere"
+        assert all(m.startswith("S-") for m in meldungen[:30])
 
 
 def test_unerwarteter_fehler_exit1_kategorie_intern(tmp_path, monkeypatch, capsys):
@@ -377,7 +435,7 @@ def test_ablage_atomar(tmp_path, monkeypatch, capsys):
 def test_schema_fehler_ausserhalb_kundenfelder_exit5(tmp_path):
     ordner = tmp_path / "out"
     d = bericht_daten()
-    d["datum"] = "morgen"
+    d["datum"] = "morgenGEHEIM"
     pfad = schreibe(ordner, d)
     p = lauf(pfad)
     assert p.returncode == 5, p.stdout + p.stderr
@@ -389,6 +447,50 @@ def test_schema_fehler_ausserhalb_kundenfelder_exit5(tmp_path):
     pfad = schreibe(ordner, d)
     p = lauf(pfad)
     assert p.returncode == 5 and zeilen(p)[0] == "kategorie: eingabe"
+
+
+def test_schema_meldungen_exit5_nur_id_und_feld(tmp_path):
+    """TF4 Review 2 (Minor): Exit 5 nennt ID und Feld, nie einen Datenwert."""
+    d = bericht_daten(befund(1, stufe="P9GEHEIM"), befund(2), befund(3, kategorie="Z99GEHEIM"))
+    d["datum"] = "morgenGEHEIM"
+    d["repo"] = "repo GEHEIM"
+    del d["befunde"][1]["titel"]
+    d["befunde"][2]["poc"] = "poc.py anfrage --pfad http://GEHEIM.example/x"
+    p = lauf(schreibe(tmp_path / "out", d))
+    assert p.returncode == 5, p.stdout + p.stderr
+    z = zeilen(p)
+    assert z[0] == "kategorie: eingabe" and re.fullmatch(r"Schemafehler außerhalb der Kundenfelder \(\d+\):", z[1]), z
+    assert sorted(z[2:]) == sorted(["- datum", "- repo", "- S-1 stufe", "- S-2 titel", "- S-3 kategorie", "- S-3 poc"]), z
+    assert "GEHEIM" not in p.stdout + p.stderr
+
+
+def test_schema_stelle_hilfsfunktion():
+    f = kundenbericht._stelle
+    assert f("Pflichtfeld fehlt: repo") == "repo"
+    assert f("S-4: Pflichtfeld fehlt: titel") == "S-4 titel"
+    assert f("befunde[2]: id muss S-<Zahl> sein, ist 'x'") == "befunde[2] id"
+    assert f("befunde[3] muss ein Objekt sein") == "befunde[3]"
+    assert f("S-1: code_pfad[0] muss datei:zeile sein, ist 'x'") == "S-1 code_pfad[0]"
+    assert f("Wurzel muss ein JSON-Objekt sein") == "Schemafehler"
+
+
+def test_stellen_ohne_datenwerte_und_ohne_doppelte():
+    meldungen = ["S-1: poc enthält nicht erlaubten Host: GEHEIM.example", "S-1: poc enthält nicht erlaubten Host: ANDERER.example", "datum ungültig: ist 'GEHEIM'"]
+    assert kundenbericht._stellen(meldungen) == ["- S-1 poc", "- datum"]
+
+
+def test_schema_meldungen_der_zweiten_pruefung_ohne_datenwerte(tmp_path, monkeypatch, capsys):
+    """Der Zweig `fremd` (Schemameldung außerhalb der Kundenfelder erst bei der zweiten Prüfung) nennt ebenfalls nur ID und Feld."""
+    pfad = schreibe(tmp_path / "out", bericht_daten())
+    aufrufe = []
+
+    def schema(daten):
+        aufrufe.append(1)
+        return [] if len(aufrufe) == 1 else ["S-1: poc enthält nicht erlaubten Host: GEHEIM.example"]
+
+    monkeypatch.setattr(bericht, "pruefe_schema", schema)
+    assert kundenbericht.main(["erstellen", "--json", str(pfad)]) == 5
+    assert capsys.readouterr().out.splitlines() == ["kategorie: eingabe", "Schemafehler:", "- S-1 poc"]
 
 
 def test_json_nicht_lesbar_exit5(tmp_path):
@@ -461,6 +563,49 @@ def test_pdf_erstellen_bekommt_pfade_titel_und_frist(tmp_path, monkeypatch):
     assert vorher < ende <= time.monotonic() + kundenbericht.KUNDE_BUDGET
 
 
+def test_pdf_erstellen_wirft_markdown_bleibt_und_wird_genannt(tmp_path, monkeypatch, capsys):
+    """TF4 Review 2 (Minor): scheitert die PDF-Stufe mit einer unerwarteten Ausnahme, bleibt das Markdown liegen und stdout nennt es."""
+    pfad = schreibe(tmp_path / "out", bericht_daten())
+
+    def kaputt(*a):
+        raise RuntimeError("GEHEIMTEXT aus dem Fehler")
+
+    monkeypatch.setattr(kundenbericht, "pdf_erstellen", kaputt)
+    assert kundenbericht.main(["erstellen", "--json", str(pfad)]) == 1
+    aus = capsys.readouterr()
+    assert aus.out.splitlines() == ["kategorie: intern", "kunde-md: " + kunde_pfad(pfad, "md"), "Unerwarteter Fehler (RuntimeError)."]
+    assert "GEHEIMTEXT" not in aus.out + aus.err and "Traceback" not in aus.out + aus.err
+    assert os.path.isfile(kunde_pfad(pfad, "md")) and inhalt(tmp_path / "out") == [BASIS + "-kunde.md", BASIS + ".json"]
+
+
+@pytest.mark.parametrize("maske,modus", [(0o022, 0o644), (0o077, 0o600), (0o002, 0o644)])
+def test_kundendateien_haben_die_rechte_des_json(tmp_path, maske, modus):
+    """TF4 Review 2 (Minor): `-kunde.md` und `-kunde.pdf` bekommen 0644 maskiert mit der umask (mkstemp legt sonst 0600 an), wie das JSON."""
+    alt = os.umask(maske)
+    try:
+        ordner = tmp_path / "out"
+        pfad = schreibe(ordner, bericht_daten())
+        kundenbericht._ablegen(kunde_pfad(pfad, "md"), "# Text\n")
+        kundenbericht._pdf_ablegen(b"%PDF-1.7\n", kunde_pfad(pfad, "pdf"))
+    finally:
+        os.umask(alt)
+    assert os.stat(kunde_pfad(pfad, "md")).st_mode & 0o777 == modus
+    assert os.stat(kunde_pfad(pfad, "pdf")).st_mode & 0o777 == modus
+    assert os.stat(pfad).st_mode & 0o777 == 0o666 & ~maske, "das JSON dient als Vergleich"
+
+
+def test_erstellen_lauf_markdown_hat_rechte_644(tmp_path):
+    pfad = schreibe(tmp_path / "out", bericht_daten())
+    assert lauf(pfad).returncode == 3
+    assert os.stat(kunde_pfad(pfad, "md")).st_mode & 0o777 == 0o644 & ~_prozess_umask()
+
+
+def _prozess_umask():
+    alt = os.umask(0)
+    os.umask(alt)
+    return alt
+
+
 # ------------------------------------------------------------------------------------ CLI
 
 def test_hilfe_nennt_unterbefehl_erstellen():
@@ -513,6 +658,7 @@ def test_kopf_mit_projekt():
     assert z[0] == "# Manibase · Sicherheitsprüfung Portal"
     kopf = "\n".join(z[:abschnitt_ende(md)])
     assert "03.11.2026" in kopf and "1234567" in kopf and "1234567a" not in kopf
+    assert "**Geprüfter Stand (Commit):** 1234567" in z and "Geprüfter Commit" not in md
     assert "kein Projektname" not in md
     assert "Teilbereich" not in kopf
 
@@ -579,10 +725,18 @@ def test_stufe_p3_niedrig():
 
 
 def test_stufe_status_nfc_normalisiert():
+    """M05: auch Tabelle, Sätze und Nachweis beruhen auf dem NFC-normalisierten Status, nicht nur die Überschrift."""
     import unicodedata
-    zerlegt = unicodedata.normalize("NFD", "unbestätigt")
-    md = md_von(befund(status=zerlegt, poc=None, code_pfad=["src/a.ts:1", "src/b.ts:2"]))
-    assert "### S-1 · " in md and "aus dem Quellcode abgeleitet" in md
+    unb = unicodedata.normalize("NFD", "unbestätigt")
+    md = md_von(befund(status=unb, poc=None, code_pfad=["src/a.ts:1", "src/b.ts:2"]))
+    assert "### S-1 · " in md and "im Test nicht bestätigt (mögliche Schwachstelle)" in md
+    assert tabelle(md) == {"Kritisch": 1, "Hoch": 0, "Mittel": 0, "Niedrig": 0}
+    assert "Es besteht eine mögliche Schwachstelle der Stufe Kritisch" in zus(md) and "ausnutzbar" not in zus(md)
+    best = unicodedata.normalize("NFD", "bestätigt")
+    md = md_von(befund(status=best))
+    assert tabelle(md) == {"Kritisch": 1, "Hoch": 0, "Mittel": 0, "Niedrig": 0}
+    assert "Es besteht eine Schwachstelle der Stufe Kritisch, die ohne Anmeldung" in zus(md)
+    assert "**Nachweis:** im Test nachgestellt" in md_zeilen(md)
 
 
 def test_verworfen_und_verdacht_fehlen():
@@ -613,7 +767,8 @@ def test_nachweis_je_herkunft():
 
     assert nachweis() == "im Test nachgestellt"
     assert nachweis(annahme_modell=True) == "im Test nachgestellt unter der Annahme, dass das KI-Modell einer eingeschleusten Anweisung folgt"
-    assert nachweis(status="unbestätigt", poc=None, code_pfad=["src/a.ts:1", "src/b.ts:2"]) == "aus dem Quellcode abgeleitet"
+    assert nachweis(status="unbestätigt", poc=None, code_pfad=["src/a.ts:1", "src/b.ts:2"]) == \
+        "aus dem Quellcode abgeleitet, im Test nicht bestätigt (mögliche Schwachstelle)"
     assert nachweis(werkzeug="osv-scanner") == "aus der Abhängigkeitsliste mit bekannten Sicherheitslücken abgeglichen"
     assert nachweis(werkzeug="gitleaks") == "Zugangsschlüssel in der Versionsgeschichte gefunden (Wert nicht wiedergegeben)"
     assert nachweis(werkzeug="lieferkette") == "aus der Build- und Installationskonfiguration abgeleitet"
@@ -657,47 +812,116 @@ def test_befund_felder_in_fester_reihenfolge_ohne_exploit_details():
 
 # --- Zusammenfassung
 
+EINORDNUNG = ("- Kritisch: von außen ohne Anmeldung oder über Kundengrenzen ausnutzbar.", "- Hoch: ausnutzbar mit Anmeldung.",
+              "- Mittel: begrenzte Auswirkung.", "- Niedrig: geringe Auswirkung oder nur in Entwicklungsumgebungen.")
+UNB = dict(status="unbestätigt", poc=None, code_pfad=["src/a.ts:1", "src/b.ts:2"])
+HOCH = dict(ohne_anmeldung=False, mandantenuebergreifend=False)
+
+
 def zus(md):
-    return " ".join(abschnitt(md, "## Management-Zusammenfassung"))
+    """Management-Zusammenfassung als Fließtext, ohne die feste Einordnung der Stufen (sie nennt „ausnutzbar“ unabhängig vom Status)."""
+    return " ".join(x for x in abschnitt(md, "## Management-Zusammenfassung") if x not in EINORDNUNG)
 
 
 def test_zusammenfassung_singular_plural():
     md1 = md_von(befund(1))
     assert tabelle(md1) == {"Kritisch": 1, "Hoch": 0, "Mittel": 0, "Niedrig": 0}
-    assert "Es besteht 1 kritische Schwachstelle" in zus(md1) and "bestehen" not in zus(md1)
+    assert "Es besteht eine Schwachstelle der Stufe Kritisch" in zus(md1) and "bestehen" not in zus(md1)
     md3 = md_von(befund(1), befund(2), befund(3, stufe="P2"), befund(4, stufe="P2"), befund(5, stufe="P3"),
-                 befund(6, stufe="P3"), befund(7, stufe="P3"), befund(8, ohne_anmeldung=False, mandantenuebergreifend=False),
-                 befund(9, ohne_anmeldung=False, mandantenuebergreifend=False))
+                 befund(6, stufe="P3"), befund(7, stufe="P3"), befund(8, **HOCH), befund(9, **HOCH))
     assert tabelle(md3) == {"Kritisch": 2, "Hoch": 2, "Mittel": 2, "Niedrig": 3}
     z = zus(md3)
-    assert "Es bestehen 2 kritische Schwachstellen" in z and "Es bestehen 2 hohe Schwachstellen" in z
-    assert "Es bestehen 2 mittlere Schwachstellen" in z and "Es bestehen 3 niedrige Schwachstellen" in z
-    z1 = zus(md_von(befund(1, stufe="P3")))
-    assert "Es besteht 1 niedrige Schwachstelle" in z1
-    assert "Es besteht 1 hohe Schwachstelle" in zus(md_von(befund(1, ohne_anmeldung=False, mandantenuebergreifend=False)))
-    assert "Es besteht 1 mittlere Schwachstelle" in zus(md_von(befund(1, stufe="P2")))
+    assert "Es bestehen zwei Schwachstellen der Stufe Kritisch" in z and "Es bestehen zwei Schwachstellen der Stufe Hoch" in z
+    assert "Es bestehen zwei Schwachstellen der Stufe Mittel" in z and "Es bestehen drei Schwachstellen der Stufe Niedrig" in z
+    assert "Es besteht eine Schwachstelle der Stufe Niedrig" in zus(md_von(befund(1, stufe="P3")))
+    assert "Es besteht eine Schwachstelle der Stufe Hoch" in zus(md_von(befund(1, **HOCH)))
+    assert "Es besteht eine Schwachstelle der Stufe Mittel" in zus(md_von(befund(1, stufe="P2")))
+    for alt in ("hohe", "kritische", "mittlere", "niedrige", "1 Schwachstelle", "2 Schwachstellen"):
+        assert alt not in z, alt
 
 
-def test_zusammenfassung_kritisch_umgehend_beheben():
-    assert "umgehend beheben" in zus(md_von(befund(1)))
-    assert "umgehend beheben" in zus(md_von(befund(1, status="unbestätigt", poc=None, code_pfad=["a/b.ts:1", "c/d.ts:2"])))
+def test_zusammenfassung_zahlwoerter():
+    """„eine“ für 1, Zahlwort für 2 bis 12, ab 13 die Ziffer."""
+    woerter = ["zwei", "drei", "vier", "fünf", "sechs", "sieben", "acht", "neun", "zehn", "elf", "zwölf"]
+    for n, wort in zip(range(2, 13), woerter):
+        assert f"Es bestehen {wort} Schwachstellen der Stufe Kritisch" in zus(md_von(*[befund(i) for i in range(1, n + 1)])), n
+    assert "Es bestehen 13 Schwachstellen der Stufe Kritisch" in zus(md_von(*[befund(i) for i in range(1, 14)]))
+    assert "Es bestehen drei mögliche Schwachstellen der Stufe Hoch, die im Test nicht nachgestellt werden konnten." in \
+        zus(md_von(*[befund(i, **HOCH, **UNB) for i in range(1, 4)]))
+
+
+def test_zusammenfassung_kritisch_umgehend():
+    assert "Lassen Sie die betroffenen Stellen umgehend beheben." in zus(md_von(befund(1)))
+    z = zus(md_von(befund(1, **UNB)))
+    assert "Lassen Sie diese Stellen umgehend prüfen und, falls sie sich bestätigen, beheben." in z
+    assert "umgehend beheben" not in z
     assert "umgehend" not in zus(md_von(befund(1, stufe="P2")))
 
 
 def test_zusammenfassung_ausnutzbar_nur_bestaetigt():
-    unb = dict(status="unbestätigt", poc=None, code_pfad=["src/a.ts:1", "src/b.ts:2"])
-    z = zus(md_von(befund(1, **unb), befund(2, stufe="P2", **unb)))
+    z = zus(md_von(befund(1, **UNB), befund(2, stufe="P2", **UNB)))
     assert "ausnutzbar" not in z
-    assert "1 mögliche Schwachstelle der Stufe Kritisch" in z and "1 mögliche Schwachstelle der Stufe Mittel" in z
+    assert "eine mögliche Schwachstelle der Stufe Kritisch" in z and "eine mögliche Schwachstelle der Stufe Mittel" in z
     z = zus(md_von(befund(1)))
     assert "ausnutzbar" in z and "mögliche Schwachstelle" not in z
     for stufe in ("P2", "P3"):
         assert "ausnutzbar" in zus(md_von(befund(1, stufe=stufe)))
-    # gemischter Status in einer Stufe: ein Satz je Status (R1-K11)
-    z = zus(md_von(befund(1), befund(2), befund(3, **unb)))
-    assert "Es bestehen 2 kritische Schwachstellen" in z and "ausnutzbar" in z
-    assert "Es besteht 1 mögliche Schwachstelle der Stufe Kritisch" in z
-    assert z.count("umgehend beheben") == 1
+    # gemischter Status in einer Stufe: ein Satz je Status (R1-K11), danach die Empfehlung für die bestätigte Lage (N15/N16)
+    z = zus(md_von(befund(1), befund(2), befund(3, **UNB)))
+    assert "Es bestehen zwei Schwachstellen der Stufe Kritisch" in z and "ausnutzbar" in z
+    assert "Es besteht eine mögliche Schwachstelle der Stufe Kritisch" in z
+    assert z.count("umgehend beheben") == 1 and "umgehend prüfen" not in z
+
+
+def test_zusammenfassung_empfehlung_je_stufe_und_status():
+    """N15/N16: je Stufe gilt bei gemischtem Status die Empfehlung für bestätigte Lagen, bei nur unbestätigt die zum Prüfen."""
+    for stufe, extra, best, unbest in (
+            ("P1", HOCH, "vor dem nächsten Release zu beheben", "vor dem nächsten Release zu prüfen und bei Bestätigung zu beheben"),
+            ("P2", {}, "zeitnah einzuplanen und zu beheben", "zeitnah zu prüfen und bei Bestätigung zu beheben"),
+            ("P3", {}, "bei nächster Gelegenheit zu beheben", "bei nächster Gelegenheit zu prüfen und bei Bestätigung zu beheben")):
+        nur_best = zus(md_von(befund(1, stufe=stufe, **extra)))
+        nur_unb = zus(md_von(befund(1, stufe=stufe, **extra, **UNB)))
+        gemischt = zus(md_von(befund(1, stufe=stufe, **extra), befund(2, stufe=stufe, **extra, **UNB)))
+        assert best in nur_best and unbest not in nur_best
+        assert unbest in nur_unb and best not in nur_unb
+        assert best in gemischt and unbest not in gemischt, (stufe, gemischt)
+
+
+def test_zusammenfassung_ton_der_bausteine():
+    z = zus(md_von(befund(1), befund(2), befund(3, stufe="P2"), befund(4, stufe="P2"), befund(5, stufe="P3"), befund(6, stufe="P3")))
+    assert "Mandanten" not in z
+    assert "die ohne Anmeldung oder über die Grenzen zwischen Kundenkonten hinweg ausnutzbar sind" in z
+    assert "deren Auswirkungen aber begrenzt bleiben" in z and "deren Auswirkungen aber gering sind" in z
+    assert "deren Auswirkung aber begrenzt bleibt" in zus(md_von(befund(1, stufe="P2")))
+    assert "deren Auswirkung aber gering ist" in zus(md_von(befund(1, stufe="P3")))
+    assert "die ohne Anmeldung oder über die Grenzen zwischen Kundenkonten hinweg ausnutzbar ist" in zus(md_von(befund(1)))
+
+
+def test_empfehlungen_in_sie_form():
+    """Jede Empfehlung enthält „Sie“ oder beginnt mit „Wir empfehlen“; Du-Imperative („Prüfe“, „Plane“) erkennt text_verstoesse nicht."""
+    for stufe, (_auswirkung, best, unbest) in kundenbericht._STUFE_TEXT.items():
+        for satz in (best, unbest):
+            assert satz.startswith("Wir empfehlen") or re.search(r"\bSie\b", satz), (stufe, satz)
+    assert set(kundenbericht._STUFE_TEXT) == set(kundenbericht.KUNDENSTUFEN)
+
+
+def test_einordnung_der_stufen_nach_der_tabelle():
+    for md in (md_von(befund(1)), md_von(befund(1, status="verdacht"))):          # auch ohne gelistete Befunde
+        z = abschnitt(md, "## Management-Zusammenfassung")
+        gefunden = [x for x in z if x in EINORDNUNG]
+        assert gefunden == list(EINORDNUNG), z
+        letzte_tabellenzeile = max(i for i, x in enumerate(z) if x.startswith("| "))
+        assert z.index(EINORDNUNG[0]) > letzte_tabellenzeile
+    md = md_von(befund(1))
+    z = abschnitt(md, "## Management-Zusammenfassung")
+    assert z.index(EINORDNUNG[-1]) < next(i for i, x in enumerate(z) if x.startswith("Es besteht"))
+
+
+def test_befunde_nach_dringlichkeit_sortiert_satz():
+    md = md_von(befund(1))
+    assert abschnitt(md, "## Befunde")[:2] == ["", "Die Befunde sind nach Dringlichkeit sortiert."]
+    ohne = md_von(befund(1, status="verdacht"))
+    assert "nach Dringlichkeit sortiert" not in ohne
 
 
 def test_zusammenfassung_ohne_befunde_entwarnung():
@@ -714,10 +938,11 @@ EINGESCHRAENKT = [
     ("osv-scanner fehlt", "Abgleich der Abhängigkeiten"),
     ("abhaengigkeiten fehlgeschlagen (Exit 2)", "Abgleich der Abhängigkeiten"),
     ("lieferkette fehlgeschlagen (Exit 1)", "Prüfung der Build-Konfiguration"),
-    ("docker-fehlt", "Nachweis im Test"), ("build-fehler", "Nachweis im Test"), ("build-timeout", "Nachweis im Test"),
-    ("start-fehler", "Nachweis im Test"), ("lockfile-fehlt", "Nachweis im Test"), ("lockfile-fremde-quelle", "Nachweis im Test"),
-    ("nicht-npm", "Nachweis im Test"),
-    ("Zeitbudget von bericht.py kontext erschöpft", "vollständige Laufzeit einzelner Prüfungen"),
+    ("docker-fehlt", "Nachstellung in einer Testumgebung"), ("build-fehler", "Nachstellung in einer Testumgebung"),
+    ("build-timeout", "Nachstellung in einer Testumgebung"),
+    ("start-fehler", "Nachstellung in einer Testumgebung"), ("lockfile-fehlt", "Nachstellung in einer Testumgebung"),
+    ("lockfile-fremde-quelle", "Nachstellung in einer Testumgebung"), ("nicht-npm", "Nachstellung in einer Testumgebung"),
+    ("Zeitbudget von bericht.py kontext erschöpft", "Abschluss einzelner Prüfungen (Zeitlimit)"),
     ("ki.py erkennen fehlgeschlagen (Exit 1)", "Prüfung der KI-Funktionen"),
     ("Modell-Mock nicht möglich: kein Modell", "Prüfung der KI-Funktionen"),
 ]
@@ -735,8 +960,8 @@ def test_eingeschraenkt_mehrere_hinweise():
                                     "build-fehler", "Zeitbudget erschöpft", "ki.py erkennen fehlgeschlagen (Exit 1)", "Modell-Mock nicht möglich: x",
                                     "gitleaks-Standardausnahmen nicht geprüft: abc", "native-module"], teilpfad="apps/web")
     satz = next(x for x in abschnitt(md, "## Umfang und Grenzen") if x.startswith("Die Prüfung war eingeschränkt ("))
-    for text in ("nur der Teilbereich apps/web", "Suche nach Zugangsschlüsseln", "Abgleich der Abhängigkeiten", "Nachweis im Test",
-                 "vollständige Laufzeit einzelner Prüfungen", "Prüfung der KI-Funktionen"):
+    for text in ("nur der Teilbereich apps/web", "Suche nach Zugangsschlüsseln", "Abgleich der Abhängigkeiten",
+                 "Nachstellung in einer Testumgebung", "Abschluss einzelner Prüfungen (Zeitlimit)", "Prüfung der KI-Funktionen"):
         assert satz.count(text) == 1, (text, satz)
     assert "Prüfung der Build-Konfiguration" not in satz
     assert satz.endswith("; das Ergebnis ist deshalb nicht vollständig.")
@@ -762,7 +987,25 @@ def test_teilpfad_eingeschraenkt():
     assert any("nur der Teilbereich apps/web" in x for x in kopf)
     mit = md_von(befund(), teilpfad="apps/web")
     assert "Die Prüfung war eingeschränkt (nur der Teilbereich apps/web)" in "\n".join(abschnitt(mit, "## Umfang und Grenzen"))
-    assert "Die Prüfung war eingeschränkt" not in zus(mit)
+
+
+def test_teilpfad_im_eingeschraenkt_satz_escaped():
+    """M22: der Teilpfad im Satz „Die Prüfung war eingeschränkt“ geht wie im Kopf durch escape()."""
+    md = md_von(befund(), teilpfad="apps/web_ui")
+    satz = "Die Prüfung war eingeschränkt (nur der Teilbereich apps/web\\_ui); das Ergebnis ist deshalb nicht vollständig."
+    assert satz in abschnitt(md, "## Umfang und Grenzen")
+    assert satz in abschnitt(md, "## Management-Zusammenfassung")
+
+
+def test_eingeschraenkt_satz_auch_am_ende_der_zusammenfassung_mit_befunden():
+    """TF4 Review 2 (I4): bei eingeschränkter Prüfung steht der Satz am Ende der Management-Zusammenfassung und unter „Umfang und Grenzen“."""
+    md = md_von(befund(), hinweise=["osv-scanner fehlt"])
+    satz = "Die Prüfung war eingeschränkt (Abgleich der Abhängigkeiten); das Ergebnis ist deshalb nicht vollständig."
+    z = [x for x in abschnitt(md, "## Management-Zusammenfassung") if x]
+    assert z[-1] == satz and z.count(satz) == 1
+    assert abschnitt(md, "## Umfang und Grenzen").count(satz) == 1
+    assert md.count(satz) == 2
+    assert md_von(befund(), hinweise=[]).count("Die Prüfung war eingeschränkt") == 0
 
 
 # --- Aufbau
@@ -775,7 +1018,8 @@ def test_abschnittsfolge_und_fuss():
     assert md.endswith("\n\nManibase · vertraulich\n") and md.count("Manibase · vertraulich") == 1
     grenzen = "\n".join(abschnitt(md, "## Umfang und Grenzen"))
     for satz in ("Geprüft wurde der oben genannte Commit.", "Code-Analyse durch KI-Agenten", "isolierten Testumgebung ohne Zugriff auf Produktivsysteme",
-                 "keine Garantie auf Vollständigkeit", "Der technische Bericht mit Details liegt Manibase vor."):
+                 "keine Garantie auf Vollständigkeit", "Der technische Bericht mit Details liegt Manibase vor.",
+                 "Nach Umsetzung der Maßnahmen empfehlen wir eine erneute Prüfung."):
         assert satz in grenzen, satz
 
 
@@ -828,6 +1072,7 @@ def test_escaping_in_ausgabe_und_daten_nie_am_zeilenanfang():
     md = kundenbericht.markdown_erzeugen(daten)
     assert "### S-1 · Kritisch · Tit \\[a\\](b) \\{.c\\} \\<i\\> \\#\n" in md
     assert "**Betroffene Datei:** src/a\\_b/c\\*.ts" in md_zeilen(md)
+    assert "**Maßnahme:** Wir empfehlen, ZQX \\_fett\\_ und \\`code\\` zu entfernen." in md_zeilen(md)          # M19
     assert md.startswith("# Manibase · Sicherheitsprüfung ZQX\\_Projekt \\[x\\]\n")
     for zeile in md_zeilen(md):
         assert not zeile.startswith("ZQX"), zeile
@@ -841,13 +1086,13 @@ def test_escaping_in_ausgabe_und_daten_nie_am_zeilenanfang():
 NEUTRAL = "Platzhalter"
 
 
-def neutral_daten(n=2, **kopf):
-    """Berichte über alle Stufen, Singular und Plural, bestätigt und unbestätigt; Datenfelder sind neutrale Platzhalter."""
+def neutral_daten(n=2, status=("bestätigt", "unbestätigt"), **kopf):
+    """Berichte über alle Stufen, Singular und Plural, je `status` (Standard: beide); Datenfelder sind neutrale Platzhalter."""
     unb = dict(status="unbestätigt", poc=None, code_pfad=["src/a.ts:1", "src/b.ts:2"])
     bef = []
     nr = 0
     for stufe, kritisch in (("P1", True), ("P1", False), ("P2", False), ("P3", False)):
-        for extra in ({}, unb):
+        for extra in ({"bestätigt": {}, "unbestätigt": unb}[st] for st in status):
             for _ in range(n):
                 nr += 1
                 bef.append(befund(nr, stufe=stufe, ohne_anmeldung=kritisch, mandantenuebergreifend=False, titel=NEUTRAL,
@@ -860,6 +1105,9 @@ def neutral_daten(n=2, **kopf):
 def feste_texte_faelle():
     yield neutral_daten(1)
     yield neutral_daten(2)
+    for status in (("bestätigt",), ("unbestätigt",)):          # reiner Status je Stufe: sonst läuft die jeweils andere Empfehlung nie (N01 bis N03, M45)
+        yield neutral_daten(1, status=status)
+        yield neutral_daten(2, status=status)
     yield neutral_daten(befunde=[], hinweise=[], teilpfad=None)
     yield neutral_daten(befunde=[], hinweise=[], teilpfad=NEUTRAL)
     yield neutral_daten(befunde=[], hinweise=["gitleaks fehlt"], teilpfad=None)
@@ -879,13 +1127,18 @@ def test_feste_texte_ohne_du_und_spuren():
     for daten in feste_texte_faelle():
         md = kundenbericht.markdown_erzeugen(daten)
         anzahl += 1
+        # text_verstoesse prüft höchstens die ersten 5000 Zeichen eines Textes; bei langen Berichten trägt die zeilenweise Prüfung unten die Last
         assert bericht.text_verstoesse(md) == [], (anzahl, bericht.text_verstoesse(md))
         for zeile in md_zeilen(md):
             assert not re.search(r"\b(GET|POST|PUT|PATCH|DELETE)\s+/", zeile)
-    assert anzahl >= 20
+    assert anzahl >= 24
     # Bausteine einzeln: jede Zeile aus allen Fällen auch ohne Markdown-Zeichen geprüft
     texte = {z for d in feste_texte_faelle() for z in md_zeilen(kundenbericht.markdown_erzeugen(d))}
-    assert any("Es bestehen 2 kritische Schwachstellen" in t for t in texte)
+    assert any("Es bestehen zwei Schwachstellen der Stufe Kritisch" in t for t in texte)
+    for stufe in kundenbericht.KUNDENSTUFEN:               # alle Empfehlungen sind in den Fällen enthalten und bestehen die Prüfung
+        for satz in kundenbericht._STUFE_TEXT[stufe][1:]:
+            assert any(satz in t for t in texte), satz
+            assert bericht.text_verstoesse(satz) == [], satz
     for t in texte:
         assert bericht.text_verstoesse(t) == [], t
 

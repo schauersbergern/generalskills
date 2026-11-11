@@ -485,6 +485,7 @@ _DU_FORMEN = ("du", "dich", "dir", "dein", "deine", "deinen", "deinem", "deiner"
 _DU = re.compile(r"(?<![\w./@-])(?:" + "|".join(_DU_FORMEN) + r")(?![\w/@-])(?!\.\w)", re.IGNORECASE)
 _REGEL_B = re.compile(r"\b(?:GET|POST|PUT|PATCH|DELETE)\s+/", re.IGNORECASE)
 _REGEL_C = re.compile(r"[{}<>=`]")
+_REGEL_C_TITEL = re.compile(r"[{}=`]")                  # im Titel sind `<` und `>` erlaubt (`name@1.2.3`, Vergleiche in Werkzeugtiteln)
 _D_LAUF = re.compile(r"(?<![\w./-])[\w./-]+")          # `Pfad:Zahl` ohne Backtracking: Lauf suchen, dann Zeichen danach prüfen
 _D_MUSTER = re.compile(r"#L\d+|\bZeile\s+\d+", re.IGNORECASE)
 _URL = re.compile(r"https?://|\bwww\.", re.IGNORECASE)
@@ -493,14 +494,16 @@ _TAUSENDER = re.compile(r"\d{1,3}(?:\.\d{3})+(?:,\d+)?")
 _A_ZEICHEN = frozenset("/=?&%<>{}_@$\\[]")
 _A_PUNKT = re.compile(r"\w\.\w")
 _A_RAND = ".,;:()\"'"
-_A_VERSION = re.compile(r"\d+(?:\.\d+)+")                     # `4.17.1`
-_A_DATEINAME = re.compile(r"[A-Za-z][\w-]*\.[A-Za-z]{1,6}")      # `Node.js`, `package.json`, `poc.py` (ohne / = ? & %)
-_MAX_TOKEN = 5000        # Token aus `poc` je Bericht; darüber keine Prüfung mit Regel a (Laufzeit: Befunde × Token)
+_A_VERSION = re.compile(r"v?\d+(?:\.\d+){1,2}")                 # `4.17.1`, `v4.17`; vier Teile (`10.0.0.5`) sind eine Adresse und bleiben Token
+_A_DATEINAME = re.compile(r"[A-Za-z][\w-]*\.(?:js|ts|mjs|cjs|json|md|html|css)", re.IGNORECASE)   # `Node.js`, `package.json` (ohne / = ? & %)
+_MAX_TOKEN = 200000      # Token aus `poc` je Bericht; darüber ist jedes geprüfte Feld ein Verstoß gegen Regel a (fail-closed)
+_ZU_VIELE_TOKEN = "zu viele Token zum Prüfen"
 _KUNDEN_DETAIL = {                                   # fester Text je Regel (außer `du` und `a`), nie Treffertext
     "b": "HTTP-Methode mit Pfad", "c": "Sonderzeichen oder Backtick", "d": "Datei mit Zeilenangabe",
     "e": "Dateipfad aus einem Befund", "url": "Webadresse", "email": "E-Mail-Adresse",
 }
-_KUNDEN_FELDER = (("zusammenfassung", KUNDEN_REGELN), ("massnahme", KUNDEN_REGELN), ("titel", ("d", "e", "url", "email")))
+_KUNDEN_FELDER = (("zusammenfassung", KUNDEN_REGELN), ("massnahme", KUNDEN_REGELN),
+                  ("titel", ("a", "b", "c", "d", "e", "url", "email")))           # Titel: alle Regeln außer `du` (TF4 Review 2, I1)
 _MAX_PRUEF = 5000        # Zeichen je Feld; hält die Regex-Prüfung auch bei übergroßen Texten schnell
 
 
@@ -519,11 +522,11 @@ def _d_allgemein(text: str) -> bool:
     return False
 
 
-def _regex_treffer(text: str) -> dict[str, list[str]]:
+def _regex_treffer(text: str, titel: bool = False) -> dict[str, list[str]]:
     t: dict[str, list[str]] = {}
     if woerter := [m.group() for m in _DU.finditer(text)]:
         t["du"] = woerter
-    for regel, muster in (("b", _REGEL_B), ("c", _REGEL_C)):
+    for regel, muster in (("b", _REGEL_B), ("c", _REGEL_C_TITEL if titel else _REGEL_C)):
         if muster.search(text):
             t[regel] = [_KUNDEN_DETAIL[regel]]
     if _d_allgemein(text):
@@ -556,8 +559,10 @@ def text_verstoesse(text: str) -> list[tuple[str, str]]:
 def _poc_token(poc: str) -> list[str]:
     """Token eines `poc` nach Spec R2-B-1: Whitespace-getrennt, Rand `.,;:()"'` abgeschnitten, mindestens 6 Zeichen und
     ein Zeichen aus `/ = ? & % < > { } _ @ $ \\ [ ]` oder `\\w.\\w`; Zahlen mit Tausenderpunkten zählen nie.
-    Bewusste Abweichung von R2-B-1 (Review 1, I-1): auch reine Versionsnummern (`4.17.1`), reine `Wort.endung`-Tokens ohne
-    `/ = ? & %` (`Node.js`, `package.json`, `poc.py`) und `und/oder` zählen nie; sie sind im Kundentext legitim."""
+    Bewusste Abweichung von R2-B-1 (Review 1, I-1; enger gefasst in Review 2, N-2): Versionsnummern mit zwei oder drei Teilen
+    (`4.17.1`, `v4.17`; vier Teile wie `10.0.0.5` sind Adressen und bleiben Token), `Wort.endung` ohne `/ = ? & %` nur mit der Endung
+    js, ts, mjs, cjs, json, md, html oder css (`Node.js`, `package.json`; `admin.php`, `poc.py`, `evil.com` bleiben Token) und
+    `und/oder` zählen nie; sie sind im Kundentext legitim."""
     aus: dict[str, None] = {}
     for roh in unicodedata.normalize("NFC", poc[:10**6]).split():
         tok = roh.strip(_A_RAND)
@@ -574,7 +579,8 @@ def _kuerzen60(token: str) -> str:
 
 def _quellen(befunde: list) -> tuple[list[str], list[str], list[str], bool]:
     """(Token aus allen `poc`, Pfadangaben mit `/` bzw. volle `code_pfad`-Einträge für e, alle Pfade und Basenames für d, zu viele
-    Token) über alle Befunde, unabhängig vom Status. Mehr als `_MAX_TOKEN` Token: die Token-Liste bleibt leer, das Flag ist gesetzt."""
+    Token) über alle Befunde, unabhängig vom Status. Mehr als `_MAX_TOKEN` Token: die Token-Liste bleibt leer, das Flag ist gesetzt
+    (der Aufrufer meldet dann jedes geprüfte Feld als Verstoß gegen Regel a)."""
     token: dict[str, None] = {}
     e: dict[str, None] = {}
     d: dict[str, None] = {}
@@ -634,31 +640,25 @@ class _Nadeln:
         return [treffer[i] for i in sorted(treffer)]
 
 
-def _warnen(text: str) -> None:
-    try:
-        print("Warnung: " + text, file=sys.stderr)
-    except Exception:  # noqa: BLE001 - kaputtes stderr darf die Prüfung nicht stören
-        pass
-
-
 def kunden_verstoesse(daten: object) -> list[tuple[str, str, str, str]]:
     """Verstöße der Kundenfelder gegen die Inhaltsregeln als (id, feld, regel, detail); wirft nie, egal welche Typen im JSON stehen.
 
     Geprüft werden Befunde mit Status bestätigt/unbestätigt (NFC) und je Feld einzeln, was vorhanden und Text ist:
-    `zusammenfassung`, `massnahme` (alle Regeln) und `titel` (nur d, e, url, email). Fehlende Felder meldet erst kundenbericht.py.
+    `zusammenfassung`, `massnahme` (alle Regeln) und `titel` (alle außer `du`; bei `c` ohne `<` und `>`). Fehlende Felder meldet erst
+    kundenbericht.py.
     Regeln (Werte von KUNDEN_REGELN): `du` Du-Form (detail: das Wort), `a` Token aus einem `poc` (detail: das Token, höchstens 60
     Zeichen), `b` HTTP-Methode mit Pfad, `c` `{ } < > =` oder Backtick, `d` Datei mit Zeile (auch `Dockerfile:6`), `#L<n>`,
     `Zeile <n>`, `e` Dateipfad oder `code_pfad`-Eintrag eines Befunds (ohne Ausnahme, auch die eigene `datei`), `url` Webadresse,
     `email` E-Mail-Adresse. Quellen für a, d und e sind alle Befunde unabhängig vom Status.
     `detail` ist bei b, c, d, e, url und email ein fester Text ohne Treffertext (die Exit-2-Zeile von kundenbericht.py darf ihn
-    ausgeben), bei `du` das Wort, bei `a` das Token. Mehr als 5000 Token in den `poc`-Feldern: Regel a entfällt, Warntext auf stderr."""
+    ausgeben), bei `du` das Wort, bei `a` das Token. Mehr als 200000 Token in den `poc`-Feldern: fail-closed, jedes geprüfte Feld
+    (`zusammenfassung`, `massnahme`, `titel`) meldet Regel a mit dem festen Detail „zu viele Token zum Prüfen“. Die Funktion hat
+    keine Seiteneffekte (keine Ausgabe auf stderr)."""
     try:
         if not isinstance(daten, dict) or not isinstance(daten.get("befunde"), list):
             return []
         befunde = daten["befunde"]
         token, pfade_e, pfade_d, zu_viele = _quellen(befunde)
-        if zu_viele:
-            _warnen(f"Regel a wird nicht geprüft: mehr als {_MAX_TOKEN} Token in den poc-Feldern")
         nadeln_a = _Nadeln([(k.lower(), k) for k in token])            # einmal vorab klein schreiben und indizieren (Laufzeit)
         nadeln_e = _Nadeln([(p.lower(), p) for p in pfade_e])
         nadeln_d = _Nadeln([(p.lower(), p) for p in pfade_d])
@@ -674,8 +674,10 @@ def kunden_verstoesse(daten: object) -> list[tuple[str, str, str, str]]:
                 if text is None:
                     continue
                 klein = text.lower()
-                t = _regex_treffer(text)
-                if "a" in regeln and (hits := nadeln_a.finde(klein)):
+                t = _regex_treffer(text, titel=feld == "titel")
+                if "a" in regeln and zu_viele:
+                    t["a"] = [_ZU_VIELE_TOKEN]
+                elif "a" in regeln and (hits := nadeln_a.finde(klein)):
                     t["a"] = [_kuerzen60(k) for k in hits]
                 if "e" in regeln and nadeln_e.finde(klein):
                     t["e"] = [_KUNDEN_DETAIL["e"]]
