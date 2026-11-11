@@ -2158,3 +2158,31 @@ def test_kopf_verstoesse_interner_fehler_wird_nicht_verschluckt_haertung(monkeyp
     monkeypatch.setattr(bericht, "_quellen", kaputt)
     with pytest.raises(RuntimeError):
         bericht.kopf_verstoesse(kd(), {"projekt": "Portal"})
+
+
+def test_text_verstoesse_regel_c_ohne_titel_ausnahme_haertung():
+    """Für feste Bausteine gilt Regel c ganz (auch `<` und `>`); nur der Titel eines Befunds darf sie enthalten."""
+    assert [r for r, _d in bericht.text_verstoesse("Ein Satz mit <b> darin.")] == ["c"]
+    assert [r for r, _d in bericht.text_verstoesse("Ein Satz mit > darin.")] == ["c"]
+
+
+@pytest.mark.parametrize("laenge,erwartet_laenge", [(6, 6), (59, 59), (60, 60), (61, 60), (200, 60)])
+def test_regel_a_detail_hoechstens_60_zeichen_genau_haertung(laenge, erwartet_laenge):
+    token = "/" + "x" * (laenge - 1)
+    d = kd(massnahme=KD_VORSPANN + f"Die Stelle {token} wird geändert.", poc=KD_POC + " " + token)
+    detail = [t[3] for t in bericht.kunden_verstoesse(d) if t[1] == "massnahme"][0]
+    assert len(detail) == erwartet_laenge
+    if laenge <= 60:
+        assert detail == token
+    else:
+        assert detail == token[:59] + "…"
+
+
+def test_rendern_warnung_genau_31_zeilen_haertung(tmp_path):
+    d = kd()
+    d["befunde"] = [befund(id=f"S-{i}", zusammenfassung=KD_ZUSAMMENFASSUNG, massnahme=KD_VORSPANN + "Prüfe, ob du Zugriff hast.")
+                    for i in range(1, 32)]
+    pfad = tmp_path / "x.json"
+    pfad.write_text(json.dumps(d))
+    p = lauf("rendern", str(pfad))
+    assert p.stderr.count("Regel du") == 30 and "… und 1 weitere" in p.stderr
