@@ -457,6 +457,27 @@ def test_ein_slash_andere_woerter_bleiben_ohne_host_dn1(text):
     assert netzregel.hosts_extrahieren(text) == []
 
 
+@pytest.mark.parametrize("praefix", ["if", "elif", "while", "until"])
+def test_netzwerkwerkzeug_nach_kontrollwort_r1_6(praefix):
+    """R1-6: if/elif/while/until sind Befehlsposition (Mutation `_PRAEFIXE` ohne diese Wörter blieb grün)."""
+    assert len(netzregel.verstoesse_bash(f"{praefix} nc evil.test 80; then :; fi", [])) >= 1
+    assert len(netzregel.verstoesse_bash(f"{praefix} curl evil", [])) >= 1
+
+
+@pytest.mark.parametrize("opt", ["-xevil.test:3128", "-x evil.test:3128", "--proxy evil.test:3128", "--proxy=evil.test:3128",
+                                 "--preproxy evil.test:1080", "--preproxy=evil.test:1080", "--proxy1.0 evil.test:1",
+                                 "--socks4 evil.test:1", "--socks4a evil.test:1", "--socks5 evil.test:1080",
+                                 "--socks5-hostname evil.test:1080", "--socks5-hostname=evil.test:1080"])
+def test_proxy_optionen_in_poc_texten_r1_6(opt):
+    assert "evil.test" in netzregel.hosts_extrahieren(f"GET /x {opt}")
+    assert netzregel.verstoesse_poc(f"GET /x {opt}") == ["evil.test"]
+
+
+def test_file_url_mit_host_ist_netz_r1_6():
+    assert netzregel.verstoesse_poc("GET file://evil.test/x") == ["evil.test"]
+    assert netzregel.verstoesse_poc("GET file:///etc/passwd") == []
+
+
 @pytest.mark.parametrize("befehl", [
     "FOO=1 curl evil", "FOO=1 BAR=2 curl evil", "{ curl evil; }", "! curl evil", "if true; then curl evil; fi",
     "then curl evil", "do wget x", "else curl x", "sudo -u x curl evil", "sudo -E curl evil", "sudo -n curl evil",
