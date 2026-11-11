@@ -2228,3 +2228,19 @@ def test_regel_b_funktionsname_ist_keine_maschinelle_regel_r1_1():
     assert regeln(d, "massnahme") == []
     doku = open(os.path.join(SKRIPTE, "..", "references", "bericht-format.md"), encoding="utf-8").read()
     assert "Bezeichner aus dem Code prüft das Skript nur, wenn sie im `poc` stehen" in doku
+
+
+# ------------------------------------------------------------------------------------ Review R1-3: Kopfangaben voll prüfen
+
+def test_kopf_verstoesse_pruefen_den_ganzen_wert_r1_3():
+    """R1-3: `projekt` hat keine Längengrenze; ein Token aus dem `poc` hinter dem 5000. Zeichen steht sonst ungeprüft im Kopf."""
+    d = kd(poc="x /api/orders/9")
+    A, B = ("a", "Text aus einem poc"), ("b", "Request oder Pfad mit Schrägstrich")
+    lang = "Portal" + " " * 4995
+    assert bericht.kopf_verstoesse(d, {"projekt": lang + "x /api/orders/9"}) == [("projekt", *A)]
+    assert bericht.kopf_verstoesse(d, {"projekt": lang + "GET /status"}) == [("projekt", "b", B[1])]
+    for feld in ("projekt", "ordner", "repo", "teilpfad"):
+        assert bericht.kopf_verstoesse(d, {feld: lang + "/api/orders/9"}) == [(feld, *A)]
+    assert bericht.kopf_verstoesse(d, {"projekt": lang}) == []
+    # Befundfelder bleiben bei 5000 Zeichen gekappt (ihre Ausgabe ist begrenzt)
+    assert regeln(kd(massnahme=KD_VORSPANN + " " * 5000 + "/api/orders/9")) == []

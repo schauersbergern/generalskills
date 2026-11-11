@@ -514,8 +514,12 @@ _KUNDEN_FELDER = (("zusammenfassung", KUNDEN_REGELN), ("massnahme", KUNDEN_REGEL
 _MAX_PRUEF = 5000        # Zeichen je Feld; hält die Regex-Prüfung auch bei übergroßen Texten schnell
 
 
-def _pruef_text(wert: object) -> str | None:
-    return unicodedata.normalize("NFKC", wert[:_MAX_PRUEF]) if isinstance(wert, str) else None
+def _pruef_text(wert: object, voll: bool = False) -> str | None:
+    """Prüftext nach NFKC. Befundfelder werden auf `_MAX_PRUEF` Zeichen gekappt (ihre Ausgabe ist ebenfalls gekürzt bzw. im Schema
+    begrenzt); Kopfangaben (`voll`) nie, denn `projekt` hat keine Längengrenze und dahinter stünde Exploit-Text ungeprüft im Kopf (R1-3)."""
+    if not isinstance(wert, str):
+        return None
+    return unicodedata.normalize("NFKC", wert if voll else wert[:_MAX_PRUEF])
 
 
 def _d_allgemein(text: str) -> bool:
@@ -731,7 +735,7 @@ def kopf_verstoesse(daten: object, felder: dict[str, object]) -> list[tuple[str,
     nadeln = _Nadeln([(k.lower(), k) for k in token])
     aus: list[tuple[str, str, str]] = []
     for feld, wert in felder.items():
-        text = _pruef_text(wert)
+        text = _pruef_text(wert, voll=True)
         if text is None:
             continue
         try:
