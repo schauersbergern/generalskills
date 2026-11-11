@@ -493,6 +493,9 @@ _TAUSENDER = re.compile(r"\d{1,3}(?:\.\d{3})+(?:,\d+)?")
 _A_ZEICHEN = frozenset("/=?&%<>{}_@$\\[]")
 _A_PUNKT = re.compile(r"\w\.\w")
 _A_RAND = ".,;:()\"'"
+_A_VERSION = re.compile(r"\d+(?:\.\d+)+")                     # `4.17.1`
+_A_DATEINAME = re.compile(r"[A-Za-z][\w-]*\.[A-Za-z]{1,6}")      # `Node.js`, `package.json`, `poc.py` (ohne / = ? & %)
+_MAX_TOKEN = 5000        # Token aus `poc` je Bericht; darüber keine Prüfung mit Regel a (Laufzeit: Befunde × Token)
 _KUNDEN_DETAIL = {                                   # fester Text je Regel (außer `du` und `a`), nie Treffertext
     "b": "HTTP-Methode mit Pfad", "c": "Sonderzeichen oder Backtick", "d": "Datei mit Zeilenangabe",
     "e": "Dateipfad aus einem Befund", "url": "Webadresse", "email": "E-Mail-Adresse",
@@ -552,11 +555,14 @@ def text_verstoesse(text: str) -> list[tuple[str, str]]:
 
 def _poc_token(poc: str) -> list[str]:
     """Token eines `poc` nach Spec R2-B-1: Whitespace-getrennt, Rand `.,;:()"'` abgeschnitten, mindestens 6 Zeichen und
-    ein Zeichen aus `/ = ? & % < > { } _ @ $ \\ [ ]` oder `\\w.\\w`; Zahlen mit Tausenderpunkten zählen nie."""
+    ein Zeichen aus `/ = ? & % < > { } _ @ $ \\ [ ]` oder `\\w.\\w`; Zahlen mit Tausenderpunkten zählen nie.
+    Bewusste Abweichung von R2-B-1 (Review 1, I-1): auch reine Versionsnummern (`4.17.1`), reine `Wort.endung`-Tokens ohne
+    `/ = ? & %` (`Node.js`, `package.json`, `poc.py`) und `und/oder` zählen nie; sie sind im Kundentext legitim."""
     aus: dict[str, None] = {}
     for roh in unicodedata.normalize("NFC", poc[:10**6]).split():
         tok = roh.strip(_A_RAND)
-        if (len(tok) >= 6 and (_A_ZEICHEN.intersection(tok) or _A_PUNKT.search(tok)) and not _TAUSENDER.fullmatch(tok)):
+        if (len(tok) >= 6 and (_A_ZEICHEN.intersection(tok) or _A_PUNKT.search(tok)) and not _TAUSENDER.fullmatch(tok)
+                and not _A_VERSION.fullmatch(tok) and not _A_DATEINAME.fullmatch(tok) and tok.casefold() != "und/oder"):
             aus[tok] = None
     return list(aus)
 
@@ -566,9 +572,9 @@ def _kuerzen60(token: str) -> str:
     return kurz if len(kurz) <= 60 else kurz[:59] + "…"
 
 
-def _quellen(befunde: list) -> tuple[list[str], list[str], list[str]]:
-    """(Token aus allen `poc`, Pfadangaben mit `/` bzw. volle `code_pfad`-Einträge für e, alle Pfade und Basenames für d) über alle
-    Befunde, unabhängig vom Status."""
+def _quellen(befunde: list) -> tuple[list[str], list[str], list[str], bool]:
+    """(Token aus allen `poc`, Pfadangaben mit `/` bzw. volle `code_pfad`-Einträge für e, alle Pfade und Basenames für d, zu viele
+    Token) über alle Befunde, unabhängig vom Status. Mehr als `_MAX_TOKEN` Token: die Token-Liste bleibt leer, das Flag ist gesetzt."""
     token: dict[str, None] = {}
     e: dict[str, None] = {}
     d: dict[str, None] = {}
@@ -582,11 +588,15 @@ def _quellen(befunde: list) -> tuple[list[str], list[str], list[str]]:
         d[p] = None
         d[p.rsplit("/", 1)[-1] or p] = None
 
+    zu_viele = False
     for b in befunde:
         if not isinstance(b, dict):
             continue
-        if isinstance(b.get("poc"), str):
+        if isinstance(b.get("poc"), str) and not zu_viele:
             token.update(dict.fromkeys(_poc_token(b["poc"])))
+            if len(token) > _MAX_TOKEN:
+                zu_viele = True
+                token.clear()
         if isinstance(b.get("datei"), str):
             pfad(b["datei"])
         cp = b.get("code_pfad")
@@ -597,11 +607,38 @@ def _quellen(befunde: list) -> tuple[list[str], list[str], list[str]]:
             if m := _CODE_PFAD.fullmatch(eintrag[:10**4]):
                 pfad(m.group(1))
     e.pop("", None)
-    return list(token), list(e), list(d)
+    return list(token), list(e), list(d), zu_viele
 
 
 def _pfad_zeile(pfad: str) -> re.Pattern:
     return re.compile(r"(?<![\w./-])" + re.escape(pfad) + r"(?:\s*:\s*\d+|,?\s*(?:Zeile|Z\.)\s*\d+)", re.IGNORECASE)
+
+
+class _Nadeln:
+    """Teilstring-Suche vieler Nadeln (klein geschrieben) in einem Text: je Nadellänge (höchstens 6) wird nur der Anfang der Nadel
+    als n-Gramm des Textes nachgeschlagen, erst dann der ganze Teilstring geprüft. Laufzeit je Text ~ Textlänge statt Nadelzahl."""
+
+    def __init__(self, nadeln: list[tuple[str, object]]):
+        self._nach_laenge: dict[int, dict[str, list[tuple[int, str, object]]]] = {}
+        for i, (klein, nutzlast) in enumerate(nadeln):
+            if klein:
+                n = min(len(klein), 6)
+                self._nach_laenge.setdefault(n, {}).setdefault(klein[:n], []).append((i, klein, nutzlast))
+
+    def finde(self, klein: str) -> list[object]:
+        """Nutzlasten aller Nadeln, die in `klein` vorkommen, in der Reihenfolge der Nadeln."""
+        treffer: dict[int, object] = {}
+        for n, tabelle in self._nach_laenge.items():
+            for gramm in {klein[i:i + n] for i in range(len(klein) - n + 1)}.intersection(tabelle):
+                treffer.update((i, nutzlast) for (i, nadel, nutzlast) in tabelle[gramm] if nadel in klein)
+        return [treffer[i] for i in sorted(treffer)]
+
+
+def _warnen(text: str) -> None:
+    try:
+        print("Warnung: " + text, file=sys.stderr)
+    except Exception:  # noqa: BLE001 - kaputtes stderr darf die Prüfung nicht stören
+        pass
 
 
 def kunden_verstoesse(daten: object) -> list[tuple[str, str, str, str]]:
@@ -612,13 +649,19 @@ def kunden_verstoesse(daten: object) -> list[tuple[str, str, str, str]]:
     Regeln (Werte von KUNDEN_REGELN): `du` Du-Form (detail: das Wort), `a` Token aus einem `poc` (detail: das Token, höchstens 60
     Zeichen), `b` HTTP-Methode mit Pfad, `c` `{ } < > =` oder Backtick, `d` Datei mit Zeile (auch `Dockerfile:6`), `#L<n>`,
     `Zeile <n>`, `e` Dateipfad oder `code_pfad`-Eintrag eines Befunds (ohne Ausnahme, auch die eigene `datei`), `url` Webadresse,
-    `email` E-Mail-Adresse. Quellen für a, d und e sind alle Befunde unabhängig vom Status. Sonst ist `detail` ein fester Text."""
+    `email` E-Mail-Adresse. Quellen für a, d und e sind alle Befunde unabhängig vom Status.
+    `detail` ist bei b, c, d, e, url und email ein fester Text ohne Treffertext (die Exit-2-Zeile von kundenbericht.py darf ihn
+    ausgeben), bei `du` das Wort, bei `a` das Token. Mehr als 5000 Token in den `poc`-Feldern: Regel a entfällt, Warntext auf stderr."""
     try:
         if not isinstance(daten, dict) or not isinstance(daten.get("befunde"), list):
             return []
         befunde = daten["befunde"]
-        token, pfade_e, pfade_d = _quellen(befunde)
-        zeilen = {p: None for p in pfade_d}
+        token, pfade_e, pfade_d, zu_viele = _quellen(befunde)
+        if zu_viele:
+            _warnen(f"Regel a wird nicht geprüft: mehr als {_MAX_TOKEN} Token in den poc-Feldern")
+        nadeln_a = _Nadeln([(k.lower(), k) for k in token])            # einmal vorab klein schreiben und indizieren (Laufzeit)
+        nadeln_e = _Nadeln([(p.lower(), p) for p in pfade_e])
+        nadeln_d = _Nadeln([(p.lower(), p) for p in pfade_d])
         aus: list[tuple[str, str, str, str]] = []
         for b in befunde:
             if not (isinstance(b, dict) and isinstance(b.get("id"), str) and _ID.fullmatch(b["id"])):
@@ -632,11 +675,11 @@ def kunden_verstoesse(daten: object) -> list[tuple[str, str, str, str]]:
                     continue
                 klein = text.lower()
                 t = _regex_treffer(text)
-                if "a" in regeln and (hits := [k for k in token if k.lower() in klein]):
+                if "a" in regeln and (hits := nadeln_a.finde(klein)):
                     t["a"] = [_kuerzen60(k) for k in hits]
-                if "e" in regeln and any(p.lower() in klein for p in pfade_e):
+                if "e" in regeln and nadeln_e.finde(klein):
                     t["e"] = [_KUNDEN_DETAIL["e"]]
-                if "d" not in t and any(p.lower() in klein and _pfad_zeile(p).search(text) for p in zeilen):
+                if "d" not in t and any(_pfad_zeile(p).search(text) for p in nadeln_d.finde(klein)):
                     t["d"] = [_KUNDEN_DETAIL["d"]]
                 aus.extend((b["id"], feld, regel, detail) for regel, detail in _treffer_liste(t, regeln))
         return aus

@@ -1457,7 +1457,7 @@ def test_kunden_verstoesse_du_nur_in_den_kundenfeldern_nicht_im_titel():
 
 
 def test_kunden_verstoesse_a_token_aus_poc():
-    for token in ("/api/orders/9", "org_id", "poc.py"):
+    for token in ("/api/orders/9", "org_id"):
         d = kd(massnahme=f"{KD_VORSPANN}Die Stelle {token} wird geändert.")
         assert bericht.kunden_verstoesse(d) == [("S-1", "massnahme", "a", token)]
     d = kd(zusammenfassung=KD_ZUSAMMENFASSUNG + " Betroffen ist org_id.")
@@ -1492,6 +1492,31 @@ def test_kunden_verstoesse_a_kurze_token_zaehlen_nicht():
 def test_kunden_verstoesse_a_tausenderpunkte_zaehlen_nicht():
     d = kd(zusammenfassung=KD_ZUSAMMENFASSUNG + " Betroffen sind über 10.000 Datensätze.", poc=KD_POC + " 10.000 1.234.567,89")
     assert bericht.kunden_verstoesse(d) == []
+
+
+def test_kunden_verstoesse_a_versionsnummern_zaehlen_nicht_review1_i1():
+    d = kd(massnahme="Aktualisieren Sie Express von Version 4.17.1 auf 4.19.2, um die Lücke zu schließen.",
+           poc="X-Powered-By: Express 4.17.1")
+    assert bericht.kunden_verstoesse(d) == []
+    d = kd(massnahme="Aktualisieren Sie Express von Version 4.17.1 auf 4.19.2, um die Lücke zu schließen.",
+           poc="X-Powered-By: Express 4.17.1 (12.0.3.7)")
+    assert bericht.kunden_verstoesse(d) == []
+
+
+@pytest.mark.parametrize("token,satz", [
+    ("Node.js", "Aktualisieren Sie Node.js auf Version 22."), ("package.json", "Passen Sie die Datei package.json an."),
+    ("poc.py", "Das Skript poc.py ist nicht Teil des Berichts."), ("und/oder", "Konten und/oder Daten sind betroffen."),
+    ("UND/ODER", "Konten und/oder Daten sind betroffen."), ("Next.js,", "Aktualisieren Sie Next.js auf Version 15."),
+])
+def test_kunden_verstoesse_a_woerter_mit_endung_und_und_oder_zaehlen_nicht_review1_i1(token, satz):
+    d = kd(massnahme=KD_VORSPANN + satz, poc=f"poc.py anfrage {token} fertig")
+    assert regeln(d) == []
+
+
+@pytest.mark.parametrize("token", ["/api/orders/9", "org_id", "api.example/x", "app.js?id", "a.b&cdef", "dto.org_id", "config.secret_key"])
+def test_kunden_verstoesse_a_echte_token_treffen_weiterhin_review1_i1(token):
+    d = kd(massnahme=f"{KD_VORSPANN}Die Stelle {token} wird geändert.", poc=f"anfrage {token} fertig")
+    assert regeln(d) == ["a"]
 
 
 def test_kunden_verstoesse_a_token_gekuerzt_auf_60_zeichen():
@@ -1687,6 +1712,55 @@ def test_kunden_verstoesse_wirft_nie(daten):
     assert time.monotonic() - t0 < 5
 
 
+def test_kunden_verstoesse_pruefhoehe_5000_zeichen_review1_i2():
+    assert regeln(kd(titel="x" * 4990 + " https://a.de")) == ["url"]
+    assert regeln(kd(titel="x" * 5100 + " https://a.de")) == []
+    assert regeln(kd(massnahme="x" * 4990 + " https://a.de")) == ["url"]
+    assert regeln(kd(massnahme="x" * 5100 + " https://a.de")) == []
+
+
+def _viele_befunde(n):
+    d = kd()
+    d["befunde"] = [befund(id=f"S-{i}", datei=f"src/mod{i}/datei{i}.ts", zeile=i, poc=f"GET /api/pfad{i}/wert_{i}",
+                           zusammenfassung=KD_ZUSAMMENFASSUNG, massnahme=KD_MASSNAHME, titel=f"Fehler Nummer {i}")
+                    for i in range(1, n + 1)]
+    return d
+
+
+def test_kunden_verstoesse_laufzeit_3000_befunde_review1_m1():
+    d = _viele_befunde(3000)
+    t0 = time.monotonic()
+    assert bericht.kunden_verstoesse(d) == []
+    assert time.monotonic() - t0 < 2
+
+
+def test_kunden_verstoesse_mehr_als_5000_token_keine_regel_a_aber_warntext_review1_m1(capsys):
+    d = kd(massnahme=KD_VORSPANN + "Die Stelle /api/orders/9 wird geändert.", poc="x")
+    d["befunde"][0]["poc"] = " ".join(f"/api/pfad/{i}" for i in range(5001)) + " /api/orders/9"
+    t = bericht.kunden_verstoesse(d)
+    assert [x for x in t if x[2] == "a"] == []
+    assert "5000" in capsys.readouterr().err
+    d["befunde"][0]["poc"] = " ".join(f"/api/pfad/{i}" for i in range(4999)) + " /api/orders/9"      # genau 5000: geprüft
+    assert regeln(d) == ["a"]
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("satz", ["Im Ordner src/dir bleibt das.", "Die Datei x.dir bleibt.", "Der Name @dir bleibt.", "Das Paket pre-dir bleibt."])
+def test_kunden_verstoesse_du_lookbehind_zeichen_review1_m5(satz):
+    assert "du" not in regeln(kd(massnahme=KD_VORSPANN + satz))
+    assert "du" in regeln(kd(massnahme=KD_VORSPANN + satz.replace("src/dir", "dir").replace("x.dir", "dir").replace("@dir", "dir")
+                                                    .replace("pre-dir", "dir")))
+
+
+@pytest.mark.parametrize("bid", ["abc", "S-1 ", "S-0", "S-01", "s-1", "S-1\n"])
+def test_kunden_verstoesse_befund_ohne_gueltige_id_wird_uebersprungen_review1_m5(bid):
+    d = kd(massnahme=KD_VORSPANN + "Prüfe das, du darfst.")
+    d["befunde"][0]["id"] = bid
+    assert bericht.kunden_verstoesse(d) == []
+    d["befunde"][0]["id"] = "S-1"
+    assert regeln(d) == ["du"]
+
+
 def test_kunden_verstoesse_aendert_eingabe_nicht():
     d = kd(massnahme=KD_VORSPANN + "Setzen Sie {a} ein.")
     vorher = copy.deepcopy(d)
@@ -1730,6 +1804,22 @@ def test_rendern_warnt_bei_kundenverstoss_exit0(tmp_path):
     for geheim in ("geheim", "org_id", "deine", "GET /"):          # weder Treffertext noch Token noch Wort
         assert geheim not in p.stderr
     assert "Traceback" not in p.stderr
+
+
+def test_rendern_warnung_hoechstens_30_zeilen_review1_m5(tmp_path):
+    d = kd()
+    d["befunde"] = [befund(id=f"S-{i}", zusammenfassung=KD_ZUSAMMENFASSUNG, massnahme=KD_VORSPANN + "Prüfe, ob du Zugriff hast.")
+                    for i in range(1, 41)]
+    pfad = tmp_path / "x.json"
+    pfad.write_text(json.dumps(d))
+    p = lauf("rendern", str(pfad))
+    assert p.returncode == 0, p.stderr
+    assert p.stderr.count("Regel du") == 30 and "… und 10 weitere" in p.stderr
+    assert "S-30 massnahme" in p.stderr and "S-31 massnahme" not in p.stderr
+    d["befunde"] = d["befunde"][:30]
+    pfad.write_text(json.dumps(d))
+    p = lauf("rendern", str(pfad))
+    assert p.stderr.count("Regel du") == 30 and "weitere" not in p.stderr
 
 
 def test_rendern_ohne_kundenverstoss_keine_warnung(tmp_path):
