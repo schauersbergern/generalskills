@@ -515,16 +515,20 @@ def _kontext_budget() -> float:
     return sekunden
 
 
-def main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(prog="bericht.py")
+def _parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(prog="bericht.py", allow_abbrev=False)
     sub = ap.add_subparsers(dest="befehl", required=True)
-    k = sub.add_parser("kontext")
+    k = sub.add_parser("kontext", allow_abbrev=False)
     k.add_argument("--teilpfad")
     k.add_argument("--repo", default=".")
     k.add_argument("--repo-konfig-geprueft", action="store_true", dest="repo_konfig_geprueft")
-    r = sub.add_parser("rendern")
+    r = sub.add_parser("rendern", allow_abbrev=False)
     r.add_argument("json")
-    args = ap.parse_args(_argv_mit_werten(argv))
+    return ap
+
+
+def main(argv: list[str]) -> int:
+    args = _parser().parse_args(_argv_mit_werten(argv))
     if args.befehl == "rendern":
         return _rendern(args.json)
     try:
