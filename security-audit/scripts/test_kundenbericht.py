@@ -1976,6 +1976,146 @@ def test_sperre_nicht_moeglich_exit5_haertung(tmp_path, monkeypatch, capsys):
     assert inhalt(tmp_path / "out") == [BASIS + ".json"]
 
 
+# ------------------------------------------------------------------------------------ TF4 Härtung: Mutationsproben (Lücken geschlossen)
+
+@pytest.mark.parametrize("abkuerzung", ["--js", "--jso"])
+def test_optionen_nicht_abkuerzbar_haertung(tmp_path, abkuerzung):
+    pfad = schreibe(tmp_path / "out", bericht_daten())
+    p = lauf(None, argumente=["erstellen", abkuerzung, str(pfad)])
+    assert p.returncode == 5 and zeilen(p) == ["kategorie: eingabe"], p.stdout + p.stderr
+    assert inhalt(tmp_path / "out") == [BASIS + ".json"]
+
+
+def test_json_nicht_lesbar_rechte_exit5_nichts_entfernt_haertung(tmp_path):
+    """Eine JSON ohne Leserechte endet mit Exit 5 (die Sperre öffnet sie zuerst); alte Kundendateien bleiben liegen."""
+    pfad = schreibe(tmp_path / "out", bericht_daten())
+    open(kunde_pfad(pfad, "md"), "w").write("alt")
+    os.chmod(pfad, 0)
+    try:
+        p = lauf(pfad)
+    finally:
+        os.chmod(pfad, 0o644)
+    assert p.returncode == 5, p.stdout + p.stderr
+    assert zeilen(p) == ["kategorie: eingabe", "Die Eingabedatei ist nicht lesbar."]
+    assert open(kunde_pfad(pfad, "md")).read() == "alt"
+
+
+def test_lesen_fehlerfaelle_haertung(tmp_path, monkeypatch):
+    """`_lesen` einzeln: fehlt die Datei, ist sie eine FIFO oder scheitert das Lesen, ist das Exit 5 `nicht lesbar` bzw. `reguläre Datei`."""
+    with pytest.raises(kundenbericht.Abbruch) as ex:
+        kundenbericht._lesen(str(tmp_path / "fehlt.json"))
+    assert (ex.value.code, ex.value.zeilen) == (5, ["Die Eingabedatei ist nicht lesbar."])
+    os.mkfifo(tmp_path / "fifo.json")
+    with pytest.raises(kundenbericht.Abbruch) as ex:
+        kundenbericht._lesen(str(tmp_path / "fifo.json"))
+    assert (ex.value.code, ex.value.zeilen) == (5, ["Die Eingabedatei muss eine reguläre Datei sein (kein Symlink)."])
+    ok = tmp_path / "ok.json"
+    ok.write_text("{}")
+    echtes = os.fstat
+
+    def kaputt(fd):
+        raise OSError(5, "E/A-Fehler")
+    monkeypatch.setattr(kundenbericht.os, "fstat", kaputt)
+    with pytest.raises(kundenbericht.Abbruch) as ex:
+        kundenbericht._lesen(str(ok))
+    assert (ex.value.code, ex.value.zeilen) == (5, ["Die Eingabedatei ist nicht lesbar."])
+    monkeypatch.setattr(kundenbericht.os, "fstat", echtes)
+    schlossen = []
+    echtes_close = os.close
+    monkeypatch.setattr(kundenbericht.os, "close", lambda fd: (schlossen.append(fd), echtes_close(fd))[1])
+    assert kundenbericht._lesen(str(ok)) == {}
+    assert schlossen == [], "nach dem Lesen gehört der Deskriptor der Datei (kein zweites close auf einen schon freigegebenen Deskriptor)"
+
+
+def test_lesen_grenze_genau_haertung(tmp_path, monkeypatch):
+    """Genau `MAX_JSON_BYTES` Bytes sind erlaubt, ein Byte mehr nicht; die Meldung nennt die Grenze in MiB."""
+    monkeypatch.setattr(bericht, "MAX_JSON_BYTES", 2 * 1024 * 1024)
+    inhalt_ = b"[" + b" " * (2 * 1024 * 1024 - 2) + b"]"
+    ziel = tmp_path / "g.json"
+    ziel.write_bytes(inhalt_)
+    assert kundenbericht._lesen(str(ziel)) == []
+    ziel.write_bytes(inhalt_ + b" ")
+    with pytest.raises(kundenbericht.Abbruch) as ex:
+        kundenbericht._lesen(str(ziel))
+    assert (ex.value.code, ex.value.zeilen) == (5, ["Die Eingabedatei ist größer als 2 MiB."])
+
+
+def test_ohne_kundenfelder_nicht_dict_und_ohne_befundliste_haertung():
+    assert kundenbericht._ohne_kundenfelder([]) == [] and kundenbericht._ohne_kundenfelder("x") == "x"
+    assert kundenbericht._ohne_kundenfelder({"befunde": "x"}) == {"befunde": "x"}
+    assert kundenbericht._ohne_kundenfelder({"a": 1}) == {"a": 1}
+
+
+def test_meldungen_je_befund_nach_feld_nicht_nach_regel_sortiert_haertung(tmp_path):
+    """`fehlt` (massnahme) steht früher in der Trefferliste als der Verstoß in `zusammenfassung`; die Ausgabe folgt trotzdem der Feldreihenfolge."""
+    b = befund(1, zusammenfassung=ZUSAMMENFASSUNG + " Bring dir den Nachweis.")
+    del b["massnahme"]
+    p = lauf(schreibe(tmp_path / "out", bericht_daten(b, befund(2, massnahme=VORSPANN + "Setzen Sie {a} ein."))))
+    assert p.returncode == 2, p.stdout + p.stderr
+    assert zeilen(p)[1:] == ["S-1 zusammenfassung: Regel du (dir)", "S-1 massnahme: Regel fehlt", "S-2 massnahme: Regel c (Sonderzeichen oder Backtick)"]
+
+
+def test_html_grenze_und_konstante_haertung(tmp_path, bericht_pfad, monkeypatch):
+    env, _ = attrappen(tmp_path, **beide())
+    monkeypatch.setenv("SECURITY_AUDIT_OHNE", "")
+    monkeypatch.setenv("PATH", env["PATH"])
+    assert kundenbericht._HTML_MAX == 16 * 1024 * 1024
+    html = open(kundenbericht.TEMPLATE, encoding="utf-8").read().replace("$pagetitle$", "Titel").replace("$body$", "<h1>Kopf</h1>")
+    n = len(html.encode("utf-8"))
+    env, _ = attrappen(tmp_path, pandoc={"html": html}, weasyprint={}, name="gross")
+    monkeypatch.setenv("PATH", env["PATH"])
+    md, pdf = md_datei(tmp_path)
+    monkeypatch.setattr(kundenbericht, "_HTML_MAX", n)
+    assert kundenbericht.pdf_erstellen(md, pdf, "T", time.monotonic() + 30) == (0, None, [])
+    monkeypatch.setattr(kundenbericht, "_HTML_MAX", n - 1)
+    assert kundenbericht.pdf_erstellen(md, pdf, "T", time.monotonic() + 30) == (4, "pdf-fehler", ["pandoc hat kein HTML geschrieben."])
+
+
+def test_html_nicht_utf8_ist_nicht_pruefbar_exit4_haertung(tmp_path, monkeypatch):
+    env, _ = attrappen(tmp_path, **beide())
+    monkeypatch.setenv("SECURITY_AUDIT_OHNE", "")
+    monkeypatch.setenv("PATH", env["PATH"])
+    echtes = kundenbericht._datei_lesen
+    monkeypatch.setattr(kundenbericht, "_datei_lesen", lambda pfad, grenze: b"\xff\xfe<p>" if pfad.endswith(".html") else echtes(pfad, grenze))
+    md, pdf = md_datei(tmp_path)
+    assert kundenbericht.pdf_erstellen(md, pdf, "T", time.monotonic() + 30) == (4, "pdf-fehler", ["HTML nicht prüfbar."])
+    assert not os.path.exists(pdf)
+
+
+def test_meldungen_der_html_pruefung_kuerzen_namen_auf_40_haertung():
+    lang = "x" * 500
+    erwartet = f"Tag nicht erlaubt: {gitkopie._t(lang, 40)}"
+    assert len(erwartet) < 80
+    assert kundenbericht.html_pruefen(html_mit(f"<{lang}>a</{lang}>")) == [erwartet]
+    m = kundenbericht.html_pruefen(html_mit(f"<p {lang}=1>a</p>"))
+    assert m == [f"Attribut nicht erlaubt: {gitkopie._t(lang, 40)} an p"]
+
+
+def test_werkzeug_which_liefert_nichts_exit3_haertung(tmp_path, monkeypatch):
+    """Meldet `poc.werkzeug_fehlt` „vorhanden“, findet `shutil.which` aber eines nicht, endet es mit Exit 3 (kein Start mit `None`)."""
+    env, _ = attrappen(tmp_path, pandoc={}, weasyprint=None)
+    monkeypatch.setenv("PATH", env["PATH"])
+    monkeypatch.setattr(kundenbericht.poc, "werkzeug_fehlt", lambda name: False)
+    md, pdf = md_datei(tmp_path)
+    assert kundenbericht.pdf_erstellen(md, pdf, "T", time.monotonic() + 30) == (3, "pdf-werkzeug-fehlt", ["Werkzeug fehlt: pandoc, weasyprint"])
+    env, _ = attrappen(tmp_path, pandoc=None, weasyprint={}, name="nur_weasy")
+    monkeypatch.setenv("PATH", env["PATH"])
+    assert kundenbericht.pdf_erstellen(md, pdf, "T", time.monotonic() + 30)[:2] == (3, "pdf-werkzeug-fehlt")
+
+
+def test_tempordner_nicht_anlegbar_exit4_haertung(tmp_path, monkeypatch):
+    env, log = attrappen(tmp_path, **beide())
+    monkeypatch.setenv("SECURITY_AUDIT_OHNE", "")
+    monkeypatch.setenv("PATH", env["PATH"])
+
+    def kaputt(**_kw):
+        raise OSError(28, "Platte voll")
+    monkeypatch.setattr(kundenbericht.tempfile, "mkdtemp", kaputt)
+    md, pdf = md_datei(tmp_path)
+    assert kundenbericht.pdf_erstellen(md, pdf, "T", time.monotonic() + 30) == (4, "pdf-fehler", ["Temporärer Ordner nicht anlegbar."])
+    assert protokoll(log) == []
+
+
 # ------------------------------------------------------------------------------------ Opt-in: echte Werkzeuge (SECURITY_AUDIT_PDF=1)
 
 nur_echt = pytest.mark.skipif(os.environ.get("SECURITY_AUDIT_PDF") != "1", reason="echte pandoc und weasyprint nur mit SECURITY_AUDIT_PDF=1")

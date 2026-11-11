@@ -3176,6 +3176,33 @@ def test_auswertung_tf4_d6_code_pfad_im_md_rot(bericht, erwartung, stream):
     assert alles(bericht, erwartung, stream, kunde=_kunde(md=erlaubt))["dod"]["TF4-D6"]["ok"] is True
 
 
+def test_auswertung_tf4_d6_meldungsgrenze_genau_fuenf_haertung(bericht, erwartung, stream):
+    """Genau 5 Verstöße werden alle genannt (kein „… und 0 weitere“), der sechste ergibt die Zeile „… und 1 weitere“."""
+    gelistet = [b for b in bericht["befunde"] if b["status"] != "verworfen"]
+    assert len(gelistet) >= 6
+    for b in gelistet:
+        b["massnahme"] = "Wir empfehlen, den Zugriff zu begrenzen."
+    for b in gelistet[:5]:
+        b["massnahme"] = "Wir empfehlen, den Zugriff zu begrenzen, bring dir den Nachweis."
+    d = alles(bericht, erwartung, stream)["dod"]["TF4-D6"]["details"]
+    assert len(d) == 5 and not any("weitere" in x for x in d)
+    gelistet[5]["massnahme"] = "Wir empfehlen, den Zugriff zu begrenzen, bring dir den Nachweis."
+    d = alles(bericht, erwartung, stream)["dod"]["TF4-D6"]["details"]
+    assert len(d) == 6 and d[-1] == "… und 1 weitere Verstöße der Kundenfelder"
+
+
+def test_auswertung_tf4_d6_projekt_kein_text_wird_ignoriert_haertung(bericht, erwartung, stream):
+    for projekt in (5, ["x"], "", None):
+        d = alles(bericht, erwartung, stream, kunde=_kunde(projekt=projekt))["dod"]["TF4-D6"]
+        assert d == {"ok": True, "details": []}, projekt
+
+
+def test_auswertung_tf4_d6_code_pfad_eintraege_ohne_text_werden_ignoriert_haertung(bericht, erwartung, stream):
+    """Nicht-Text, leere und blanke `code_pfad`-Einträge sind keine Pfade: kein Absturz, kein Fehlalarm (ein leerer Pfad steckt in jedem Text)."""
+    befund(bericht, "src/routes/projects.js")["code_pfad"] = [5, None, "", "   ", ["x"], {"a": 1}]
+    assert alles(bericht, erwartung, stream)["dod"]["TF4-D6"] == {"ok": True, "details": []}
+
+
 def test_auswertung_tf4_d6_bericht_none(erwartung, stream):
     e = alles(None, erwartung, stream)
     assert e["dod"]["TF4-D6"]["ok"] is False and "kein Bericht" in e["dod"]["TF4-D6"]["details"]
