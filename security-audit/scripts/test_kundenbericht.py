@@ -1,21 +1,29 @@
-"""Tests für kundenbericht.py (TF4, Teil 2a: CLI, Exit-Codes, Eingabe, Prüfung, Ablage, PDF-Stub; Teil 2b: Inhalt des Markdowns, Escaping).
+"""Tests für kundenbericht.py (TF4, Teil 2a: CLI, Exit-Codes, Eingabe, Prüfung, Ablage; Teil 2b: Inhalt des Markdowns, Escaping;
+Teil 3: PDF-Kette mit pandoc und weasyprint).
 
 Aufruf: python3 -m pytest security-audit/scripts/test_kundenbericht.py -q
-Alle Berichte sind synthetisch und liegen in tmp_path. Der Helfer `lauf` setzt standardmäßig SECURITY_AUDIT_OHNE=pandoc,weasyprint:
-es läuft nie ein echtes PDF-Werkzeug, und jeder Lauf, der bis zur PDF-Stufe kommt, endet mit Exit 3.
+Alle Berichte sind synthetisch und liegen in tmp_path. Ein autouse-Fixture und der Helfer `lauf` setzen standardmäßig
+SECURITY_AUDIT_OHNE=pandoc,weasyprint: es läuft nie ein echtes PDF-Werkzeug, und jeder Lauf, der bis zur PDF-Stufe kommt, endet mit
+Exit 3. Die PDF-Tests (Teil 3) nutzen Attrappen als Skripte im PATH, die ihre Argumente und ihre Umgebung protokollieren. Echte
+Werkzeuge laufen nur mit SECURITY_AUDIT_PDF=1.
 """
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
+import types
+import zlib
 
 import pytest
 
 SKRIPTE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SKRIPTE)
 import bericht  # noqa: E402
+import gitkopie  # noqa: E402
 import kundenbericht  # noqa: E402
 
 KUNDENBERICHT = os.path.join(SKRIPTE, "kundenbericht.py")
@@ -27,6 +35,12 @@ ZUSAMMENFASSUNG = ("Fremde Organisationen können Bestellungen anderer Kunden ei
                    "Dadurch drohen Datenabfluss und ein Vertrauensverlust.")
 MASSNAHME = "Wir empfehlen, die Zugriffsprüfung für Bestellungen zu ergänzen."
 VORSPANN = "Wir empfehlen, den Zugriff zu begrenzen. "
+
+
+@pytest.fixture(autouse=True)
+def _ohne_pdf_werkzeuge(monkeypatch):
+    """R1-W2: Standard ohne echte PDF-Werkzeuge (auch für In-Process-Aufrufe); die Tests der PDF-Kette überschreiben das gezielt."""
+    monkeypatch.setenv("SECURITY_AUDIT_OHNE", "pandoc,weasyprint")
 
 
 def befund(nr=1, **kw):
@@ -117,7 +131,7 @@ def test_du_exit2(tmp_path):
 
 
 def test_datei_mit_dir_loest_nichts_aus(tmp_path):
-    """R2-K-10: `dir` im Dateipfad löst nichts aus; der Lauf kommt bis zur PDF-Stufe (Stub: Exit 3)."""
+    """R2-K-10: `dir` im Dateipfad löst nichts aus; der Lauf kommt bis zur PDF-Stufe (ohne Werkzeuge: Exit 3)."""
     pfad = schreibe(tmp_path / "out", bericht_daten(befund(datei="src/dir/x.ts", code_pfad=["src/dir/x.ts:3", "src/lib/fetch.ts:18"])))
     p = lauf(pfad)
     assert p.returncode == 3, p.stdout + p.stderr
@@ -358,7 +372,7 @@ def test_ablage_atomar(tmp_path, monkeypatch, capsys):
     assert inhalt(ordner) == [BASIS + ".json"], "weder Markdown noch Temp-Datei"
 
 
-# ------------------------------------------------------------------------------------ Schema und Stub
+# ------------------------------------------------------------------------------------ Schema und Ablage ohne Werkzeuge
 
 def test_schema_fehler_ausserhalb_kundenfelder_exit5(tmp_path):
     ordner = tmp_path / "out"
@@ -400,20 +414,25 @@ def test_json_zu_gross_exit5(tmp_path, monkeypatch, capsys):
     assert inhalt(tmp_path / "out") == [BASIS + ".json"]
 
 
-def test_stub_exit3_markdown_liegt(tmp_path):
+def test_ohne_werkzeuge_exit3_markdown_liegt(tmp_path):
     ordner = tmp_path / "out"
     pfad = schreibe(ordner, bericht_daten())
     p = lauf(pfad)
     assert p.returncode == 3, p.stdout + p.stderr
-    assert zeilen(p) == ["kategorie: pdf-werkzeug-fehlt", "kunde-md: " + kunde_pfad(pfad, "md")]
+    assert zeilen(p) == ["kategorie: pdf-werkzeug-fehlt", "kunde-md: " + kunde_pfad(pfad, "md"), "Werkzeug fehlt: pandoc, weasyprint"]
     md = open(kunde_pfad(pfad, "md"), encoding="utf-8").read()
     assert md.startswith("# Manibase · Sicherheitsprüfung Portal\n")
     assert "S-1" in md and "Fremde Bestellungen einsehbar" in md
     assert inhalt(ordner) == [BASIS + "-kunde.md", BASIS + ".json"], "kein PDF, keine Temp-Reste"
 
 
-def test_pdf_stub_signatur_und_rueckgabe():
-    assert kundenbericht.pdf_erstellen("a.md", "a.pdf", "Titel", time.monotonic() + 5) == (3, "pdf-werkzeug-fehlt", [])
+def test_pdf_erstellen_signatur_und_rueckgabe_ohne_werkzeuge(monkeypatch):
+    """Rückgabe (Exit-Code, Kategorie, Meldungen), nie stdout; ohne Werkzeuge startet kein Kindprozess."""
+    def nie(*a, **kw):
+        raise AssertionError("kein Kindprozess ohne Werkzeuge")
+
+    monkeypatch.setattr(kundenbericht.gitkopie, "werkzeug_ausfuehren", nie)
+    assert kundenbericht.pdf_erstellen("a.md", "a.pdf", "Titel", time.monotonic() + 5) == (3, "pdf-werkzeug-fehlt", ["Werkzeug fehlt: pandoc, weasyprint"])
 
 
 def test_main_gibt_zeilen_in_reihenfolge_aus(tmp_path, monkeypatch, capsys):
@@ -886,3 +905,596 @@ def test_erstellen_schreibt_neues_markdown(tmp_path):
     assert p.returncode == 3, p.stdout + p.stderr
     md = open(kunde_pfad(pfad, "md"), encoding="utf-8").read()
     assert "## Management-Zusammenfassung" in md and "## Umfang und Grenzen" in md and md.endswith("Manibase · vertraulich\n")
+
+
+# ====================================================================================== Teil 3: PDF-Kette
+
+SHIM = '''#!@@PYTHON@@
+import json, os, sys, time
+cfg = json.load(open("@@CFG@@"))
+with open(cfg["log"], "a") as f:
+    f.write(json.dumps({"name": cfg["name"], "argv": sys.argv, "cwd": os.getcwd(), "env": dict(os.environ)}) + "\\n")
+if cfg.get("schlaf"):
+    time.sleep(cfg["schlaf"])
+args = sys.argv[1:]
+if cfg["name"] == "pandoc":
+    ziel = args[args.index("-o") + 1]
+    vorlage = open(args[args.index("--template") + 1], encoding="utf-8").read()
+    html = cfg["html"] if "html" in cfg else vorlage.replace("$pagetitle$", "Titel").replace("$body$", cfg.get("body", "<h1>Kopf</h1>"))
+    if cfg.get("schreiben", True):
+        open(ziel, "w", encoding="utf-8").write(html)
+elif cfg.get("pdf") is not None:
+    open(args[-1], "wb").write(cfg["pdf"].encode("latin-1"))
+sys.stderr.write(cfg.get("stderr", ""))
+sys.exit(cfg.get("rc", 0))
+'''
+PDF_OK = "%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
+
+
+def attrappen(tmp_path, pandoc=None, weasyprint=None, name="shim"):
+    """Legt Attrappen als Skripte in einen eigenen Ordner (nur dieser steht im PATH). None = das Werkzeug fehlt, dict = Verhalten
+    der Attrappe. Sie protokollieren Argumente, cwd und Umgebung in einer Logdatei. Gibt (Umgebung für `lauf`, Logdatei) zurück."""
+    ordner = tmp_path / name
+    ordner.mkdir(exist_ok=True)
+    log = ordner / "log.jsonl"
+    for werkzeug, cfg in (("pandoc", pandoc), ("weasyprint", weasyprint)):
+        if cfg is None:
+            continue
+        cfgdatei = ordner / f"{werkzeug}.cfg.json"
+        cfgdatei.write_text(json.dumps({"pdf": PDF_OK, **cfg, "name": werkzeug, "log": str(log)}), encoding="utf-8")
+        skript = ordner / werkzeug
+        skript.write_text(SHIM.replace("@@PYTHON@@", sys.executable).replace("@@CFG@@", str(cfgdatei)), encoding="utf-8")
+        skript.chmod(0o755)
+    return {"SECURITY_AUDIT_OHNE": "", "PATH": str(ordner)}, log
+
+
+def protokoll(log):
+    return [json.loads(z) for z in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
+
+
+def aufruf(log, name):
+    treffer = [e for e in protokoll(log) if e["name"] == name]
+    assert len(treffer) == 1, treffer
+    return treffer[0]
+
+
+def real(pfad):
+    """macOS: /var ist ein Link auf /private/var; getcwd() im Kindprozess liefert die aufgelöste Form."""
+    return os.path.realpath(pfad)
+
+
+def beide(**kw):
+    return {"pandoc": kw.get("pandoc", {}), "weasyprint": kw.get("weasyprint", {})}
+
+
+@pytest.fixture
+def bericht_pfad(tmp_path):
+    return schreibe(tmp_path / "out", bericht_daten())
+
+
+# ------------------------------------------------------------------------------------ Template
+
+def test_template_aufbau():
+    text = open(kundenbericht.TEMPLATE, encoding="utf-8").read()
+    assert '<html lang="de">' in text and text.count("<style>") == 1 and text.count("</style>") == 1
+    css = text.split("<style>")[1].split("</style>")[0]
+    assert "$" not in css, "pandoc-Template-Syntax im CSS"
+    assert "size: A4" in css and "counter(page)" in css and "@bottom-center" in css
+    assert not re.search(r"url\(|@import|https?:|//", css), "keine externen Ressourcen"
+    assert "$pagetitle$" in text and "$body$" in text and text.count("$") == 4
+
+
+def test_template_style_ist_der_sollwert_der_html_pruefung():
+    assert kundenbericht.html_pruefen(html_mit("<p>x</p>")) == []
+
+
+# ------------------------------------------------------------------------------------ Aufruf der Werkzeuge
+
+def test_erfolg_beide_werkzeuge_in_reihenfolge(tmp_path, bericht_pfad):
+    env, log = attrappen(tmp_path, **beide())
+    p = lauf(bericht_pfad, env=env)
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert zeilen(p) == ["kunde-md: " + kunde_pfad(bericht_pfad, "md"), "kunde-pdf: " + kunde_pfad(bericht_pfad, "pdf")]
+    assert [e["name"] for e in protokoll(log)] == ["pandoc", "weasyprint"]
+    assert open(kunde_pfad(bericht_pfad, "pdf"), "rb").read() == PDF_OK.encode()
+    assert inhalt(tmp_path / "out") == [BASIS + "-kunde.md", BASIS + "-kunde.pdf", BASIS + ".json"]
+
+
+PANDOC_ERWEITERUNGEN = ("markdown-smart-auto_identifiers-yaml_metadata_block-pandoc_title_block-citations-tex_math_dollars-implicit_figures"
+                        "-raw_html-raw_attribute-raw_tex-header_attributes-bracketed_spans-fenced_divs-link_attributes")
+
+
+def test_pandoc_args(tmp_path, bericht_pfad):
+    env, log = attrappen(tmp_path, **beide())
+    assert lauf(bericht_pfad, env=env).returncode == 0
+    e = aufruf(log, "pandoc")
+    argv = e["argv"]
+    assert os.path.isabs(argv[0]) and os.path.basename(argv[0]) == "pandoc", "absoluter Werkzeugpfad"
+    assert "--sandbox" in argv
+    assert argv[argv.index("--from") + 1] == PANDOC_ERWEITERUNGEN
+    assert argv[argv.index("--to") + 1] == "html5"
+    assert argv[argv.index("--template") + 1] == kundenbericht.TEMPLATE and os.path.isabs(kundenbericht.TEMPLATE)
+    assert argv[argv.index("--metadata") + 1] == "pagetitle=Manibase · Sicherheitsprüfung Portal"
+    assert not {"-V", "--variable", "--title"} & set(argv) and not any(a.startswith(("--variable", "--metadata=title", "title=")) for a in argv)
+    assert "--columns=1000" in argv
+    assert argv[-1] == kunde_pfad(bericht_pfad, "md") and os.path.isabs(argv[-1]), "Eingabe per absolutem Pfad, nicht per stdin"
+    ausgabe = argv[argv.index("-o") + 1]
+    assert real(os.path.dirname(ausgabe)) == real(e["cwd"]) and ausgabe.endswith(".html")
+
+
+def test_weasyprint_args(tmp_path, bericht_pfad):
+    env, log = attrappen(tmp_path, **beide())
+    assert lauf(bericht_pfad, env=env).returncode == 0
+    e, pe = aufruf(log, "weasyprint"), aufruf(log, "pandoc")
+    argv = e["argv"]
+    assert os.path.isabs(argv[0]) and os.path.basename(argv[0]) == "weasyprint"
+    assert argv[1:3] == ["--allowed-protocols", ""], "kein Protokoll erlaubt"
+    eingabe, ausgabe = argv[3:]
+    assert eingabe == pe["argv"][pe["argv"].index("-o") + 1], "weasyprint liest genau die von pandoc geschriebene Datei"
+    assert real(os.path.dirname(eingabe)) == real(os.path.dirname(ausgabe)) == real(e["cwd"]) == real(pe["cwd"])
+
+
+def test_cwd_ist_eigener_tempordner_und_wird_aufgeraeumt(tmp_path, bericht_pfad):
+    env, log = attrappen(tmp_path, **beide())
+    assert lauf(bericht_pfad, env=env).returncode == 0
+    cwd = aufruf(log, "pandoc")["cwd"]
+    assert os.path.basename(cwd).startswith("kunde-pdf-")
+    assert os.path.realpath(os.path.dirname(cwd)) == os.path.realpath(tempfile.gettempdir())
+    assert cwd not in (str(tmp_path / "out"), os.getcwd())
+    assert not os.path.exists(cwd), "Temp-Ordner entfernt"
+
+
+@pytest.mark.parametrize("pandoc,weasyprint", [({"rc": 1}, {}), ({"body": "<img src=x>"}, {}), ({}, {"rc": 1}), ({}, {"stderr": "Error: x"}),
+                                               ({}, {"pdf": None}), ({"schlaf": 30}, {})])
+def test_tempordner_aufgeraeumt(tmp_path, bericht_pfad, pandoc, weasyprint):
+    """Auch nach jedem Fehlerpfad: der eigene Temp-Ordner ist weg, im Zielordner bleibt kein Rest."""
+    env, log = attrappen(tmp_path, pandoc=pandoc, weasyprint=weasyprint)
+    p = lauf(bericht_pfad, env={**env, "SECURITY_AUDIT_KUNDE_BUDGET": "3" if pandoc.get("schlaf") else "90"})
+    assert p.returncode == 4, p.stdout + p.stderr
+    cwds = {e["cwd"] for e in protokoll(log)}
+    assert len(cwds) == 1 and not os.path.exists(cwds.pop())
+    assert inhalt(tmp_path / "out") == [BASIS + "-kunde.md", BASIS + ".json"]
+
+
+def test_werkzeug_umgebung_ohne_proxy(tmp_path, monkeypatch, bericht_pfad):
+    """R1-W6/K3: die Umgebung der Werkzeuge ist eine Whitelist; Proxy, PYTHONPATH und fremde Variablen kommen nicht an."""
+    for k, v in (("HTTPS_PROXY", "http://p:1"), ("http_proxy", "http://p:1"), ("ALL_PROXY", "http://p:1"), ("NO_PROXY", "x"),
+                 ("PYTHONPATH", "/nirgends"), ("PYTHONSTARTUP", "/nirgends"), ("GEHEIMNIS_X", "wert"), ("LANG", "de_DE.UTF-8")):
+        monkeypatch.setenv(k, v)
+    env, log = attrappen(tmp_path, **beide())
+    assert lauf(bericht_pfad, env=env).returncode == 0
+    for name in ("pandoc", "weasyprint"):
+        e = aufruf(log, name)
+        umgebung = e["env"]
+        assert not [k for k in umgebung if "PROXY" in k.upper()] and not any(k.startswith("PYTHON") for k in umgebung)
+        assert "GEHEIMNIS_X" not in umgebung
+        assert umgebung["PATH"] == env["PATH"] and umgebung["LANG"] == "de_DE.UTF-8"
+        assert real(umgebung["HOME"]) == real(umgebung["TMPDIR"]) == real(e["cwd"])
+        assert set(umgebung) <= {"PATH", "LANG", "LC_ALL", "HOME", "TMPDIR", "LC_CTYPE", "PWD", "__CF_USER_TEXT_ENCODING", "__PYVENV_LAUNCHER__"}, sorted(umgebung)
+
+
+def test_werkzeug_env_funktion(monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "x")
+    monkeypatch.delenv("LC_ALL", raising=False)
+    assert kundenbericht._werkzeug_env("/t") == {"PATH": os.environ["PATH"], "HOME": "/t", "TMPDIR": "/t", **({"LANG": os.environ["LANG"]} if "LANG" in os.environ else {})}
+
+
+# ------------------------------------------------------------------------------------ TF4-D5: Werkzeug fehlt
+
+def test_weasyprint_fehlt_exit3_markdown_liegt(tmp_path, bericht_pfad):
+    env, log = attrappen(tmp_path, pandoc={})
+    p = lauf(bericht_pfad, env=env)
+    assert p.returncode == 3, p.stdout + p.stderr
+    assert zeilen(p) == ["kategorie: pdf-werkzeug-fehlt", "kunde-md: " + kunde_pfad(bericht_pfad, "md"), "Werkzeug fehlt: weasyprint"]
+    assert protokoll(log) == [], "pandoc wurde nicht aufgerufen: Werkzeuge werden vor dem ersten Kindprozess geprüft"
+    assert inhalt(tmp_path / "out") == [BASIS + "-kunde.md", BASIS + ".json"]
+
+
+def test_pandoc_fehlt_exit3(tmp_path, bericht_pfad):
+    env, log = attrappen(tmp_path, weasyprint={})
+    p = lauf(bericht_pfad, env=env)
+    assert p.returncode == 3, p.stdout + p.stderr
+    assert zeilen(p) == ["kategorie: pdf-werkzeug-fehlt", "kunde-md: " + kunde_pfad(bericht_pfad, "md"), "Werkzeug fehlt: pandoc"]
+    assert protokoll(log) == []
+    assert inhalt(tmp_path / "out") == [BASIS + "-kunde.md", BASIS + ".json"]
+
+
+def test_werkzeug_ausgeschlossen_per_umgebung_exit3(tmp_path, bericht_pfad):
+    env, log = attrappen(tmp_path, **beide())
+    p = lauf(bericht_pfad, env={**env, "SECURITY_AUDIT_OHNE": "WeasyPrint"})
+    assert p.returncode == 3 and zeilen(p)[-1] == "Werkzeug fehlt: weasyprint" and protokoll(log) == []
+
+
+@pytest.mark.parametrize("kaputt", ["pandoc", "weasyprint"])
+def test_werkzeug_nicht_startbar_exit3(tmp_path, bericht_pfad, kaputt):
+    env, log = attrappen(tmp_path, **beide())
+    (tmp_path / "shim" / kaputt).write_text("#!/nicht/vorhanden/interpreter\n")
+    p = lauf(bericht_pfad, env=env)
+    assert p.returncode == 3, p.stdout + p.stderr
+    assert zeilen(p) == ["kategorie: pdf-werkzeug-fehlt", "kunde-md: " + kunde_pfad(bericht_pfad, "md"), f"Werkzeug nicht startbar: {kaputt}"]
+    assert inhalt(tmp_path / "out") == [BASIS + "-kunde.md", BASIS + ".json"]
+
+
+# ------------------------------------------------------------------------------------ HTML-Prüfung
+
+def html_mit(body, kopf=""):
+    """Das Template mit eingesetztem Text, wie pandoc es erzeugt (`kopf` ergänzt den Kopf für Tests der Prüfung)."""
+    text = open(kundenbericht.TEMPLATE, encoding="utf-8").read()
+    return text.replace("$pagetitle$", "Titel").replace("$body$", body).replace("</head>", kopf + "</head>")
+
+
+@pytest.mark.parametrize("body", [
+    "<h1>Kopf</h1>\n<p><strong>a</strong> <em>b</em> <code>c</code><br />\n<span class=\"x\" id=\"y\">d</span></p>",
+    "<table>\n<thead>\n<tr>\n<th>A</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td>1</td>\n</tr>\n</tbody>\n</table>\n<hr />\n<ul>\n<li>x</li>\n</ul>",
+    "<p>Titel &lt;img src=x onerror=y&gt; url(file:///etc/hosts) ![x](/etc/hosts) &amp; &#60;link&#62;</p>",
+    "<header><main><section><div><h2>x</h2><h3>y</h3></div></section></main></header><footer>f</footer>",
+])
+def test_html_pruefung_erlaubt(body):
+    assert kundenbericht.html_pruefen(html_mit(body)) == []
+
+
+def test_html_pruefung_escapter_text_ist_erlaubt():
+    assert kundenbericht.html_pruefen(html_mit("<p>&lt;img src=&quot;http://x/a.png&quot;&gt; &lt;script&gt;</p>")) == []
+
+
+def test_html_pruefung_img():
+    m = kundenbericht.html_pruefen(html_mit('<p><img src="http://x.example/a.png"></p>'))
+    assert "Tag nicht erlaubt: img" in m and "x.example" not in " ".join(m), "Tagname, nie der Wert"
+
+
+def test_html_pruefung_link():
+    m = kundenbericht.html_pruefen(html_mit("", kopf='<link rel="stylesheet" href="http://x.example/a.css">'))
+    assert "Tag nicht erlaubt: link" in m and "x.example" not in " ".join(m)
+
+
+def test_html_pruefung_object():
+    assert "Tag nicht erlaubt: object" in kundenbericht.html_pruefen(html_mit('<object data="file:///etc/hosts"></object>'))
+
+
+@pytest.mark.parametrize("body,erwartet", [('<p href="http://x.example/">a</p>', "href"), ('<p src="x">a</p>', "src"), ('<p onclick="x">a</p>', "onclick"),
+                                           ('<td colspan="2">a</td>', "colspan"), ('<span data-x="1">a</span>', "data-x")])
+def test_html_pruefung_href_extern(body, erwartet):
+    m = kundenbericht.html_pruefen(html_mit(body))
+    assert any(z.startswith(f"Attribut nicht erlaubt: {erwartet} an ") for z in m) and "x.example" not in " ".join(m)
+
+
+def test_html_pruefung_a_tag():
+    m = kundenbericht.html_pruefen(html_mit('<p><a href="http://x.example/">y</a></p>'))
+    assert "Tag nicht erlaubt: a" in m and "x.example" not in " ".join(m)
+
+
+def test_html_pruefung_style_attribut():
+    m = kundenbericht.html_pruefen(html_mit('<h3 style="background:url(http://x.example/a.png)">x</h3>'))
+    assert "Attribut nicht erlaubt: style an h3" in m and "x.example" not in " ".join(m)
+
+
+def test_html_pruefung_zweites_style():
+    m = kundenbericht.html_pruefen(html_mit("<p>a</p><style>p { color: red; }</style>"))
+    assert m and any("style" in z for z in m)
+
+
+def test_html_pruefung_style_inhalt_geaendert():
+    html = html_mit("<p>a</p>").replace("size: A4;", "size: A4; background: url(http://x.example/a.png);")
+    m = kundenbericht.html_pruefen(html)
+    assert m and any("style" in z for z in m) and "x.example" not in " ".join(m)
+
+
+def test_html_pruefung_ohne_style():
+    html = re.sub(r"<style>.*?</style>", "", html_mit("<p>a</p>"), flags=re.S)
+    assert any("style" in z for z in kundenbericht.html_pruefen(html))
+
+
+def test_html_pruefung_kommentar():
+    assert kundenbericht.html_pruefen(html_mit("<p>a</p><!-- <img src=x> -->"))
+
+
+def test_html_pruefung_pi_und_deklarationen():
+    assert kundenbericht.html_pruefen(html_mit('<?xml-stylesheet href="x.css"?>'))
+    assert kundenbericht.html_pruefen(html_mit("<![CDATA[ x ]]>"))
+    assert kundenbericht.html_pruefen(html_mit("<p>a</p>").replace("<!DOCTYPE html>", '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0//EN" "http://x.example/dtd">'))
+
+
+def test_html_pruefung_doctype_html_ist_erlaubt():
+    assert kundenbericht.html_pruefen(html_mit("<p>a</p>").replace("<!DOCTYPE html>", "<!doctype HTML>")) == []
+
+
+def test_html_pruefung_kommentar_und_pi():
+    """K4: Kommentare und Processing Instructions ergeben Exit 4."""
+    html = html_mit("<p>a</p>")
+    assert kundenbericht.html_pruefen(html.replace("<body>", "<body><!--x-->"))
+    assert kundenbericht.html_pruefen(html.replace("<body>", "<body><?php x ?>"))
+
+
+def test_html_pruefung_lang_nur_de_nur_an_html():
+    html = html_mit("<p>a</p>")
+    assert any("lang" in z for z in kundenbericht.html_pruefen(html.replace('lang="de"', 'lang="en"')))
+    assert any("lang" in z for z in kundenbericht.html_pruefen(html.replace("<body>", '<body lang="de">')))
+
+
+def test_html_pruefung_meta_attribute():
+    assert kundenbericht.html_pruefen(html_mit("", kopf='<meta name="viewport" content="width=device-width">')) == []
+    m = kundenbericht.html_pruefen(html_mit("", kopf='<meta http-equiv="refresh" content="0;url=http://x.example/">'))
+    assert "Attribut nicht erlaubt: http-equiv an meta" in m and "x.example" not in " ".join(m)
+
+
+def test_html_pruefung_endtag_ohne_starttag():
+    assert "Tag nicht erlaubt: img" in kundenbericht.html_pruefen(html_mit("<p>a</p></img>"))
+
+
+def test_html_pruefung_meldung_ohne_steuerzeichen_und_begrenzt():
+    m = kundenbericht.html_pruefen(html_mit("<" + "x" * 500 + ' a="b">'))
+    assert m and all(len(z) < 200 and "\n" not in z for z in m)
+
+
+def test_html_pruefung_ende_zu_ende_exit4(tmp_path, bericht_pfad):
+    env, log = attrappen(tmp_path, pandoc={"body": '<p><img src="http://x.example/a.png"></p>'}, weasyprint={})
+    p = lauf(bericht_pfad, env=env)
+    assert p.returncode == 4, p.stdout + p.stderr
+    assert zeilen(p) == ["kategorie: pdf-fehler", "kunde-md: " + kunde_pfad(bericht_pfad, "md"), "Tag nicht erlaubt: img"]
+    assert [e["name"] for e in protokoll(log)] == ["pandoc"], "weasyprint startet nach einem Verstoß nicht"
+    assert inhalt(tmp_path / "out") == [BASIS + "-kunde.md", BASIS + ".json"]
+
+
+# ------------------------------------------------------------------------------------ Fehlerpfade von pandoc und weasyprint
+
+@pytest.mark.parametrize("stderr", ["ERROR: Failed to load image at 'file:///x'", "WARNING: disallowed protocol 'file' in url", "Failed to load stylesheet",
+                                    "Error: boom", "error", "DISALLOWED PROTOCOL"])
+@pytest.mark.parametrize("rc", [0, 1])
+def test_weasyprint_stderr_fehler_exit4(tmp_path, bericht_pfad, stderr, rc):
+    env, log = attrappen(tmp_path, pandoc={}, weasyprint={"stderr": stderr, "rc": rc})
+    p = lauf(bericht_pfad, env=env)
+    assert p.returncode == 4, p.stdout + p.stderr
+    assert zeilen(p)[:2] == ["kategorie: pdf-fehler", "kunde-md: " + kunde_pfad(bericht_pfad, "md")]
+    assert "file:///x" not in p.stdout, "stderr wird nicht wiedergegeben"
+    assert not os.path.exists(kunde_pfad(bericht_pfad, "pdf")), "ein PDF mit Ladefehler wird nicht abgelegt"
+    assert inhalt(tmp_path / "out") == [BASIS + "-kunde.md", BASIS + ".json"]
+
+
+def test_weasyprint_warnung_ist_kein_fehler(tmp_path, bericht_pfad):
+    env, _ = attrappen(tmp_path, pandoc={}, weasyprint={"stderr": "WARNING: Ignored `x: y` at 3:5, unknown property.\n"})
+    p = lauf(bericht_pfad, env=env)
+    assert p.returncode == 0, p.stdout + p.stderr
+
+
+@pytest.mark.parametrize("pdf", [None, "", "<html>kein pdf</html>", " %PDF-1.7"])
+def test_weasyprint_kein_pdf_exit4(tmp_path, bericht_pfad, pdf):
+    env, _ = attrappen(tmp_path, pandoc={}, weasyprint={"pdf": pdf})
+    p = lauf(bericht_pfad, env=env)
+    assert p.returncode == 4, p.stdout + p.stderr
+    assert zeilen(p)[:2] == ["kategorie: pdf-fehler", "kunde-md: " + kunde_pfad(bericht_pfad, "md")]
+    assert not os.path.exists(kunde_pfad(bericht_pfad, "pdf"))
+
+
+@pytest.mark.parametrize("werkzeug", ["pandoc", "weasyprint"])
+def test_werkzeug_rc_ungleich_null_exit4(tmp_path, bericht_pfad, werkzeug):
+    env, _ = attrappen(tmp_path, **{**beide(), werkzeug: {"rc": 3}})
+    p = lauf(bericht_pfad, env=env)
+    assert p.returncode == 4, p.stdout + p.stderr
+    assert zeilen(p)[:2] == ["kategorie: pdf-fehler", "kunde-md: " + kunde_pfad(bericht_pfad, "md")]
+    assert not os.path.exists(kunde_pfad(bericht_pfad, "pdf"))
+
+
+def test_pandoc_schreibt_keine_datei_exit4(tmp_path, bericht_pfad):
+    env, log = attrappen(tmp_path, pandoc={"schreiben": False}, weasyprint={})
+    p = lauf(bericht_pfad, env=env)
+    assert p.returncode == 4 and [e["name"] for e in protokoll(log)] == ["pandoc"]
+
+
+def test_pandoc_timeout_exit4(tmp_path, bericht_pfad):
+    """Die Attrappe schläft; das kleine Budget lässt `werkzeug_ausfuehren` nach Ablauf die eigene Gruppe beenden (nichts sonst)."""
+    env, log = attrappen(tmp_path, pandoc={"schlaf": 30}, weasyprint={})
+    vorher = time.monotonic()
+    p = lauf(bericht_pfad, env={**env, "SECURITY_AUDIT_KUNDE_BUDGET": "2"})
+    assert p.returncode == 4, p.stdout + p.stderr
+    assert zeilen(p)[:2] == ["kategorie: pdf-fehler", "kunde-md: " + kunde_pfad(bericht_pfad, "md")]
+    assert time.monotonic() - vorher < 25
+    assert [e["name"] for e in protokoll(log)] == ["pandoc"], "nach dem Timeout startet weasyprint nicht"
+    assert not os.path.exists(kunde_pfad(bericht_pfad, "pdf"))
+
+
+# ------------------------------------------------------------------------------------ Budget (kein Kindprozess: werkzeug_ausfuehren ist ersetzt)
+
+class Uhr:
+    def __init__(self, start=1000.0):
+        self.jetzt = start
+
+    def monotonic(self):
+        return self.jetzt
+
+
+def falsche_werkzeuge(monkeypatch, tmp_path, verbrauch=None):
+    """Ersetzt `werkzeug_ausfuehren` und die Uhr des Moduls; protokolliert die Timeouts. Schreibt wie die Attrappen HTML bzw. PDF."""
+    env, _ = attrappen(tmp_path, **beide(), name="fake")
+    monkeypatch.setenv("SECURITY_AUDIT_OHNE", "")
+    monkeypatch.setenv("PATH", env["PATH"])
+    uhr = Uhr()
+    monkeypatch.setattr(kundenbericht, "time", types.SimpleNamespace(monotonic=uhr.monotonic))
+    aufrufe = []
+
+    def fake(args, timeout, cwd, env=None, ausgabe_max=0):
+        name = os.path.basename(args[0])
+        aufrufe.append({"name": name, "timeout": timeout, "cwd": cwd, "args": args})
+        uhr.jetzt += (verbrauch or {}).get(name, 0)
+        if name == "pandoc":
+            vorlage = open(args[args.index("--template") + 1], encoding="utf-8").read()
+            open(args[args.index("-o") + 1], "w", encoding="utf-8").write(vorlage.replace("$pagetitle$", "T").replace("$body$", "<p>x</p>"))
+        else:
+            open(args[-1], "wb").write(PDF_OK.encode())
+        return gitkopie.Lauf(0, b"", b"")
+
+    monkeypatch.setattr(kundenbericht.gitkopie, "werkzeug_ausfuehren", fake)
+    return uhr, aufrufe
+
+
+def md_datei(tmp_path):
+    (tmp_path / "out").mkdir(exist_ok=True)
+    md = tmp_path / "out" / "x-kunde.md"
+    md.write_text("# x\n", encoding="utf-8")
+    return str(md), str(tmp_path / "out" / "x-kunde.pdf")
+
+
+def test_budget_konstanten():
+    assert (kundenbericht.KUNDE_BUDGET, kundenbericht.PANDOC_MAX, kundenbericht.WEASYPRINT_MAX) == (90, 20, 60)
+
+
+def test_budget_anteile(monkeypatch, tmp_path):
+    uhr, aufrufe = falsche_werkzeuge(monkeypatch, tmp_path)
+    md, pdf = md_datei(tmp_path)
+    assert kundenbericht.pdf_erstellen(md, pdf, "T", uhr.jetzt + 90) == (0, None, [])
+    assert [(a["name"], a["timeout"]) for a in aufrufe] == [("pandoc", 20), ("weasyprint", 60)]
+
+
+def test_budget_rest_kuerzt_weasyprint(monkeypatch, tmp_path):
+    uhr, aufrufe = falsche_werkzeuge(monkeypatch, tmp_path, verbrauch={"pandoc": 10})
+    md, pdf = md_datei(tmp_path)
+    assert kundenbericht.pdf_erstellen(md, pdf, "T", uhr.jetzt + 25)[0] == 0
+    assert [(a["name"], a["timeout"]) for a in aufrufe] == [("pandoc", 20), ("weasyprint", 15)]
+
+
+def test_budget_rest_kuerzt_pandoc(monkeypatch, tmp_path):
+    uhr, aufrufe = falsche_werkzeuge(monkeypatch, tmp_path)
+    md, pdf = md_datei(tmp_path)
+    kundenbericht.pdf_erstellen(md, pdf, "T", uhr.jetzt + 7)
+    assert aufrufe[0]["timeout"] == 7 and aufrufe[1]["timeout"] == 7
+
+
+def test_budget_rest_null_exit4(monkeypatch, tmp_path):
+    """Ist der Rest ≤ 0, startet kein Werkzeug."""
+    uhr, aufrufe = falsche_werkzeuge(monkeypatch, tmp_path)
+    md, pdf = md_datei(tmp_path)
+    for ende in (uhr.jetzt, uhr.jetzt - 5):
+        code, kategorie, meldungen = kundenbericht.pdf_erstellen(md, pdf, "T", ende)
+        assert (code, kategorie) == (4, "pdf-fehler") and meldungen and "pandoc" in meldungen[0]
+    assert aufrufe == [] and not os.path.exists(pdf)
+
+
+def test_budget_erschoepft_vor_weasyprint_exit4(monkeypatch, tmp_path):
+    uhr, aufrufe = falsche_werkzeuge(monkeypatch, tmp_path, verbrauch={"pandoc": 10})
+    md, pdf = md_datei(tmp_path)
+    code, kategorie, meldungen = kundenbericht.pdf_erstellen(md, pdf, "T", uhr.jetzt + 10)
+    assert (code, kategorie) == (4, "pdf-fehler") and "weasyprint" in meldungen[0]
+    assert [a["name"] for a in aufrufe] == ["pandoc"] and not os.path.exists(pdf)
+
+
+def test_budget_override_nur_kuerzer(monkeypatch, tmp_path):
+    pfad = schreibe(tmp_path / "o", bericht_daten())
+    gesehen = []
+    monkeypatch.setattr(kundenbericht, "pdf_erstellen", lambda md, pdf, titel, ende: gesehen.append(ende - time.monotonic()) or (3, "pdf-werkzeug-fehlt", []))
+    for wert, erwartet in (("5", 5), ("1000", 90), ("0", 90), ("-3", 90), ("abc", 90), ("", 90), (None, 90)):
+        if wert is None:
+            monkeypatch.delenv("SECURITY_AUDIT_KUNDE_BUDGET", raising=False)
+        else:
+            monkeypatch.setenv("SECURITY_AUDIT_KUNDE_BUDGET", wert)
+        gesehen.clear()
+        kundenbericht.main(["erstellen", "--json", str(pfad)])
+        assert erwartet - 5 < gesehen[0] <= erwartet, (wert, gesehen)
+
+
+# ------------------------------------------------------------------------------------ Ablage des PDFs
+
+def test_pdf_atomar(tmp_path, monkeypatch, capsys, bericht_pfad):
+    """Das PDF entsteht über eine Temp-Datei im Zielordner und `os.replace`; nach einem Fehler bleibt kein Rest."""
+    env, _ = attrappen(tmp_path, **beide())
+    monkeypatch.setenv("SECURITY_AUDIT_OHNE", "")
+    monkeypatch.setenv("PATH", env["PATH"])
+    ordner = tmp_path / "out"
+    ziel = kunde_pfad(bericht_pfad, "pdf")
+    original = os.replace
+    aufrufe = []
+
+    def replace(quelle, nach, *a, **kw):
+        if str(nach).endswith(".pdf"):
+            aufrufe.append((quelle, nach, os.path.exists(nach), open(quelle, "rb").read()))
+        return original(quelle, nach, *a, **kw)
+
+    monkeypatch.setattr(kundenbericht.os, "replace", replace)
+    assert kundenbericht.main(["erstellen", "--json", str(bericht_pfad)]) == 0
+    (quelle, nach, gab_es, inh), = aufrufe
+    assert nach == ziel and os.path.dirname(quelle) == str(ordner) and quelle != ziel
+    assert gab_es is False and inh == PDF_OK.encode()
+    assert inhalt(ordner) == [BASIS + "-kunde.md", BASIS + "-kunde.pdf", BASIS + ".json"]
+    capsys.readouterr()
+
+    def kaputt(quelle, nach, *a, **kw):
+        if str(nach).endswith(".pdf"):
+            raise OSError("Platte voll")
+        return original(quelle, nach, *a, **kw)
+
+    monkeypatch.setattr(kundenbericht.os, "replace", kaputt)
+    assert kundenbericht.main(["erstellen", "--json", str(bericht_pfad)]) == 5
+    aus = capsys.readouterr().out.splitlines()
+    assert aus[:2] == ["kategorie: eingabe", "kunde-md: " + kunde_pfad(bericht_pfad, "md")]
+    assert inhalt(ordner) == [BASIS + "-kunde.md", BASIS + ".json"], "kein PDF, keine Temp-Datei"
+
+
+def test_pdf_altes_ziel_bleibt_nicht_liegen(tmp_path, bericht_pfad):
+    """Scheitert weasyprint, bleibt vom vorigen Lauf nichts liegen (die alten Kundendateien werden vor jedem Lauf entfernt)."""
+    ziel = kunde_pfad(bericht_pfad, "pdf")
+    open(ziel, "wb").write(b"%PDF-1.7 alt")
+    env, _ = attrappen(tmp_path, pandoc={}, weasyprint={"rc": 1})
+    assert lauf(bericht_pfad, env=env).returncode == 4
+    assert not os.path.exists(ziel)
+
+
+# ------------------------------------------------------------------------------------ Opt-in: echte Werkzeuge (SECURITY_AUDIT_PDF=1)
+
+nur_echt = pytest.mark.skipif(os.environ.get("SECURITY_AUDIT_PDF") != "1", reason="echte pandoc und weasyprint nur mit SECURITY_AUDIT_PDF=1")
+
+
+def entpackte_streams(pdf: bytes) -> list[bytes]:
+    daten = []
+    for m in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", pdf, re.S):
+        try:
+            daten.append(zlib.decompress(m.group(1)))
+        except zlib.error:
+            continue
+    return daten
+
+
+def seitenzahl(pdf: bytes) -> int:
+    """R1-K12: alle Streams per zlib entpacken (Fehler überspringen), dann `/Type /Pages … /Count n` suchen."""
+    zahlen = [int(m.group(1)) for d in [pdf, *entpackte_streams(pdf)] for m in re.finditer(rb"/Type\s*/Pages\b.*?/Count\s+(\d+)", d, re.S)]
+    return max(zahlen, default=0)
+
+
+def test_seitenzahl_helfer():
+    objekt = zlib.compress(b"<< /Type /Pages /Kids [3 0 R] /Count 4 >>")
+    assert seitenzahl(b"%PDF-1.7\n5 0 obj\n<<>>\nstream\n" + objekt + b"\nendstream\nendobj\n") == 4
+    assert seitenzahl(b"%PDF-1.7\n<< /Type /Pages /Count 2 >>\n") == 2
+    assert seitenzahl(b"%PDF-1.7\nstream\nkein zlib\nendstream\n") == 0
+
+
+@nur_echt
+def test_pdf_echt(tmp_path):
+    pfad = schreibe(tmp_path / "out", bericht_daten(befund(1), befund(2, stufe="P3", titel="Zweiter Befund")))
+    p = lauf(pfad, env={"SECURITY_AUDIT_OHNE": ""})
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert zeilen(p) == ["kunde-md: " + kunde_pfad(pfad, "md"), "kunde-pdf: " + kunde_pfad(pfad, "pdf")]
+    pdf = open(kunde_pfad(pfad, "pdf"), "rb").read()
+    assert pdf.startswith(b"%PDF") and seitenzahl(pdf) >= 1
+    assert inhalt(tmp_path / "out") == [BASIS + "-kunde.md", BASIS + "-kunde.pdf", BASIS + ".json"]
+
+
+@nur_echt
+def test_pdf_echt_ohne_dateizugriff(tmp_path):
+    """Escapte Ladeversuche im Titel bleiben Text: das PDF entsteht ohne Ladefehler, und /etc/hosts wird nicht gelesen."""
+    titel = "Probe url(file:///etc/hosts) und ![x](/etc/hosts) und <img src=file:///etc/hosts>"
+    pfad = schreibe(tmp_path / "out", bericht_daten(befund(1, titel=titel)))
+    p = lauf(pfad, env={"SECURITY_AUDIT_OHNE": ""})
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert zeilen(p) == ["kunde-md: " + kunde_pfad(pfad, "md"), "kunde-pdf: " + kunde_pfad(pfad, "pdf")]
+    pdf = open(kunde_pfad(pfad, "pdf"), "rb").read()
+    assert pdf.startswith(b"%PDF") and seitenzahl(pdf) >= 1
+    inhalte = [t for z in open("/etc/hosts", encoding="utf-8", errors="replace").read().splitlines() if not z.lstrip().startswith("#")
+               for t in z.split() if "." in t or "::" in t or t == "localhost"]
+    assert inhalte, "Erwartung: /etc/hosts hat Einträge"
+    pdftotext = shutil.which("pdftotext")
+    if pdftotext:
+        gelaufen = gitkopie.werkzeug_ausfuehren([pdftotext, kunde_pfad(pfad, "pdf"), "-"], 30, str(tmp_path), {"PATH": os.environ["PATH"]})
+        assert gelaufen.rc == 0
+        text = "".join(gelaufen.out.decode("utf-8", "replace").split())
+        assert "url(file:///etc/hosts)" in text, "der Titel steht als Text im PDF"
+        assert not any(t in text for t in inhalte), "Inhalt von /etc/hosts steht nicht im PDF"
+    else:
+        roh = b"\n".join([pdf, *entpackte_streams(pdf)])
+        assert not any(t.encode() in roh for t in inhalte)

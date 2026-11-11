@@ -18,17 +18,24 @@ import argparse
 import json
 import os
 import re
+import shutil
 import stat
 import sys
 import tempfile
 import time
 import unicodedata
+from html.parser import HTMLParser
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bericht  # noqa: E402
+import gitkopie  # noqa: E402
+import poc  # noqa: E402
 from gitkopie import _t  # noqa: E402
 
-KUNDE_BUDGET = 90         # Sekunden für `erstellen` insgesamt (Frist ab Beginn von main); Task 3 verteilt sie auf pandoc und weasyprint
+KUNDE_BUDGET = 90         # Sekunden für `erstellen` insgesamt (Frist ab Beginn von main), über SECURITY_AUDIT_KUNDE_BUDGET nur verkürzbar
+PANDOC_MAX = 20           # Anteil von pandoc; jeder Timeout ist min(Anteil, Restbudget)
+WEASYPRINT_MAX = 60       # Anteil von weasyprint
+TEMPLATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kundenbericht.html5")
 MAX_ZEILEN = 30           # Meldungszeilen auf stdout; mehr werden zu `… und <n> weitere`
 _FELDER = tuple(bericht.KUNDENFELDER)                      # ("zusammenfassung", "massnahme")
 _FELD_REIHENFOLGE = {"zusammenfassung": 0, "massnahme": 1, "titel": 2}
@@ -387,10 +394,198 @@ def markdown_erzeugen(daten: dict) -> str:
 
 # ------------------------------------------------------------------------------------ PDF
 
+# pandoc liest das Markdown ohne alles, was Dateien oder Netz berühren könnte (R1-K2): kein raw_html/raw_tex/raw_attribute, keine
+# Attribute, Zitate oder Formeln. Dazu `--sandbox`; die zweite Schicht ist die HTML-Prüfung, die dritte weasyprint ohne Protokolle.
+PANDOC_FORMAT = ("markdown-smart-auto_identifiers-yaml_metadata_block-pandoc_title_block-citations-tex_math_dollars-implicit_figures"
+                 "-raw_html-raw_attribute-raw_tex-header_attributes-bracketed_spans-fenced_divs-link_attributes")
+_HTML_TAGS = frozenset("html head meta title style body header main section footer h1 h2 h3 p ul li table thead tbody tr th td strong em code br hr div span".split())
+_HTML_ATTRIBUTE = {"": frozenset({"class", "id"}), "meta": frozenset({"class", "id", "charset", "name", "content"}), "html": frozenset({"class", "id", "lang"})}
+_FEHLER_IN_STDERR = ("disallowed protocol", "failed to load", "error")      # ohne Beachtung der Schreibweise (R2-K-3)
+_HTML_MAX = 16 * 1024 * 1024
+
+
+def _template_style() -> str:
+    """Sollwert für das einzige `<style>`: der Text zwischen `<style>` und `</style>` der Template-Datei."""
+    with open(TEMPLATE, encoding="utf-8") as fh:
+        m = re.search(r"<style>(.*?)</style>", fh.read(), re.DOTALL)
+    if m is None:
+        raise OSError("Template ohne style")
+    return m.group(1)
+
+
+class _HtmlPruefer(HTMLParser):
+    """Sammelt Verstöße gegen die Erlaubtliste (R1-W2, R2-W-1, R1-K4). Meldungen nennen nur Tag- und Attributnamen, nie Werte."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.verstoesse: list[str] = []
+        self.styles = 0
+        self.in_style = False
+        self.style_text: list[str] = []
+
+    def _melden(self, text: str) -> None:
+        if text not in self.verstoesse:
+            self.verstoesse.append(text)
+
+    def handle_starttag(self, tag, attrs):
+        if tag not in _HTML_TAGS:
+            self._melden(f"Tag nicht erlaubt: {_t(tag, 40)}")
+            return
+        erlaubt = _HTML_ATTRIBUTE.get(tag, _HTML_ATTRIBUTE[""])
+        for name, wert in attrs:
+            if name not in erlaubt:
+                self._melden(f"Attribut nicht erlaubt: {_t(name, 40)} an {tag}")
+            elif tag == "html" and name == "lang" and wert != "de":
+                self._melden("Attribut lang an html nur mit dem Wert de erlaubt")
+        if tag == "style":
+            self.styles += 1
+            self.in_style = True
+
+    def handle_endtag(self, tag):
+        if tag not in _HTML_TAGS:
+            self._melden(f"Tag nicht erlaubt: {_t(tag, 40)}")
+        elif tag == "style":
+            self.in_style = False
+
+    def handle_data(self, data):
+        if self.in_style:
+            self.style_text.append(data)
+
+    def handle_comment(self, data):
+        self._melden("Kommentar nicht erlaubt")
+
+    def handle_pi(self, data):
+        self._melden("Processing Instruction nicht erlaubt")
+
+    def handle_decl(self, decl):
+        if decl.strip().casefold() != "doctype html":
+            self._melden("Deklaration nicht erlaubt")
+
+    def unknown_decl(self, data):
+        self._melden("Deklaration nicht erlaubt")
+
+
+def html_pruefen(html: str, soll_style: str | None = None) -> list[str]:
+    """Prüft das von pandoc erzeugte HTML gegen die Erlaubtliste. Leere Liste = in Ordnung.
+    Erlaubt: Tags aus `_HTML_TAGS`; Attribute nur `class`, `id`, bei `meta` zusätzlich `charset`, `name`, `content`, bei `html`
+    `lang="de"`; genau ein `<style>` mit dem Inhalt des Templates; als Deklaration nur `DOCTYPE html`; keine Kommentare, keine
+    Processing Instructions. Escapter Text ist kein Tag und deshalb erlaubt. Die Meldungen enthalten nie Werte aus dem HTML."""
+    soll = _template_style() if soll_style is None else soll_style
+    pruefer = _HtmlPruefer()
+    try:
+        pruefer.feed(html)
+        pruefer.close()
+    except Exception:  # noqa: BLE001 - ein Parserfehler heißt: nicht prüfbar, also nicht rendern
+        return ["HTML nicht prüfbar"]
+    verstoesse = list(pruefer.verstoesse)
+    if pruefer.styles != 1:
+        verstoesse.append("style: genau ein Element erlaubt")
+    elif "".join(pruefer.style_text) != soll:
+        verstoesse.append("style: Inhalt weicht vom Template ab")
+    return verstoesse
+
+
+def _werkzeug_env(tmp: str) -> dict[str, str]:
+    """Whitelist-Umgebung für pandoc und weasyprint (R1-K3): PATH, LANG, LC_ALL aus dem Prozess, HOME und TMPDIR im eigenen Temp-Ordner.
+    Kein *_PROXY, kein PYTHONPATH oder PYTHONSTARTUP, keine geerbten Zugangsdaten."""
+    env = {k: os.environ[k] for k in ("PATH", "LANG", "LC_ALL") if k in os.environ}
+    env["HOME"] = tmp
+    env["TMPDIR"] = tmp
+    return env
+
+
+def _werkzeug_lauf(name: str, args: list[str], anteil: int, ende: float, tmp: str) -> gitkopie.Lauf:
+    """Startet ein Werkzeug über `gitkopie.werkzeug_ausfuehren` (eigene Gruppe, Timeout `min(Anteil, Rest)`). Ist der Rest ≤ 0, startet nichts."""
+    rest = ende - time.monotonic()
+    if rest <= 0:
+        raise Abbruch(4, "pdf-fehler", [f"Zeitbudget erschöpft, {name} nicht gestartet."])
+    try:
+        lauf = gitkopie.werkzeug_ausfuehren(args, min(anteil, rest), tmp, _werkzeug_env(tmp))
+    except gitkopie.GitFehler:
+        raise Abbruch(3, "pdf-werkzeug-fehlt", [f"Werkzeug nicht startbar: {name}"]) from None
+    if lauf.rc is None:
+        raise Abbruch(4, "pdf-fehler", [f"Zeitüberschreitung bei {name}."])
+    return lauf
+
+
+def _datei_lesen(pfad: str, grenze: int) -> bytes | None:
+    """Inhalt einer regulären Datei (kein Symlink, höchstens `grenze` + 1 Bytes) oder None, wenn sie fehlt."""
+    st = _lstat(pfad)
+    if st is None or not stat.S_ISREG(st.st_mode):
+        return None
+    with open(pfad, "rb") as fh:
+        return fh.read(grenze + 1)
+
+
+def _pdf_ablegen(roh: bytes, ziel: str) -> None:
+    """Atomar: Temp-Datei im Zielordner, dann `os.replace`; nach einem Fehler bleibt keine Temp-Datei."""
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=".kunde-", suffix=".tmp", dir=os.path.dirname(ziel))
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(roh)
+        os.replace(tmp, ziel)
+        tmp = None
+    except OSError:
+        raise Abbruch(5, "eingabe", ["Das PDF konnte nicht geschrieben werden."]) from None
+    finally:
+        if tmp is not None and os.path.lexists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def _pdf_kette(md_pfad: str, pdf_pfad: str, titel: str, ende: float, pandoc: str, weasyprint: str, tmp: str) -> None:
+    html_pfad, tmp_pdf = os.path.join(tmp, "kunde.html"), os.path.join(tmp, "kunde.pdf")
+    erg = _werkzeug_lauf("pandoc", [pandoc, "--sandbox", "--from", PANDOC_FORMAT, "--to", "html5", "--template", TEMPLATE,
+                                     "--metadata", f"pagetitle={titel}", "--columns=1000", "-o", html_pfad, os.path.abspath(md_pfad)],
+                         PANDOC_MAX, ende, tmp)
+    if erg.rc != 0:
+        raise Abbruch(4, "pdf-fehler", [f"pandoc endete mit Exit {erg.rc}."])
+    roh = _datei_lesen(html_pfad, _HTML_MAX)
+    if not roh or len(roh) > _HTML_MAX:
+        raise Abbruch(4, "pdf-fehler", ["pandoc hat kein HTML geschrieben."])
+    try:
+        verstoesse = html_pruefen(roh.decode("utf-8"))
+    except (UnicodeDecodeError, OSError):
+        raise Abbruch(4, "pdf-fehler", ["HTML nicht prüfbar."]) from None
+    if verstoesse:
+        raise Abbruch(4, "pdf-fehler", verstoesse[:10])
+    erg = _werkzeug_lauf("weasyprint", [weasyprint, "--allowed-protocols", "", html_pfad, tmp_pdf], WEASYPRINT_MAX, ende, tmp)
+    if erg.rc != 0:
+        raise Abbruch(4, "pdf-fehler", [f"weasyprint endete mit Exit {erg.rc}."])
+    fehler = erg.err.decode("utf-8", "replace").casefold()
+    if any(muster in fehler for muster in _FEHLER_IN_STDERR):
+        raise Abbruch(4, "pdf-fehler", ["weasyprint meldete einen Fehler (Ladefehler oder gesperrtes Protokoll)."])
+    pdf = _datei_lesen(tmp_pdf, 256 * 1024 * 1024)
+    if not pdf or not pdf.startswith(b"%PDF"):
+        raise Abbruch(4, "pdf-fehler", ["weasyprint hat kein PDF geschrieben."])
+    _pdf_ablegen(pdf, pdf_pfad)
+
+
 def pdf_erstellen(md_pfad: str, pdf_pfad: str, titel: str, ende: float) -> tuple[int, str | None, list[str]]:
-    """PDF-Kette (Task 3 ersetzt den Rumpf). Rückgabe (Exit-Code, Kategorie, Meldungszeilen ohne Werte aus Daten); schreibt nie auf stdout.
-    `ende` ist die Frist als `time.monotonic()`-Zeitpunkt. Der Stub meldet ein fehlendes Werkzeug."""
-    return 3, "pdf-werkzeug-fehlt", []
+    """PDF-Kette: pandoc `--sandbox` (Markdown -> HTML), HTML-Prüfung, weasyprint `--allowed-protocols ''` (HTML -> PDF).
+    Rückgabe (Exit-Code, Kategorie, Meldungszeilen ohne Werte aus Daten); schreibt nie auf stdout. `ende` ist die Frist als
+    `time.monotonic()`-Zeitpunkt. Beide Werkzeuge werden geprüft, bevor ein Kindprozess startet; sie laufen im eigenen
+    `mkdtemp` mit Whitelist-Umgebung. Aufgeräumt wird nur dieser Ordner."""
+    fehlend = [n for n in ("pandoc", "weasyprint") if poc.werkzeug_fehlt(n)]
+    if fehlend:
+        return 3, "pdf-werkzeug-fehlt", [f"Werkzeug fehlt: {', '.join(fehlend)}"]
+    pandoc, weasyprint = shutil.which("pandoc"), shutil.which("weasyprint")
+    if pandoc is None or weasyprint is None:
+        return 3, "pdf-werkzeug-fehlt", ["Werkzeug fehlt: pandoc, weasyprint"]
+    try:
+        tmp = tempfile.mkdtemp(prefix="kunde-pdf-")
+    except OSError:
+        return 4, "pdf-fehler", ["Temporärer Ordner nicht anlegbar."]
+    try:
+        _pdf_kette(md_pfad, pdf_pfad, titel, ende, pandoc, weasyprint, tmp)
+    except Abbruch as a:
+        return a.code, a.kategorie, a.zeilen
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)         # nur der eigene, von mkdtemp zurückgegebene Pfad
+    return 0, None, []
 
 
 # ------------------------------------------------------------------------------------ CLI
@@ -423,7 +618,7 @@ class _Parser(argparse.ArgumentParser):
 
 
 def main(argv: list[str]) -> int:
-    ende = time.monotonic() + KUNDE_BUDGET
+    ende = time.monotonic() + poc._nur_verkuerzt("SECURITY_AUDIT_KUNDE_BUDGET", KUNDE_BUDGET)
     ap = _Parser(prog="kundenbericht.py", allow_abbrev=False)
     sub = ap.add_subparsers(dest="befehl", required=True)
     e = sub.add_parser("erstellen", allow_abbrev=False)
