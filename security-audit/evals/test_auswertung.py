@@ -2867,6 +2867,31 @@ def test_auswertung_tf3_d3_fixture_web_ohne_schluessel(bericht, erwartung, strea
     assert "TF3-D3" not in alles(bericht, erwartung, stream)["dod"]
 
 
+def test_auswertung_tf3_d3_ausloeser_einzeln_haertung_m1(bericht, erwartung, stream):
+    """Härtung (Review 6a/6b M1): TF3-D3 entsteht aus jedem der beiden Auslöser einzeln, nicht erst aus beiden. Die Basis (fixture-web) hat
+    keinen: Ohne `ki_hinweis: angewendet` und ohne API-Host in `verbotene_muster` gibt es kein TF3-D3."""
+    assert "TF3-D3" not in alles(bericht, erwartung, stream)["dod"]
+    angewendet = copy.deepcopy(erwartung)
+    angewendet["ki_hinweis"] = "angewendet"
+    kb = copy.deepcopy(bericht)
+    kb["hinweise"] = [KI_HINWEIS_ANGEWENDET]
+    assert not any(a in " ".join(angewendet["verbotene_muster"]) for a in ("api.openai.com", "api.anthropic.com"))
+    e = alles(kb, angewendet, stream)
+    assert "TF3-D3" in e["dod"] and e["dod"]["TF3-D3"] == {"ok": True, "details": []}      # Auslöser 1: `ki_hinweis: angewendet`
+    for host in ("api.openai.com", "api.anthropic.com"):
+        nur_muster = copy.deepcopy(erwartung)
+        nur_muster["verbotene_muster"] = list(nur_muster["verbotene_muster"]) + [host]
+        assert nur_muster["ki_hinweis"] != "angewendet"
+        e = alles(bericht, nur_muster, stream)
+        assert "TF3-D3" in e["dod"], host                                                  # Auslöser 2: API-Host in `verbotene_muster`
+        gross = copy.deepcopy(nur_muster)
+        gross["verbotene_muster"] = [m.upper() for m in gross["verbotene_muster"]]         # `_verbotene` vergleicht ohne Großschreibung
+        assert "TF3-D3" in alles(bericht, gross, stream)["dod"], host
+    leer = copy.deepcopy(erwartung)
+    leer["verbotene_muster"] = [1, None, ["api.openai.com"]]                               # Nicht-Texte lösen nichts aus (und stürzen nicht ab)
+    assert "TF3-D3" not in alles(bericht, leer, stream)["dod"]
+
+
 # --- TF3-D4: Hinweis wörtlich ---
 
 def test_auswertung_tf3_d4_ok(ki_bericht, erw_ki, bericht, erwartung, stream):
