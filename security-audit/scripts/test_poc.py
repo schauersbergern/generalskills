@@ -952,6 +952,7 @@ def test_env_regeln_fremder_host_exit2(umg, tmp_path, mock, wert_):
     assert r.returncode == 2, r.stdout + r.stderr
     assert "--env EXTERN_URL: nicht erlaubter Host" in r.stderr
     assert not any(a["args"][0] in ("run", "network") for a in umg.aufrufe())
+    assert umg.aufrufe() == []                                                          # M4a: auch kein `version` (Prüfung vor dem Daemon)
 
 
 @pytest.mark.parametrize("mock", [[], ["--modell-mock", "openai,anthropic"]])
@@ -974,6 +975,72 @@ def test_env_regeln_meldung_ohne_wert(umg, tmp_path):
     assert geheim not in r.stdout + r.stderr
     r = starten(umg, "--modell-mock", "openai", "--env", f"OPENAI_API_KEY={geheim}")
     assert r.returncode == 2 and geheim not in r.stdout + r.stderr
+
+
+def starten_mit_befehl(umg, befehl, *extra):
+    return umg.poc("starten", "--lauf", LAUF, "--rolle", "p1", "--start-befehl", befehl, "--port", "3000", *extra)
+
+
+@pytest.mark.parametrize("befehl,name", [
+    ("OPENAI_BASE_URL=http://llm:4010/v1 node server.js", "OPENAI_BASE_URL"),
+    ("env ANTHROPIC_API_KEY=x node server.js", "ANTHROPIC_API_KEY"),
+    ("export OPENAI_API_KEY=x && node server.js", "OPENAI_API_KEY"),
+    ("export ANTHROPIC_BASE_URL=http://llm:4010; node server.js", "ANTHROPIC_BASE_URL"),
+    ("PORT=1 openai_base_url=http://llm:4010 node server.js", "openai_base_url"),
+    ("OPENAI_API_BASE=http://llm:4010 node server.js", "OPENAI_API_BASE"),
+    ("env -i AZURE_OPENAI_ENDPOINT=http://llm:4010 node server.js", "AZURE_OPENAI_ENDPOINT"),
+])
+def test_start_befehl_reservierte_namen_mit_mock_exit2(umg, tmp_path, befehl, name):
+    """M-2: Mit --modell-mock darf der Start-Befehl keinen reservierten Namen setzen (sonst biegt er die Mock-Variablen um).
+    Die Meldung nennt nur den Namen, nie den Befehl; ohne Mock bleibt der Befehl erlaubt."""
+    vorbereitet(umg, tmp_path)
+    r = starten_mit_befehl(umg, befehl, "--modell-mock", "openai")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert name in r.stderr and "node server.js" not in r.stderr and "llm:4010" not in r.stderr, r.stderr
+    assert umg.aufrufe() == []                                                          # vor jedem Docker-Aufruf abgelehnt
+    r = starten_mit_befehl(umg, befehl)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("mock", [[], ["--modell-mock", "openai"]])
+def test_start_befehl_fremder_host_exit2(umg, tmp_path, mock):
+    """M-2: Der Start-Befehl läuft durch die Netzregel; die Meldung nennt nur den Host, nie den Befehl."""
+    vorbereitet(umg, tmp_path)
+    r = starten_mit_befehl(umg, "EXTERN=https://poc-fremd.invalid/v1 node geheim-server.js", *mock)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "--start-befehl: nicht erlaubter Host poc-fremd.invalid" in r.stderr
+    assert "geheim-server" not in r.stdout + r.stderr and "/v1" not in r.stderr
+    assert umg.aufrufe() == []
+
+
+@pytest.mark.parametrize("mock", [[], ["--modell-mock", "openai"]])
+@pytest.mark.parametrize("befehl", ["node src/server.js", "npm start", "PORT=3000 node server.js",
+                                    "node server.js --db postgres://poc:poc@db:5432/poc --llm http://llm:4010/v1"])
+def test_start_befehl_legitim_erlaubt(umg, tmp_path, mock, befehl):
+    vorbereitet(umg, tmp_path)
+    r = starten_mit_befehl(umg, befehl, *mock)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert befehl in run_mit_name(umg, APP)[0]
+
+
+@pytest.mark.parametrize("name", ["OPENAI_API_BASE", "OPENAI_ORG_ID", "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY"])
+def test_env_regeln_weitere_reservierte_namen(umg, tmp_path, name):
+    """M-2: Mit Mock sind auch die weiteren Namen gesperrt, ohne Rücksicht auf Groß-/Kleinschreibung; ohne Mock bleiben sie frei."""
+    vorbereitet(umg, tmp_path)
+    for schreibweise in (name, name.lower(), name.title()):
+        r = starten(umg, "--modell-mock", "openai", "--env", f"{schreibweise}=x")
+        assert r.returncode == 2 and schreibweise in r.stderr, (schreibweise, r.stderr)
+    assert umg.aufrufe() == []
+    r = starten(umg, "--env", f"{name}=x")
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("name", MOCK_NAMEN)
+def test_env_regeln_reservierte_namen_gross_kleinschreibung_egal(umg, tmp_path, name):
+    vorbereitet(umg, tmp_path)
+    r = starten(umg, "--modell-mock", "openai", "--env", f"{name.lower()}=x")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert umg.aufrufe() == []
 
 
 @pytest.mark.parametrize("wert_", ["", "gemini", "openai,gemini", "openai,openai", "openai,", ",openai", "OpenAI", "openai anthropic"])
@@ -1017,6 +1084,18 @@ def test_modell_mock_env_nur_gewaehlte_api(umg, tmp_path):
     env = wert(run_mit_name(umg, APP)[0], "-e")
     assert "ANTHROPIC_BASE_URL=http://llm:4010" in env and "ANTHROPIC_API_KEY=poc-dummy-anthropic" in env
     assert not any(e.startswith("OPENAI_") for e in env)
+
+
+def test_modell_mock_mit_db_reihenfolge_mock_db_app(umg, tmp_path):
+    """D6: Reihenfolge der `run`-Aufrufe mit Mock und Datenbank: Mock, DB, App (die Bereitschaft des Mocks liegt vor der DB)."""
+    vorbereitet(umg, tmp_path)
+    r = starten(umg, "--modell-mock", "openai", "--dienst", "postgres")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert [wert(a, "--name")[0] for a in laeufe(umg)[:3]] == [LLM, f"security-audit-{LAUF}-p1-db", APP]
+    aufrufe = [a["args"] for a in umg.aufrufe()]
+    bereit = ["exec", "-i", LLM, "node", "/poc/llm-mock.mjs", "--bereit"]
+    db = next(i for i, a in enumerate(aufrufe) if a[0] == "run" and wert(a, "--name") == [f"security-audit-{LAUF}-p1-db"])
+    assert aufrufe.index(bereit) < db
 
 
 def test_ohne_modell_mock_kein_mock_container(umg, tmp_path):
@@ -1956,6 +2035,23 @@ def test_rollen_sperre_geteilt_erlaubt_anfragen_aber_kein_neustart_haertung_b2(u
     assert umg.poc("neustart", "--lauf", LAUF, "--rolle", "p1").returncode == 0     # Sperre frei: geht
 
 
+def test_rollen_sperre_starten_ist_exklusiv_gegenueber_geteilter_sperre(umg, tmp_path):
+    """L4: `starten` nimmt die Rollensperre exklusiv: schon eine geteilte Sperre (laufende anfrage oder modell) blockiert es,
+    ohne dass ein Docker-Aufruf stattfindet."""
+    import fcntl
+    vorbereitet(umg, tmp_path)
+    gestartet(umg)
+    fd = _sperre(umg, "p1", fcntl.LOCK_SH)
+    try:
+        umg.log_datei.unlink(missing_ok=True)
+        r = umg.poc("starten", "--lauf", LAUF, "--rolle", "p1", "--start-befehl", "node server.js", "--port", "3000")
+        assert r.returncode == 1 and "Rolle p1" in r.stderr and "gerade" in r.stderr, r.stderr
+        assert not any(a["args"][0] in ("run", "rm", "network") for a in umg.aufrufe())
+    finally:
+        os.close(fd)
+    assert umg.poc("starten", "--lauf", LAUF, "--rolle", "p1", "--start-befehl", "node server.js", "--port", "3000").returncode == 0
+
+
 # ------------------------------------------------------------------------------------ Härtung TF1-B3 (gepinnter Commit)
 
 def test_vorbereiten_kopiert_den_uebergebenen_sha_haertung_b3(umg, tmp_path):
@@ -2445,6 +2541,40 @@ def test_modell_protokoll_fehler_exit1_entschaerft_ohne_werte(umg, tmp_path):
     assert "teil" not in r.stdout
 
 
+def test_modell_protokoll_fehler_maskiert_auch_mock_keys(umg, tmp_path):
+    """M-3: Der Fehlerauszug maskiert wie der Mock auch die Schlüssel des Mocks, nicht nur die `--env`-Werte."""
+    mit_mock(umg, tmp_path, "--env", "X_TOKEN=poc-dummy-abcdef")
+    umg.konfig({"exec -i": {"rc": 1, "stderr": "boom poc-dummy-openai und poc-dummy-abcdef\n"}})
+    r = modell(umg, "--protokoll")
+    assert r.returncode == 1, r.stderr
+    assert "poc-dummy-openai" not in r.stderr and "poc-dummy-abcdef" not in r.stderr, r.stderr
+    assert "boom <ENV:OPENAI_API_KEY> und <ENV:X_TOKEN>" in r.stderr, r.stderr
+
+
+def test_modell_protokoll_wertlaenge_in_utf16_einheiten(umg, tmp_path):
+    """M-5: Wie im Mock zählt die Länge in UTF-16-Einheiten (ein Emoji sind 2): 2049 Emojis sind 4098 Einheiten und passen nicht."""
+    mit_mock(umg, tmp_path, "--env", "EMOJI=" + "\U0001F600" * 2049)
+    r = modell(umg, "--protokoll")
+    assert r.returncode == 2 and "EMOJI" in r.stderr and "4096" in r.stderr, r.stderr
+    assert exec_aufrufe(umg) == []
+    # genau 4096 Einheiten: erlaubt
+    assert starten(umg, "--modell-mock", "openai", "--env", "EMOJI=" + "\U0001F600" * 2048).returncode == 0
+    umg.konfig({"exec -i": {"stdout": '{"eintraege":[],"gekuerzt":0}\n'}})
+    assert modell(umg, "--protokoll").returncode == 0
+    assert any(w["name"] == "EMOJI" for w in json.loads(exec_aufrufe(umg)[-1]["stdin"])["werte"])
+    assert poc._utf16_laenge("a\U0001F600") == 3 and poc._utf16_laenge("\udcff") == 1
+
+
+def test_modell_protokoll_maskierwerte_ohne_dubletten(umg, tmp_path):
+    """M6g: Dieselbe Variable mit demselben Wert geht nur einmal an den Mock; derselbe Wert unter anderem Namen bleibt eigener Eintrag."""
+    mit_mock(umg, tmp_path, "--env", "DUP=poc-dummy-dupwert", "--env", "DUP=poc-dummy-dupwert", "--env", "ZWEI=poc-dummy-dupwert")
+    umg.konfig({"exec -i": {"stdout": '{"eintraege":[],"gekuerzt":0}\n'}})
+    assert modell(umg, "--protokoll").returncode == 0
+    werte = json.loads(exec_aufrufe(umg)[0]["stdin"])["werte"]
+    assert sorted((w["name"], w["wert"]) for w in werte) == [("DUP", "poc-dummy-dupwert"), ("OPENAI_API_KEY", "poc-dummy-openai"),
+                                                             ("ZWEI", "poc-dummy-dupwert")]
+
+
 def test_modell_protokoll_maskierwerte_per_stdin(umg, tmp_path):
     """Die Werte gehen per stdin, nie per argv: alle `--env`-Werte der Rolle ab 6 Zeichen plus die Mock-Keys, längste zuerst."""
     geheim = "poc-dummy-abcdef"
@@ -2608,6 +2738,11 @@ def test_modell_protokoll_maskierung_ende_zu_ende(umg, tmp_path):
             body = daten["eintraege"][0]["body"]
             assert "<ENV:X_TOKEN>" in body and "<ENV:OPENAI_API_KEY>" in body and "POCMARKER-e2e-1" in body
             assert body.count("<ENV:X_TOKEN>") == 2                               # Rohform des Tokens und die im Werkzeug-JSON
+            erwartet = {"model": "m", "messages": [{"role": "user", "content": 'POCMARKER-e2e-1 token=<ENV:X_TOKEN> key=<ENV:OPENAI_API_KEY> '
+                                                                              'werkzeug={"k": "<ENV:X_TOKEN>"}'}]}
+            assert body == json.dumps(erwartet), body                                 # E4: kein Rest des Werts, auch kein einzelnes Zeichen
+            for i in range(len(geheim) - 3):                                          # und kein Teilstück ab 4 Zeichen im Protokoll
+                assert geheim[i:i + 4] not in r.stdout and json_form[i:i + 4] not in r.stdout, geheim[i:i + 4]
             for form in (geheim, json_form, doppelt):
                 assert form not in body, form
             if suche:

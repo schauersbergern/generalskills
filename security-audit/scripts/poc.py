@@ -105,7 +105,11 @@ MOCK_ENV = {
     "openai": (("OPENAI_BASE_URL", f"{MOCK_URL}/v1"), ("OPENAI_API_KEY", "poc-dummy-openai")),
     "anthropic": (("ANTHROPIC_BASE_URL", MOCK_URL), ("ANTHROPIC_API_KEY", "poc-dummy-anthropic")),
 }
-MOCK_RESERVIERT = frozenset(name for paare in MOCK_ENV.values() for name, _ in paare)   # mit --modell-mock kein --env dieser Namen
+# Mit --modell-mock kein --env und keine Zuweisung im Start-Befehl mit diesen Namen (Groß-/Kleinschreibung egal): die Variablen des Mocks
+# und weitere, mit denen ein SDK sonst am Mock vorbei zu einem anderen Endpunkt oder Konto liefe.
+MOCK_RESERVIERT = frozenset({name for paare in MOCK_ENV.values() for name, _ in paare}
+                            | {"OPENAI_API_BASE", "OPENAI_ORG_ID", "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY"})
+MOCK_RESERVIERT_RE = re.compile(r"(?<![A-Za-z0-9_])(" + "|".join(sorted(MOCK_RESERVIERT)) + r")=", re.IGNORECASE)
 
 # Hinweis-Kategorien, die `bauen` ausgeben kann (`hinweis: <kategorie>`); SKILL.md und bericht-format.md nennen jede.
 HINWEIS_KATEGORIEN = ("native-module", "prisma-engines", "lockfile-ohne-paketliste", "node-range-zu-lang",
@@ -1002,16 +1006,29 @@ def _env_pruefen(env: list[str], modell_mock: list[str]) -> None:
     (alle vier, auch die der nicht gewählten API) gesperrt, weil `starten` sie selbst setzt."""
     for e in env:
         name, _, wert = e.partition("=")
-        if modell_mock and name in MOCK_RESERVIERT:
+        if modell_mock and name.upper() in MOCK_RESERVIERT:
             raise PocFehler(f"--env {name}: reservierter Name bei --modell-mock")
         fremd = netzregel.verstoesse_poc(wert)
         if fremd:
             raise PocFehler(f"--env {name}: nicht erlaubter Host {_entschaerfen(fremd[0])[:100]}")
 
 
+def _start_befehl_pruefen(befehl: str, modell_mock: list[str]) -> None:
+    """Regeln für `--start-befehl` (Exit 2, die Meldung nennt nur Namen oder Host, nie den Befehl): mit `--modell-mock` darf er keinen
+    Namen aus `MOCK_RESERVIERT` zuweisen (`NAME=`, auch nach `env` und `export`); unabhängig davon läuft er durch die Netzregel."""
+    if modell_mock:
+        m = MOCK_RESERVIERT_RE.search(befehl)
+        if m:
+            raise PocFehler(f"--start-befehl: reservierter Name {m.group(1)} bei --modell-mock")
+    fremd = netzregel.verstoesse_poc(befehl)
+    if fremd:
+        raise PocFehler(f"--start-befehl: nicht erlaubter Host {_entschaerfen(fremd[0])[:100]}")
+
+
 def cmd_starten(a: argparse.Namespace) -> int:
     modell_mock = a.modell_mock or []
     _env_pruefen(a.env or [], modell_mock)
+    _start_befehl_pruefen(a.start_befehl, modell_mock)
     _daemon_pruefen()
     _frist_setzen("SECURITY_AUDIT_START_BUDGET", START_BUDGET)
     ordner = _ordner(a.lauf, anlegen=True)
@@ -1126,25 +1143,36 @@ def _antworten_pruefen(daten: object) -> None:
             raise falsch(f"Eintrag {i}: wenn_enthaelt muss POCMARKER-[a-z0-9-]{{1,40}} sein")
 
 
-def _maskier_werte(z: dict) -> bytes:
-    """stdin für `llm-mock.mjs --protokoll`: `{"werte":[{name,wert}]}` mit den `--env`-Werten der Rolle ab 6 Zeichen und den
-    Schlüsseln des Mocks (`*_API_KEY` der gewählten APIs), längste zuerst. Mehr als 50 Werte: die 50 längsten (Hinweis auf stderr,
-    ohne Werte). Ein Wert über 4096 Zeichen oder eine Liste über 64 KiB lässt sich nicht maskieren: Exit 2 statt Werte wegzulassen."""
+def _utf16_laenge(wert: str) -> int:
+    """Länge in UTF-16-Einheiten wie `String.length` im Mock (ein Emoji zählt 2); argv-Surrogate zählen je 1."""
+    return len(wert.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def _maskier_paare(z: dict) -> list[tuple[str, str]]:
+    """(Name, Wert) aller Werte der Rolle, die nicht ins Protokoll gehören: die `--env`-Werte und die Schlüssel des Mocks (`*_API_KEY`
+    der gewählten APIs). Quelle für die Maskierung im Mock (`_maskier_werte`) und für den Fehlerauszug (`_ohne_werte`)."""
     paare: list[tuple[str, str]] = []
     for e in z["env"]:
         name, _, wert = e.partition("=")
         paare.append((name, wert))
     for api in z["modell_mock"]:
         paare += [(name, wert) for name, wert in MOCK_ENV[api] if name.endswith("_API_KEY")]
+    return paare
+
+
+def _maskier_werte(z: dict) -> bytes:
+    """stdin für `llm-mock.mjs --protokoll`: `{"werte":[{name,wert}]}` mit den Werten aus `_maskier_paare` ab 6 Zeichen, längste zuerst.
+    Mehr als 50 Werte: die 50 längsten (Hinweis auf stderr, ohne Werte). Ein Wert über 4096 UTF-16-Einheiten (Zählweise des Mocks) oder
+    eine Liste über 64 KiB lässt sich nicht maskieren: Exit 2 statt Werte wegzulassen."""
     gesehen: set[tuple[str, str]] = set()
     werte = []
-    for name, wert in paare:
+    for name, wert in _maskier_paare(z):
         if len(wert) >= MASKIER_WERT_MIN and (name, wert) not in gesehen:
             gesehen.add((name, wert))
             werte.append((name[:MASKIER_NAME_MAX], wert))
     werte.sort(key=lambda p: -len(p[1]))                   # stabil: bei gleicher Länge die Reihenfolge von `--env`
     for name, wert in werte:
-        if len(wert) > MASKIER_WERT_MAX:
+        if _utf16_laenge(wert) > MASKIER_WERT_MAX:
             raise PocFehler(f"--env {name}: Wert länger als {MASKIER_WERT_MAX} Zeichen, lässt sich nicht maskieren")
     if len(werte) > MASKIER_WERTE_MAX:
         print(f"modell: {len(werte)} Werte zu maskieren, nur die {MASKIER_WERTE_MAX} längsten werden maskiert", file=sys.stderr)
@@ -1157,8 +1185,7 @@ def _maskier_werte(z: dict) -> bytes:
 
 def _ohne_werte(text: str, z: dict) -> str:
     """Fehlertext ohne die Werte, die maskiert werden sollen (Mock und Docker geben sie nie aus; das hier ist die zweite Sicherung)."""
-    for e in sorted(z["env"], key=lambda e: -len(e)):
-        name, _, wert = e.partition("=")
+    for name, wert in sorted(_maskier_paare(z), key=lambda p: -len(p[1])):
         if len(wert) >= MASKIER_WERT_MIN:
             text = text.replace(wert, f"<ENV:{name}>")
     return text
