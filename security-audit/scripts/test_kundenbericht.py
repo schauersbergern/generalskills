@@ -616,6 +616,13 @@ def test_hilfe_nennt_unterbefehl_erstellen():
     assert re.search(r"\{erstellen\}", p.stdout)
 
 
+@pytest.mark.parametrize("argumente", [["erstellen", "--help"], ["erstellen", "-h"], ["erstellen", "--json", "x.json", "--help"]])
+def test_erstellen_help_ist_exit5_nie_exit0_ohne_dateien_r1_7(tmp_path, argumente):
+    """R1-7: Exit 0 heißt „Markdown und PDF erstellt“; `erstellen --help` darf nicht mit 0 enden (die Eval-Erlaubnisregel lässt den Aufruf zu)."""
+    p = lauf(None, argumente=argumente)
+    assert p.returncode == 5 and zeilen(p) == ["kategorie: eingabe"], p.stdout + p.stderr
+
+
 @pytest.mark.parametrize("argumente", [[], ["erstellen"], ["unbekannt"], ["erstellen", "--json"], ["erstellen", "--json", "x.json", "y"]])
 def test_argumentfehler_exit5_nicht_exit2(tmp_path, argumente):
     """argparse würde mit 2 enden und damit eine Feldkorrektur auslösen; Eingabefehler sind Exit 5."""
