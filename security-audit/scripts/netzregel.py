@@ -18,7 +18,7 @@ import re
 import shlex
 from urllib.parse import unquote
 
-ERLAUBTE_HOSTS = frozenset({"app", "db", "localhost", "127.0.0.1", "::1", "0.0.0.0"})
+ERLAUBTE_HOSTS = frozenset({"app", "db", "llm", "localhost", "127.0.0.1", "::1", "0.0.0.0"})
 
 # URL: Netzschema (`http(s)`, `ws(s)`, `ftp(s)`, `telnet`, `gopher(s)`, `ldap(s)`, `rtmp*` …: alle Netzschemata von `curl --version`), `:`, ein oder mehr `/`/`\` (curl liest auch `http:/evil.test`); jedes andere
 # Schema oder gar keines (`${H}://evil.test`) mit zwei oder mehr `/`/`\`. Schema-Länge begrenzt (linear). Die Authority (Text bis `/ ? #` oder Whitespace) wird in zwei Lesarten gelesen: eng

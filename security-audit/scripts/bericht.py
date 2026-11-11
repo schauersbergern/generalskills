@@ -41,6 +41,8 @@ KONTEXT_BUDGET = 300      # Sekunden für `kontext` insgesamt (SECURITY_AUDIT_KO
 _ID = re.compile(r"S-[1-9][0-9]{0,8}")
 _KATEGORIE = re.compile(r"A(0[1-9]|10)")
 _ZEILE_IM_PFAD = re.compile(r"(:[0-9]+(:[0-9]+)?|#L[0-9]+(C[0-9]+)?(-L?[0-9]+(C[0-9]+)?)?)\Z")
+_OWASP_KI = re.compile(r"(ASI|LLM)(0[1-9]|10)")
+MAX_OWASP_KI = 3
 _COMMIT = re.compile(r"[0-9a-f]{7,64}")
 _CODE_PFAD = re.compile(r"(.+):([1-9][0-9]*)", re.DOTALL)
 
@@ -346,6 +348,18 @@ def _befund_fehler(b: dict, label: str, teilpfad: str | None = None) -> list[str
         if feld in b and type(b[feld]) is not bool:
             fehler(feld, "muss true oder false sein")
 
+    if "owasp_ki" in b:
+        ids = b["owasp_ki"]
+        if not (isinstance(ids, list) and 1 <= len(ids) <= MAX_OWASP_KI
+                and all(isinstance(x, str) and _OWASP_KI.fullmatch(x) for x in ids) and len(set(ids)) == len(ids)):
+            fehler("owasp_ki", f"muss eine Liste von 1 bis {MAX_OWASP_KI} verschiedenen IDs aus ASI01 bis ASI10 "
+                               f"oder LLM01 bis LLM10 sein, ist {_t(ids)!r}")
+    if "annahme_modell" in b:
+        if type(b["annahme_modell"]) is not bool:
+            fehler("annahme_modell", "muss true oder false sein")
+        elif b["annahme_modell"] and status != "bestätigt":
+            fehler("annahme_modell", "true ist nur mit status bestätigt erlaubt")
+
     if "poc" in b:
         if msg := _text_fehler(b["poc"], False):
             fehler("poc", msg)
@@ -489,11 +503,14 @@ def markdown(daten: dict) -> str:
     if gelistet:
         z += ["", "## Befunde im Detail"]
         for b in gelistet:
+            anzeige = status(b) + (" (Modell-Mock, Annahme: Modell folgt)" if b.get("annahme_modell") is True else "")
             z += ["", f"### {b['id']} [{b['stufe']}] {b['titel']}", "",
-                  f"- Status: {status(b)}", f"- Ort: {_ort(b)}", f"- Kategorie: {b['kategorie']}",
+                  f"- Status: {anzeige}", f"- Ort: {_ort(b)}", f"- Kategorie: {b['kategorie']}",
                   f"- Ohne Anmeldung: {'ja' if b['ohne_anmeldung'] else 'nein'}",
-                  f"- Mandantenübergreifend: {'ja' if b['mandantenuebergreifend'] else 'nein'}",
-                  "", "Beschreibung:"] + _block(b["beschreibung"])
+                  f"- Mandantenübergreifend: {'ja' if b['mandantenuebergreifend'] else 'nein'}"]
+            if b.get("owasp_ki"):
+                z.append(f"- OWASP KI: {', '.join(b['owasp_ki'])}")
+            z += ["", "Beschreibung:"] + _block(b["beschreibung"])
             if b.get("poc"):
                 z += ["", "PoC:"] + _block(b["poc"])
             if b.get("commits"):

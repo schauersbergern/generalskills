@@ -655,6 +655,88 @@ def test_markdown_pakete_escaped_backticks_und_leere_advisories():
     assert "Pakete: a\\`b@1" in md and "()" not in md
 
 
+# ------------------------------------------------------------------------------------ KI-Felder (TF3)
+
+def ki_befund(**kw):
+    return befund(owasp_ki=["ASI01", "LLM02"], annahme_modell=True, **kw)
+
+
+def test_schema_owasp_ki_gueltig():
+    for ids in (["ASI01"], ["ASI10", "LLM01", "LLM10"], ["LLM05"], ["ASI01", "ASI02", "ASI03"]):
+        assert bericht.pruefe_schema(mit(befund(owasp_ki=ids))) == [], ids
+    assert bericht.pruefe_schema(mit(ki_befund())) == []
+
+
+@pytest.mark.parametrize("ids", [
+    ["ASI00"], ["ASI11"], ["LLM00"], ["LLM11"], ["asi01"], ["ASI1"], ["ASI01 "], ["OWASP01"], ["A01"],      # falsche ID
+    [],                                                                                                   # leer
+    ["ASI01", "ASI02", "ASI03", "ASI04"],                                                                 # 4 IDs
+    ["ASI01", "ASI01"], ["ASI01", "LLM01", "ASI01"],                                                      # Duplikat
+    [1], [None], [["ASI01"]], [True], ["ASI01", 2],                                                       # Nicht-String
+    "ASI01", None, {"ASI01": 1}, 1])                                                                      # keine Liste
+def test_schema_owasp_ki_ungueltig(ids):
+    f = bericht.pruefe_schema(mit(befund(owasp_ki=ids)))
+    assert any("S-1" in x and "owasp_ki" in x for x in f), f
+
+
+@pytest.mark.parametrize("wert", ["true", 1, 0, None, "ja", [True]])
+def test_schema_annahme_modell_kein_bool(wert):
+    f = bericht.pruefe_schema(mit(befund(annahme_modell=wert)))
+    assert any("S-1" in x and "annahme_modell" in x for x in f), f
+
+
+def test_schema_annahme_modell_false_immer_ok():
+    for status in ("bestätigt", "unbestätigt", "verworfen", "verdacht"):
+        b = befund(status=status, annahme_modell=False)
+        if status == "unbestätigt":
+            b["code_pfad"] = ["src/a.js:1", "src/b.js:2"]
+        if status == "verworfen":
+            b["grund"] = "g"
+        assert bericht.pruefe_schema(mit(b)) == [], status
+
+
+@pytest.mark.parametrize("status", ["unbestätigt", "verworfen", "verdacht"])
+def test_schema_annahme_modell_true_nur_mit_bestaetigt(status):
+    b = befund(status=status, annahme_modell=True, code_pfad=["src/a.js:1", "src/b.js:2"], grund="g")
+    f = bericht.pruefe_schema(mit(b))
+    assert any("S-1" in x and "annahme_modell" in x and "bestätigt" in x for x in f), f
+
+
+def test_schema_annahme_modell_true_status_nfd_ist_bestaetigt():
+    import unicodedata
+    b = befund(status=unicodedata.normalize("NFD", "bestätigt"), annahme_modell=True)
+    assert not any("annahme_modell" in x for x in bericht.pruefe_schema(mit(b)))
+
+
+def test_schema_ki_felder_optional():
+    b = befund()
+    assert "owasp_ki" not in b and "annahme_modell" not in b
+    assert bericht.pruefe_schema(mit(b)) == []
+
+
+def test_markdown_owasp_ki_detailzeile():
+    md = bericht.markdown(mit(befund(owasp_ki=["ASI01", "ASI02"])))
+    assert "- OWASP KI: ASI01, ASI02" in md.splitlines()
+    assert bericht.markdown(beispiel()).count("OWASP KI") == 0
+
+
+def test_markdown_annahme_modell_statusanzeige():
+    md = bericht.markdown(mit(ki_befund()))
+    assert "- Status: bestätigt (Modell-Mock, Annahme: Modell folgt)" in md.splitlines()
+    ohne = bericht.markdown(mit(befund(annahme_modell=False)))
+    assert "- Status: bestätigt" in ohne.splitlines() and "Modell-Mock" not in ohne
+    nur_ids = bericht.markdown(mit(befund(owasp_ki=["ASI01"])))
+    assert "Modell-Mock" not in nur_ids
+
+
+def test_markdown_ki_felder_lassen_befundliste_unveraendert():
+    basis = codeblock(bericht.markdown(mit(befund())))
+    mit_ki = codeblock(bericht.markdown(mit(ki_befund())))
+    assert mit_ki == basis
+    block = "\n".join(mit_ki)
+    assert "OWASP" not in block and "Modell-Mock" not in block and "ASI01" not in block
+
+
 def test_schema_unbekannte_felder_erlaubt():
     d = beispiel()
     d["extra"] = {"x": 1}
