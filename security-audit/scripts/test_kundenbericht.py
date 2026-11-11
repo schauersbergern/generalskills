@@ -2035,6 +2035,14 @@ def test_json_wird_ueber_den_gesperrten_deskriptor_gelesen_r1_4(tmp_path, monkey
     assert not os.path.exists(kunde_pfad(pfad, "md"))
 
 
+def test_eingabe_namens_nur_endung_exit5_nichts_geschrieben_r1_6(tmp_path):
+    """R1-6: `<ordner>/.json` hat keinen Basisnamen; der Lauf schriebe `<ordner>/-kunde.md`. Geprüft wird der Dateiname, nicht der ganze Pfad."""
+    pfad = schreibe(tmp_path / "out", bericht_daten(), name=".json")
+    p = lauf(pfad)
+    assert p.returncode == 5 and zeilen(p) == ["kategorie: eingabe", "Die Eingabedatei muss auf .json enden."], p.stdout + p.stderr
+    assert inhalt(tmp_path / "out") == [".json"]
+
+
 # ------------------------------------------------------------------------------------ TF4 Härtung: Mutationsproben (Lücken geschlossen)
 
 @pytest.mark.parametrize("abkuerzung", ["--js", "--jso"])

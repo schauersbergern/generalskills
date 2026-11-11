@@ -80,7 +80,7 @@ def _lstat(pfad: str) -> os.stat_result | None:
 def _pfade_pruefen(pfad: str) -> tuple[str, str]:
     """Pfadprüfung der Eingabe (R2-K-6): Endung, reguläre Datei, kein Symlink, keine Kollision mit einem Audit mit Teilpfad `kunde`,
     Ziele kein Symlink und keine Nicht-Datei. Gibt (md, pdf) zurück. Verändert nichts."""
-    if not pfad.endswith(".json") or pfad == ".json":
+    if not pfad.endswith(".json") or os.path.basename(pfad) == ".json":
         raise Abbruch(5, "eingabe", ["Die Eingabedatei muss auf .json enden."])
     st = _lstat(pfad)
     if st is None:
