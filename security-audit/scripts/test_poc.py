@@ -1113,6 +1113,41 @@ def test_start_befehl_env_leert_umgebung_exit2_review_r1_7(umg, tmp_path, befehl
     assert starten_mit_befehl(umg, befehl).returncode == 0
 
 
+@pytest.mark.parametrize("befehl", ["env -u X -i node server.js", "env -C . -i node server.js", "env -u X -vi node server.js",
+                                    "env -S'-i node' server.js", "env --unset X -i node server.js", "env --chdir=. -i node server.js",
+                                    "env -uX -i node server.js", "env -u X - node server.js", "env -u X --ignore-environment node server.js"])
+def test_start_befehl_env_leert_umgebung_hinter_option_mit_argument_review_r2(umg, tmp_path, befehl):
+    """Review R2 (R1-7 Rest): `-i`, `-` und `--ignore-environment` an beliebiger Stelle der env-Optionen, auch hinter `-u X`, `-C dir`, `-S str`."""
+    vorbereitet(umg, tmp_path)
+    r = starten_mit_befehl(umg, befehl, "--modell-mock", "openai")
+    assert r.returncode == 2 and "leert die Umgebung" in r.stderr and "node server.js" not in r.stderr, (befehl, r.stderr)
+    assert umg.aufrufe() == []
+
+
+@pytest.mark.parametrize("befehl", ["env -u X node server.js", "env -C . node server.js", "env -u X FOO=1 -i node server.js",
+                                    "env -S'node -r x' server.js", "env -u i node server.js", "env -ui node server.js",
+                                    "npm run start", "env NODE_ENV=production node server.js", "read -r line; printf '%s' x"])
+def test_start_befehl_env_optionen_ohne_leeren_erlaubt_review_r2(umg, tmp_path, befehl):
+    vorbereitet(umg, tmp_path)
+    r = starten_mit_befehl(umg, befehl, "--modell-mock", "openai")
+    assert r.returncode == 0, (befehl, r.stdout + r.stderr)
+
+
+@pytest.mark.parametrize("muster", ["export -n A\n", "export -n a ", "unset ", "env -u ", "read ", "for ", "printf -v ", "declare -n x=", "env ",
+                                    "env -i -u ", "typeset +x ", "export A=1 ", "x" * 50 + " "])
+def test_start_befehl_pruefung_ist_linear_review_r2(muster):
+    """Review R2-2: Die Prüfung läuft vor jedem Zeitbudget; lange Befehle (2000 bis 4000 Wiederholungen, mit und ohne Zeilenumbruch, auch
+    gemischt mit anderen Zeilen) brauchen weniger als eine Sekunde (vorher bis zu 37 s bei 400 Zeilen)."""
+    import time
+    for befehl in (muster * 3000, muster * 2000 + "export B=1\n" * 2000, "node s.js " + muster * 2000 + "; node t.js"):
+        t0 = time.monotonic()
+        try:
+            poc._start_befehl_pruefen(befehl, ["openai"])
+        except poc.PocFehler:
+            pass                                                # gefunden ist in Ordnung, es zählt die Laufzeit
+        assert time.monotonic() - t0 < 1.0, (muster, len(befehl))
+
+
 @pytest.mark.parametrize("befehl", ["env FOO=1 node server.js", "env -u FOO node server.js", "node server.js -i", "node server.js --env -i",
                                     "environment -i x", "env -C /app node server.js"])
 def test_start_befehl_env_ohne_leeren_erlaubt_review_r1_7(umg, tmp_path, befehl):

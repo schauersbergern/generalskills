@@ -113,19 +113,118 @@ MOCK_RESERVIERT = frozenset({name for paare in MOCK_ENV.values() for name, _ in 
 _RESERVIERT_NAMEN = "|".join(sorted(MOCK_RESERVIERT))
 # `NAME=` und `NAME+=` (Anhängen), mit Wortgrenze davor (`NEXT_PUBLIC_OPENAI_BASE_URL=` ist ein anderer Name).
 MOCK_RESERVIERT_RE = re.compile(r"(?<![A-Za-z0-9_])(" + _RESERVIERT_NAMEN + r")\+?=", re.IGNORECASE)
-# Aufheben statt Setzen: `unset … NAME` (im selben Befehl, nicht über `;`, `&`, `|`, Zeilenende hinweg), `env -u NAME` (auch gruppiert: `-vu`),
-# `--unset NAME`.
-MOCK_ENTFERNT_RE = re.compile(r"(?<![A-Za-z0-9_])(?:unset\b[^;&|\n]*?\s|(?<![\w-])-[A-Za-z]*u\s*|--unset[=\s]\s*)(" + _RESERVIERT_NAMEN + r")(?![A-Za-z0-9_])",
-                              re.IGNORECASE)
-# Weitere Formen, die einen Namen setzen, überschreiben oder aus dem Export nehmen (Review R1-7): `read [-r] NAME`, `for NAME in`, `printf -v NAME`,
-# `export -n NAME`, `typeset +x NAME` und `declare|typeset|local -n ref=NAME` (Namensreferenz).
-_TOKEN = r"[^;&|\s]+\s+"
-MOCK_WEITERE_RE = re.compile(
-    r"(?<![A-Za-z0-9_])(?:read\b[^;&|\n]*?\s|for\s+|printf\s+(?:" + _TOKEN + r")*?-v\s*"
-    r"|(?:export|typeset|declare|local)\s+(?:" + _TOKEN + r")*?(?:-[A-Za-z]*n[A-Za-z]*|\+[A-Za-z]*x[A-Za-z]*)\s+(?:" + _TOKEN + r")*?(?:[^;&|\s=]+=)?"
-    r")(" + _RESERVIERT_NAMEN + r")(?![A-Za-z0-9_])", re.IGNORECASE)
-# `env -i`, `env -` und `env --ignore-environment` leeren die Umgebung samt der Mock-Variablen.
-MOCK_ENV_LEER_RE = re.compile(r"(?<![A-Za-z0-9_.-])env(?:\s+-\S+)*?\s+(?:-[A-Za-z]*i[A-Za-z]*|-|--ignore-environment)(?=[\s;&|]|$)")
+# Alles andere, was einen Namen aufhebt, überschreibt oder die Umgebung leert, erkennt `_segment_umgehung` an den Wörtern eines einfachen Befehls
+# (ein Durchgang, linear; die Prüfung läuft vor jedem Zeitbudget): `unset … NAME`, `env -u NAME` (auch gruppiert), `--unset NAME`, `read NAME`,
+# `for NAME in`, `printf -v NAME`, `export -n NAME`, `typeset +x NAME`, `declare -n x=NAME` und `env -i`.
+_NAME_ANFANG_RE = re.compile("(" + _RESERVIERT_NAMEN + r")(?![A-Za-z0-9_])", re.IGNORECASE)
+_SEGMENT_TRENNER_RE = re.compile(r"[;&|\n]")
+_DEKLARATION_FLAG_RE = re.compile(r"-[A-Za-z]*n[A-Za-z]*|\+[A-Za-z]*x[A-Za-z]*")     # export -n, typeset +x, declare -n (Namensreferenz)
+_OPTION_BUCHSTABEN_RE = re.compile(r"-([A-Za-z]*)")
+_ENV_WORT_RE = re.compile(r"(?:.*/)?env")
+_ENV_KURZ_MIT_ARGUMENT = frozenset("uCPL")                                           # `env -u NAME`, `-C DIR`, `-P PATH`, `-L`
+_ENV_LANG_MIT_ARGUMENT = frozenset({"--unset", "--chdir", "--split-string", "--argv0", "--default-signal", "--ignore-signal",
+                                    "--block-signal"})
+_WORT_ANFANG = "$`({!"                                                               # `$(env -i …)`, `(read X)`, `! unset X`
+_FLAG_LAENGE_MAX = 16                                                                # längere Wörter sind keine Optionsbündel (Laufzeit)
+
+
+def _name_am_anfang(wort: str, pos: int = 0) -> str | None:
+    m = _NAME_ANFANG_RE.match(wort, pos)
+    return m.group(1) if m else None
+
+
+def _segment_umgehung(tokens: list[str]) -> str | None:
+    """Ein einfacher Befehl (Wörter ohne `;`, `&`, `|`, Zeilenende), ein Durchgang über die Wörter. Rückgabe: der gesperrte Name,
+    `""` für `env -i` (leert die Umgebung) oder None."""
+    nach_unset = nach_read = nach_printf = False
+    deklaration: bool | None = None          # None: kein export/typeset/declare/local; False: gesehen; True: danach `-n` oder `+x`
+    erwarte_name = False                     # das nächste Wort ist ein Name: `-u`, `--unset`, `printf -v`, `for`
+    for roh in tokens:
+        w = roh.lstrip(_WORT_ANFANG)
+        treffer = None
+        if erwarte_name or nach_unset or nach_read:
+            treffer = _name_am_anfang(w)
+        erwarte_name = False
+        if treffer is None and deklaration:
+            treffer = _name_am_anfang(w, w.find("=") + 1)
+        if treffer:
+            return treffer
+        if w == "unset":
+            nach_unset = True
+        elif w == "read":
+            nach_read = True
+        elif w == "printf":
+            nach_printf = True
+        elif w == "for":
+            erwarte_name = True
+        elif w in ("export", "typeset", "declare", "local"):
+            deklaration = False
+        elif deklaration is False and len(w) <= _FLAG_LAENGE_MAX and _DEKLARATION_FLAG_RE.fullmatch(w):
+            deklaration = True
+        if nach_printf and w.startswith("-v"):
+            if len(w) == 2:
+                erwarte_name = True
+            elif (treffer := _name_am_anfang(w, 2)):
+                return treffer
+        if w == "--unset":
+            erwarte_name = True
+        elif w.startswith("--unset="):
+            treffer = _name_am_anfang(w, len("--unset="))
+            if treffer:
+                return treffer
+        elif len(w) > 1 and w[0] == "-" and w[1] != "-":                       # Optionsbündel: `-u NAME`, `-uNAME`, `-vu NAME`
+            for j, b in enumerate(_OPTION_BUCHSTABEN_RE.match(w).group(1)):
+                if b != "u":
+                    continue
+                if 2 + j == len(w):
+                    erwarte_name = True
+                elif (treffer := _name_am_anfang(w, 2 + j)):
+                    return treffer
+    return _env_leert_umgebung(tokens)
+
+
+def _env_leert_umgebung(tokens: list[str]) -> str | None:
+    """`""` bei `env -i`, `env -` oder `env --ignore-environment` an beliebiger Stelle der env-Optionen: Optionen mit Argument (`-u X`, `-C dir`,
+    `--unset X`) werden übersprungen, der Rest eines `-S…`-Bündels wird weitergelesen. Die Optionen enden am ersten Wort ohne `-` (Befehl
+    oder `NAME=wert`); das Wort `env` unter den bereits gelesenen Optionen ist ein Argument und startet keine zweite Suche."""
+    k = 0
+    while k < len(tokens):
+        if not _ENV_WORT_RE.fullmatch(tokens[k].lstrip(_WORT_ANFANG)):
+            k += 1
+            continue
+        k += 1
+        zurueck: list[str] = []                                                # Rest eines `-S…`-Bündels, noch zu lesen
+        while zurueck or k < len(tokens):
+            if zurueck:
+                w = zurueck.pop()
+            else:
+                w = tokens[k]
+                k += 1
+            if w == "-" or w == "--ignore-environment":
+                return ""
+            if w.startswith("--"):
+                if w in _ENV_LANG_MIT_ARGUMENT:
+                    k += 1
+                continue
+            if not w.startswith("-"):
+                break
+            kurz = w[1:]
+            for j, b in enumerate(kurz[:_FLAG_LAENGE_MAX]):
+                if b == "i":
+                    return ""
+                if b == "S":
+                    if len(kurz) > j + 1:
+                        zurueck.append(kurz[j + 1:])
+                    break
+                if b in _ENV_KURZ_MIT_ARGUMENT:
+                    if j + 1 == len(kurz):
+                        k += 1
+                    break
+                if not b.isalnum():
+                    break
+    return None
+
+
 _QUOTES_RE = re.compile(r"\\\r?\n|[\"'\\]")     # Zeilenfortsetzung, Anführungszeichen und Rückstrich: die Shell entfernt sie vor dem Lesen des Namens
 
 # Hinweis-Kategorien, die `bauen` ausgeben kann (`hinweis: <kategorie>`); SKILL.md und bericht-format.md nennen jede.
@@ -1052,11 +1151,15 @@ def _start_befehl_pruefen(befehl: str, modell_mock: list[str], option: str = "--
     `let`, `${NAME:=…}`): die Sperre ist das interne Netz, nicht diese Prüfung."""
     if modell_mock:
         for text in (befehl, _QUOTES_RE.sub("", befehl)):
-            m = MOCK_RESERVIERT_RE.search(text) or MOCK_ENTFERNT_RE.search(text) or MOCK_WEITERE_RE.search(text)
+            m = MOCK_RESERVIERT_RE.search(text)
             if m:
                 raise PocFehler(f"{option}: reservierter Name {m.group(1)} bei --modell-mock")
-            if MOCK_ENV_LEER_RE.search(text):
-                raise PocFehler(f"{option}: env -i leert die Umgebung samt der Mock-Variablen bei --modell-mock")
+            for segment in _SEGMENT_TRENNER_RE.split(text):
+                r = _segment_umgehung(segment.split())
+                if r:
+                    raise PocFehler(f"{option}: reservierter Name {r} bei --modell-mock")
+                if r is not None:
+                    raise PocFehler(f"{option}: env -i leert die Umgebung samt der Mock-Variablen bei --modell-mock")
     fremd = netzregel.url_verstoesse(befehl)
     if fremd:
         raise PocFehler(f"{option}: nicht erlaubter Host {_entschaerfen(fremd[0])[:100]}")
