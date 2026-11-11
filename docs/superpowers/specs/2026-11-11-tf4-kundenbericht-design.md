@@ -1,6 +1,6 @@
 # Spec TF4: Kundenbericht (Markdown und PDF)
 
-Stand: Entwurf vor Spec-Review R1. Feature-File `docs/features/2026-11-09-security-audit.md`, Abschnitt TF4 (DoD TF4-D1 bis TF4-D8). Branch `skills/audit-kundenbericht`, gestapelt auf `skills/audit-ki` (TF3, PR #13).
+Stand: nach Spec-Review R1 (1/12/16). **Die „Nachträge nach Spec-Review R1“ am Ende haben Vorrang vor dem Text darüber.** Feature-File `docs/features/2026-11-09-security-audit.md`, Abschnitt TF4 (DoD TF4-D1 bis TF4-D8). Branch `skills/audit-kundenbericht`, gestapelt auf `skills/audit-ki` (TF3, PR #13).
 
 ## Ziel
 
@@ -167,3 +167,97 @@ Nur Standardbibliothek. Kindprozesse (`pandoc`, `weasyprint`) laufen über eigen
 - Vorfall 2026-11-10: Signale gehen nur an selbst gestartete Gruppen; keine Mutationsproben an Signal-, Kill- oder Lösch-Logik.
 - pandoc und weasyprint laden nie Netzressourcen und keine Dateien außerhalb des eigenen Temp-Ordners (Sandbox und HTML-Prüfung).
 - Öffentliches Repo: keine Kundendaten in Tests oder Beispielen.
+
+## Nachträge nach Spec-Review R1 (Vorrang vor dem Text oben)
+
+**B1 Du-Prüfung**
+- Geprüft wird nur auf `zusammenfassung` und `massnahme`, wie im DoD. `titel`, `projekt` und `repo` bleiben ungeprüft, weil das Modell sie im Korrekturschritt nicht ändern darf.
+- Die Formen stehen als feste Liste fest: `du`, `dich`, `dir`, `dein`, `deine`, `deinen`, `deinem`, `deiner`, `deines`, `euch`, `euer`, `eure`, `euren`, `eurem`, `eurer`, `eures`.
+- Grenzen: `(?<![\w./@-])` vorn und `(?![\w./@-])` hinten, ohne Beachtung der Groß- und Kleinschreibung. „deinstallieren“, „Eureka“ und `dir-glob` lösen damit nichts aus.
+- Die Meldung nennt Befund-ID, Feld und das gefundene Wort, kein Kontext.
+- **W12:** Imperative in Du-Form („Aktualisiere …“) sind statisch nicht erkennbar. Abhilfe schafft eine Schreibregel mit festem Satzmuster („Aktualisieren Sie …“ bzw. „Wir empfehlen, …“). Das Beispiel-JSON in `bericht-format.md` zeigt das Muster.
+
+**W1 weasyprint**
+- Aufruf mit `--allowed-protocols ''`, damit keine Protokolle erlaubt sind; das eigene CSS ist inline.
+- Enthält stderr `disallowed protocol`, `Failed to load` oder `Error`, gilt das als Exit 4 `pdf-fehler`, auch wenn weasyprint mit rc 0 endet.
+- Mindestversionen: weasyprint mit `--allowed-protocols` (Prüfung per `weasyprint --help`; fehlt die Option, Exit 4) und pandoc ≥ 2.15 für `--sandbox`. Beide stehen in SKILL.md und README.
+- Entscheidung 1 bleibt bei zwei Stufen, mit neuer Begründung: Die HTML-Prüfung ist eine zweite Schicht, `--allowed-protocols` die erste.
+
+**W2 HTML-Prüfung**
+- Statt einer Teilstring-Suche parst `html.parser` das HTML.
+- Erlaubte Tags: `html head meta title style body header main section footer h1 h2 h3 p ul li table thead tbody tr th td strong em code br hr div span`.
+- Attribute sind nur `class` und `id` sowie bei `meta` die Attribute `charset`, `name` und `content`.
+- Alles andere ergibt Exit 4 `pdf-fehler` mit Tag- bzw. Attributnamen, ohne Wert. Escapter Text (`&lt;img …&gt;`) ist kein Tag und deshalb erlaubt.
+
+**W3 Budget:** 90 s gesamt, verkürzbar über `SECURITY_AUDIT_KUNDE_BUDGET` (nur verkürzend). Davon höchstens 60 s für weasyprint.
+
+**W4/W5 Exploit-Spuren** (nur in `zusammenfassung` und `massnahme`)
+- Verboten sind:
+  - (a) jedes Token aus `poc` (Trenner Whitespace, Länge ≥ 8, ohne Allerweltswörter wie `python3`, `poc.py`, `anfrage`, `--rolle`, `--lauf`, `--pfad`, `--methode`);
+  - (b) Muster `\b(GET|POST|PUT|PATCH|DELETE)\s+/`;
+  - (c) die Zeichen `{ } < > =` sowie Backticks;
+  - (d) `\S+:\d+` (z. B. `Dockerfile:6`), `#L\d+` und `Zeile \d+`;
+  - (e) jeder `code_pfad`-Eintrag und jeder `datei`-Pfad mit `/` als Teilstring, außer der eigenen `datei`-Zeile.
+- Die Meldung nennt Befund-ID, Feld, Regel (a bis e) und bei (a) die Token-Nummer im `poc`, nie den Text.
+- Falschpositiv-Tests: „Node 22“, „Port 3000“, „um 14:30 Uhr“ (erlaubt, weil `\S+:\d+` nur greift, wenn vor dem Doppelpunkt ein Punkt oder `/` steht) und „Version 4.17.21“.
+- Für (d) gilt deshalb `[\w-]*[./][\w./-]*:\d+`, `#L\d+` und `\bZeile\s+\d+`.
+- **W11:** Verboten sind außerdem `https?://`, `www.` und E-Mail-Muster in beiden Feldern und im Titel. Der Titel ist auf 120 Zeichen begrenzt; ist er länger, wird er gekürzt und mit „…“ beendet.
+
+**W6 Nachweis-Texte je Herkunft**
+
+| Herkunft | Text |
+|---|---|
+| `werkzeug: osv-scanner` | „aus der Abhängigkeitsliste mit bekannten Sicherheitslücken abgeglichen“ |
+| `werkzeug: gitleaks` | „Zugangsschlüssel in der Versionsgeschichte gefunden (Wert nicht wiedergegeben)“ |
+| `werkzeug: lieferkette` | „aus der Build- und Installationskonfiguration abgeleitet“ |
+| sonst | wie oben (nachgestellt, Annahme, abgeleitet) |
+
+**W7 Management-Zusammenfassung**
+- Jede Stufe hat einen eigenen Baustein für Singular und Plural.
+- „ausnutzbar“ erscheint nur bei `bestätigt`. Für `unbestätigt` heißt es „mögliche Schwachstelle“.
+- Kritisch: „umgehend beheben“ (K13).
+- Satz für den Fall ohne Befunde: Er erscheint nur, wenn `bericht.hinweise` keinen Hinweis auf eine eingeschränkte Prüfung trägt. Eingeschränkt heißt: `gitleaks fehlt`, `osv-scanner fehlt`, `docker-fehlt`, „Zeitbudget“, „nicht geschwärzt“ oder „ki.py erkennen fehlgeschlagen“.
+- Bei eingeschränkter Prüfung steht stattdessen: „Die Prüfung war eingeschränkt (<Liste in Kundensprache>); das Ergebnis ist deshalb nicht vollständig.“
+
+**W8 Ablage**
+- Vor jedem Lauf werden ein bestehendes `-kunde.md` und `-kunde.pdf` entfernt (nur diese zwei Pfade, nur reguläre Dateien, kein Symlink).
+- Das PDF entsteht in einer Temp-Datei im Zielordner und wird per `os.replace` ersetzt.
+- Bei Exit 2 gibt es keine Kundendateien. Bei Exit 3/4 gibt es nur das Markdown.
+
+**W9 Eval-Verdrahtung**
+- `run_eval` übergibt `auswerten` die Inhalte von `*-kunde.md`, den Anfang des PDFs (8 Bytes) und `projekt` als `kunde={…}`.
+- `pruefe_ablage` schließt `-kunde.md` und `-kunde.pdf` aus der Zählung der technischen Berichte aus.
+- Das Fake-claude in `test_auswertung.py` schreibt `-kunde.md` und `-kunde.pdf` (Minimal-PDF `%PDF-1.7`), damit die bestehenden Lauf-Tests grün bleiben.
+- TF4-D6 gilt nur, wenn `kundenbericht: true` in der Erwartung steht.
+
+**W10 Name ohne `projekt`:** Neues optionales Kopffeld `ordner` mit dem Basename der Repo-Wurzel aus `bericht.py kontext`. `kontext` gibt `wurzel` bereits aus; die Hauptsession schreibt `ordner` ins JSON. Rangfolge für den Kopf: `projekt`, dann `ordner` (Hinweis „Name des Repository-Ordners“), dann `repo` (Hinweis „Name des Repositorys“). So bleibt das Entschiedene erfüllt.
+
+**Klein**
+- **K1 Escaping:** Die Menge `` \ ` * _ { } [ ] < > ! $ ^ ~ @ & | # `` wird mit Backslash escaped, gilt für alle Datenfelder und wird je Konstrukt getestet: `{…}`-Attribute, Bild, Link, Span, ATX-Schluss ` #` und HTML.
+- **K2 pandoc:**
+  - Eigenes `--template` (`scripts/kundenbericht.html5`) mit `lang="de"` und eigenem CSS inline.
+  - `pagetitle` statt `title`.
+  - Eingangsformat: `markdown-smart-auto_identifiers-yaml_metadata_block-pandoc_title_block-citations-tex_math_dollars-implicit_figures-raw_html-raw_attribute-raw_tex-header_attributes-bracketed_spans-fenced_divs-link_attributes`.
+  - Deutsche Anführungszeichen setzt der Text selbst.
+- **K3 Seitenzahl:** Der Opt-in-Test entpackt die Flate-Streams mit `zlib` und sucht `/Type /Pages … /Count`.
+- **K4 Größe:** `bericht.MAX_JSON_BYTES` übernehmen.
+- **K5 Exit-Codes:**
+  - Exit 2 nur bei Inhaltsfehlern, die per Feldkorrektur behebbar sind; die erste stdout-Zeile ist dann `kategorie: inhalt`.
+  - Eingabe- und Schreibfehler (Symlink, Lesen, Schema-Fehler außerhalb der zwei Felder) ergeben Exit 5 `kategorie: eingabe`; das Modell korrigiert dann nicht.
+- **K6:** Ist `datei` null, steht dort „gesamtes Projekt“.
+- **K7:** Status vor dem Filter NFC-normalisieren; IDs numerisch sortieren.
+- **K8:** Fehlende Werkzeuge über `poc.werkzeug_fehlt`. Kindprozesse über `gitkopie.werkzeug_ausfuehren`, mit eigener Umgebung ohne `*_PROXY`. Ist ein Werkzeug nicht startbar (`GitFehler`), gilt Exit 3.
+- **K9:**
+  - Grundregel 8: Bash-Liste um `kundenbericht.py` ergänzen.
+  - Aufrufzeile wörtlich `… kundenbericht.py erstellen --json <ausgabe_ordner>/<basisname>.json`.
+  - Eval-Regel `Bash(python3 -I {skill}/scripts/kundenbericht.py erstellen --json {ausgabe}/*)`.
+  - `gesehen` um `kundenbericht` ergänzen.
+  - README-Zeile und Dateiliste (TF4-D8).
+- **K10:** `--projekt` passt auf `[A-Za-z0-9][A-Za-z0-9 ._-]{0,59}`. Bei `--prompt-art text` hängt der Wert als „ mit projekt="…"“ an.
+- **K11:** Die Sicherheitsregel heißt jetzt „keine aus Daten bestimmten URLs oder Dateien“. Systemschriften und Fontconfig sind erlaubt.
+- **K13:**
+  - Werkzeugtitel für Secrets lauten „Zugangsschlüssel in der Versionsgeschichte“; die Schreibregel gilt für `zusammenfassung`.
+  - Die Schlussmeldung nennt die Kundendateien mit dem Satz „Vor Weitergabe lesen.“ und gegebenenfalls „Projektname fehlte“.
+- **K14:** Der Hinweis nach 2 gescheiterten Runden steht in der Schlussmeldung, nicht in `bericht.hinweise`.
+- **K15:** Die Schreibregel verbietet, `advisories[].zusammenfassung` (OSV-Text) zu übernehmen.
+- **K16:** Die Prüfungen auf Du-Formen, Exploit-Spuren, URLs und Länge laufen zusätzlich in `bericht.pruefe_schema`, sobald die Felder vorhanden sind. So reicht eine Korrekturschleife über `rendern`, und `kundenbericht.py` prüft danach erneut. Der Prüfcode wird geteilt, `kundenbericht.py` importiert ihn aus `bericht.py`.
