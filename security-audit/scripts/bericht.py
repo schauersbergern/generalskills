@@ -484,7 +484,11 @@ _DU_FORMEN = ("du", "dich", "dir", "dein", "deine", "deinen", "deinem", "deiner"
               "euch", "euer", "eure", "euren", "eurem", "eurer", "eures")
 # Grenzen nach Spec B1; am Ende darf ein Satzpunkt folgen (`dir.` am Satzende), nicht aber `.<Wortzeichen>` (`dir.json`)
 _DU = re.compile(r"(?<![\w./@-])(?:" + "|".join(_DU_FORMEN) + r")(?![\w/@-])(?!\.\w)", re.IGNORECASE)
-_REGEL_B = re.compile(r"\b(?:GET|POST|PUT|PATCH|DELETE)\s+/", re.IGNORECASE)
+# Request: HTTP-Methode vor einem Pfad (auch `POST-/api`) oder irgendein Pfad mit führendem Schrägstrich (R1-1; unabhängig vom `poc`).
+# `und/oder`, `24/7`, `TCP/IP`, `Lese-/Schreibrechte` und ` / ` haben ein Wortzeichen oder `-` vor dem Strich bzw. ein Leerzeichen danach.
+_REGEL_B_METHODE = r"\b(?:GET|POST|PUT|PATCH|DELETE)[\s-]+/"
+_REGEL_B = re.compile(_REGEL_B_METHODE + r"|(?<![\w/:-])/(?=[\w.~%@-])", re.IGNORECASE)
+_REGEL_B_KOPF = re.compile(_REGEL_B_METHODE, re.IGNORECASE)    # Kopfangaben (vom Nutzer benannt): nur der Request; ein Pfad darin ist Regel a oder frei
 _REGEL_C = re.compile(r"[{}<>=`]")
 _REGEL_C_TITEL = re.compile(r"[{}=`]")                  # im Titel sind `<` und `>` erlaubt (`name@1.2.3`, Vergleiche in Werkzeugtiteln)
 _D_LAUF = re.compile(r"(?<![\w./-])[\w./-]+")          # `Pfad:Zahl` ohne Backtracking: Lauf suchen, dann Zeichen danach prüfen
@@ -502,7 +506,7 @@ _MAX_POC = 10**6         # Zeichen je `poc`; ein längerer `poc` zählt wie zu v
 _MAX_SCHRITTE = 5_000_000  # Teilstring-Prüfungen der Regeln a, d und e je Bericht (~1 s); danach wie zu viele Token (fail-closed)
 ZU_VIELE_TOKEN = "zu viele Token zum Prüfen"
 _KUNDEN_DETAIL = {                                   # fester Text je Regel (außer `du` und `a` der Befundfelder), nie Treffertext
-    "a": "Text aus einem poc", "b": "HTTP-Methode mit Pfad", "c": "Sonderzeichen oder Backtick", "d": "Datei mit Zeilenangabe",
+    "a": "Text aus einem poc", "b": "Request oder Pfad mit Schrägstrich", "c": "Sonderzeichen oder Backtick", "d": "Datei mit Zeilenangabe",
     "e": "Dateipfad aus einem Befund", "url": "Webadresse", "email": "E-Mail-Adresse",
 }
 _KUNDEN_FELDER = (("zusammenfassung", KUNDEN_REGELN), ("massnahme", KUNDEN_REGELN),
@@ -691,7 +695,7 @@ def kunden_verstoesse(daten: object) -> list[tuple[str, str, str, str]]:
     `zusammenfassung`, `massnahme` (alle Regeln) und `titel` (alle außer `du`; bei `c` ohne `<` und `>`). Fehlende Felder meldet erst
     kundenbericht.py.
     Regeln (Werte von KUNDEN_REGELN): `du` Du-Form (detail: das Wort), `a` Token aus einem `poc` (detail: das Token, höchstens 60
-    Zeichen), `b` HTTP-Methode mit Pfad, `c` `{ } < > =` oder Backtick, `d` Datei mit Zeile (auch `Dockerfile:6`), `#L<n>`,
+    Zeichen), `b` Request (HTTP-Methode vor einem Pfad) oder Pfad mit führendem Schrägstrich, `c` `{ } < > =` oder Backtick, `d` Datei mit Zeile (auch `Dockerfile:6`), `#L<n>`,
     `Zeile <n>`, `e` Dateipfad oder `code_pfad`-Eintrag eines Befunds (ohne Ausnahme, auch die eigene `datei`), `url` Webadresse,
     `email` E-Mail-Adresse. Quellen für a, d und e sind alle Befunde unabhängig vom Status.
     `detail` ist bei b, c, d, e, url und email ein fester Text ohne Treffertext (die Exit-2-Zeile von kundenbericht.py darf ihn
@@ -717,8 +721,8 @@ def kunden_verstoesse(daten: object) -> list[tuple[str, str, str, str]]:
 
 def kopf_verstoesse(daten: object, felder: dict[str, object]) -> list[tuple[str, str, str]]:
     """Verstöße der Kopfangaben (Projektname, Teilpfad: `felder` Name -> Wert), die im Kundenbericht stehen, ohne durch
-    `kunden_verstoesse` zu laufen, als (feld, regel, detail). Nur die Regeln `a` (Token aus einem `poc`) und `b` (HTTP-Methode mit
-    Pfad): Namen und Pfade sind sonst frei (Punkte, Bindestriche, Leerzeichen, Zahlen, `&`). Nach NFKC wie die Befundfelder; ein Wert,
+    `kunden_verstoesse` zu laufen, als (feld, regel, detail). Nur die Regeln `a` (Token aus einem `poc`) und `b` (nur der Request: HTTP-Methode
+    vor einem Pfad): Namen und Pfade sind sonst frei (Punkte, Bindestriche, Leerzeichen, Zahlen, `&`). Nach NFKC wie die Befundfelder; ein Wert,
     der kein Text ist, bleibt außer Betracht. `detail` ist ein fester Text, nie der Wert und nie das Token. Fail-closed wie
     `kunden_verstoesse` (zu viele Token, zu langer `poc`, verbrauchtes Arbeitsbudget: Regel a mit dem Detail „zu viele Token zum
     Prüfen“); eine Ausnahme aus der Prüfung wird nicht verschluckt."""
@@ -736,7 +740,7 @@ def kopf_verstoesse(daten: object, felder: dict[str, object]) -> list[tuple[str,
             a = ZU_VIELE_TOKEN
         if a:
             aus.append((feld, "a", a))
-        if _REGEL_B.search(text):
+        if _REGEL_B_KOPF.search(text):
             aus.append((feld, "b", _KUNDEN_DETAIL["b"]))
     return aus
 

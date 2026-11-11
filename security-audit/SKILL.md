@@ -202,7 +202,7 @@ Das Skript schreibt `<basisname>-kunde.md` und `<basisname>-kunde.pdf` neben das
   - Legende der `regel`-Werte:
     - `du`: Du-Form, Detail ist das Wort (prüft `titel` nicht)
     - `a`: Text aus einem `poc`, Detail ist das Token
-    - `b`: HTTP-Methode mit Pfad
+    - `b`: Request oder Pfad mit Schrägstrich
     - `c`: Zeichen `{ } < > =` oder Backtick (im `titel` nur Backtick, `{ }` und `=`)
     - `d`: Datei mit Zeile, `#L…` oder „Zeile n“
     - `e`: Dateipfad oder Code-Pfad eines Befunds, auch der eigene

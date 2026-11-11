@@ -125,7 +125,8 @@ def test_5100_poc_token_mit_leck_exit2(tmp_path):
     pfad = schreibe(tmp_path / "out", bericht_daten(befund(poc=poc, massnahme=VORSPANN + "Die Stelle /api/orders/9 wird geändert.")))
     p = lauf(pfad)
     assert p.returncode == 2, p.stdout + p.stderr
-    assert zeilen(p) == ["kategorie: inhalt", "S-1 massnahme: Regel a (/api/orders/9)"] and p.stderr == ""
+    assert zeilen(p) == ["kategorie: inhalt", "S-1 massnahme: Regel a (/api/orders/9)",
+                         "S-1 massnahme: Regel b (Request oder Pfad mit Schrägstrich)"] and p.stderr == ""
     assert inhalt(tmp_path / "out") == [BASIS + ".json"]
 
 

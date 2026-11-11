@@ -1419,6 +1419,11 @@ def regeln(daten, feld=None):
     return [r for (_i, f, r, _d) in bericht.kunden_verstoesse(daten) if feld in (None, f)]
 
 
+def a_treffer(daten):
+    """Nur die Treffer der Regel a (ein Pfad mit Schrägstrich im Text ist seit R1-1 zusätzlich ein Treffer der Regel b)."""
+    return [t for t in bericht.kunden_verstoesse(daten) if t[2] == "a"]
+
+
 def test_kunden_regeln_konstante():
     assert bericht.KUNDEN_REGELN == ("du", "a", "b", "c", "d", "e", "url", "email")
 
@@ -1459,7 +1464,7 @@ def test_kunden_verstoesse_du_nur_in_den_kundenfeldern_nicht_im_titel():
 def test_kunden_verstoesse_a_token_aus_poc():
     for token in ("/api/orders/9", "org_id"):
         d = kd(massnahme=f"{KD_VORSPANN}Die Stelle {token} wird geändert.")
-        assert bericht.kunden_verstoesse(d) == [("S-1", "massnahme", "a", token)]
+        assert a_treffer(d) == [("S-1", "massnahme", "a", token)]
     d = kd(zusammenfassung=KD_ZUSAMMENFASSUNG + " Betroffen ist org_id.")
     assert bericht.kunden_verstoesse(d) == [("S-1", "zusammenfassung", "a", "org_id")]
 
@@ -1467,7 +1472,7 @@ def test_kunden_verstoesse_a_token_aus_poc():
 def test_kunden_verstoesse_a_token_ohne_satzzeichen_und_klammern():
     d = kd(massnahme=f"{KD_VORSPANN}Die Stelle /api/orders/9 wird geändert.",
            poc="poc.py (/api/orders/9), 'xx_yy_z'; fertig.")
-    assert [t[3] for t in bericht.kunden_verstoesse(d)] == ["/api/orders/9"]
+    assert [t[3] for t in a_treffer(d)] == ["/api/orders/9"]
     d = kd(massnahme=f"{KD_VORSPANN}Der Wert xx_yy_z wird geändert.", poc="poc.py (/api/orders/9), 'xx_yy_z'; fertig.")
     assert [t[3] for t in bericht.kunden_verstoesse(d)] == ["xx_yy_z"]
 
@@ -1530,13 +1535,13 @@ def test_kunden_verstoesse_a_woerter_mit_endung_und_und_oder_zaehlen_nicht_revie
                                    "poc.py", "passwd.txt", "wp-config.php", "id_rsa.pub", "Cmd.exe", "fs.unlink", "req.body"])
 def test_kunden_verstoesse_a_echte_token_treffen_weiterhin_review1_i1(token):
     d = kd(massnahme=f"{KD_VORSPANN}Die Stelle {token} wird geändert.", poc=f"anfrage {token} fertig")
-    assert regeln(d) == ["a"]
+    assert [t[2] for t in a_treffer(d)] == ["a"]
 
 
 def test_kunden_verstoesse_a_token_gekuerzt_auf_60_zeichen():
     lang = "/" + "a" * 79
     d = kd(massnahme=f"{KD_VORSPANN}Die Stelle {lang} wird geändert.", poc=f"poc.py {lang}")
-    treffer = bericht.kunden_verstoesse(d)
+    treffer = a_treffer(d)
     assert [t[:3] for t in treffer] == [("S-1", "massnahme", "a")]
     assert len(treffer[0][3]) <= 60 and treffer[0][3].startswith("/aaaa")
 
@@ -1771,7 +1776,7 @@ def test_kunden_verstoesse_5100_token_mit_leck_werden_gemeldet_review2_n1(capsys
     """TF4 Review 2 (N-1): die frühere Grenze von 5000 Token schaltete Regel a ab; jetzt wird auch bei 5100 Token das Leck gemeldet."""
     d = kd(massnahme=KD_VORSPANN + "Die Stelle /api/orders/9 wird geändert.", poc="x")
     d["befunde"][0]["poc"] = " ".join(f"/api/pfad/{i}" for i in range(5100)) + " /api/orders/9"
-    assert [t[1:] for t in bericht.kunden_verstoesse(d)] == [("massnahme", "a", "/api/orders/9")]
+    assert [t[1:] for t in a_treffer(d)] == [("massnahme", "a", "/api/orders/9")]
     assert capsys.readouterr().err == ""
 
 
@@ -2010,7 +2015,7 @@ def test_poc_ueber_1_mio_zeichen_ist_fail_closed_review2_n5_3():
     """TF4 Review 2 (N5-3): `poc[:10**6]` schnitt still ab, ein Leck hinter der Grenze blieb unbemerkt."""
     leck = " /api/geheim/pfad"
     d = kd(massnahme=KD_VORSPANN + "Die Stelle /api/geheim/pfad wird geändert.", poc=_poc_mit_ende(10**6, leck))
-    assert [t[1:] for t in bericht.kunden_verstoesse(d)] == [("massnahme", "a", "/api/geheim/pfad")]          # genau an der Grenze: geprüft
+    assert [t[1:] for t in a_treffer(d)] == [("massnahme", "a", "/api/geheim/pfad")]          # genau an der Grenze: geprüft
     d = kd(massnahme=KD_VORSPANN + "Ein harmloser Satz ohne Spuren.", poc=_poc_mit_ende(10**6 + 1, leck))
     assert [t[1:] for t in bericht.kunden_verstoesse(d)] == [("zusammenfassung", "a", "zu viele Token zum Prüfen"),
                                                               ("massnahme", "a", "zu viele Token zum Prüfen"),
@@ -2046,8 +2051,8 @@ def test_titel_gleichheitszeichen_bleibt_verboten_review2_n5_1(titel):
 
 def _poc_mit_praefix(n_befunde, tokens_je_poc):
     d = kd(poc="x")
-    d["befunde"] = [befund(id=f"S-{i}", datei=f"src/api/o{i}.ts", poc=" ".join(f"/api/orders/{i}/{j}" for j in range(tokens_je_poc)),
-                           zusammenfassung=("Die Seite /api/o ist betroffen. " * 20)[:590], massnahme=("Die Seite /api/o ist betroffen. " * 20)[:390],
+    d["befunde"] = [befund(id=f"S-{i}", datei=f"src/api/o{i}.ts", poc=" ".join(f"api/orders/{i}/{j}" for j in range(tokens_je_poc)),
+                           zusammenfassung=("Die Seite api/or ist betroffen. " * 20)[:590], massnahme=("Die Seite api/or ist betroffen. " * 20)[:390],
                            titel=f"Fehler Nummer {i}", code_pfad=[f"src/api/o{i}.ts:1", "src/l.ts:2"]) for i in range(1, n_befunde + 1)]
     return d
 
@@ -2066,8 +2071,8 @@ def test_gemeinsames_praefix_vieler_token_ist_begrenzt_review1_n3():
 
 def test_arbeitsbudget_greift_erst_bei_vielen_pruefschritten_review1_n3(monkeypatch):
     """Ein Schritt ist eine Teilstring-Prüfung: 20 Token mit gleichem Anfang, der im Text steht, kosten genau 20 Schritte."""
-    d = kd(poc=" ".join(f"/api/orders/{j}" for j in range(20)), datei="a.ts", code_pfad=["a.ts:1", "b.ts:2"],
-           zusammenfassung="Die Seite /api/o ist betroffen und braucht Aufmerksamkeit der Verantwortlichen.")
+    d = kd(poc=" ".join(f"api/orders/{j}" for j in range(20)), datei="a.ts", code_pfad=["a.ts:1", "b.ts:2"],
+           zusammenfassung="Die Seite api/or ist betroffen und braucht Aufmerksamkeit der Verantwortlichen.")
     assert bericht.kunden_verstoesse(d) == []                                                     # gewöhnliche Berichte: nie betroffen
     monkeypatch.setattr(bericht, "_MAX_SCHRITTE", 20)
     assert bericht.kunden_verstoesse(d) == []                                                     # genau verbraucht: noch geprüft
@@ -2113,12 +2118,12 @@ def test_kunden_verstoesse_zufallsdokumente_werfen_nie_haertung():
 def test_kunden_verstoesse_vollbreite_und_kompatibilitaetszeichen_zaehlen_wie_gewoehnliche_haertung():
     """Die Prüfung läuft nach NFKC: ein Leck in Vollbreiten-Zeichen (`／ａｐｉ／ｏｒｄｅｒｓ／９`, `ＧＥＴ ／ｘ`) oder mit Ligatur ist nicht mehr unsichtbar
     für die Regeln (früher NFC: nur gleiche Schreibweise traf)."""
-    assert regeln(kd(massnahme=KD_VORSPANN + "Die Stelle ／ａｐｉ／ｏｒｄｅｒｓ／９ wird geändert.")) == ["a"]
+    assert regeln(kd(massnahme=KD_VORSPANN + "Die Stelle ／ａｐｉ／ｏｒｄｅｒｓ／９ wird geändert.")) == ["a", "b"]
     assert regeln(kd(massnahme=KD_VORSPANN + "Rufen Sie ＧＥＴ ／status auf.")) == ["b"]
     assert regeln(kd(massnahme=KD_VORSPANN + "Es hilft ｄｉｒ nicht weiter.")) == ["du"]
     assert regeln(kd(massnahme=KD_VORSPANN + "Siehe Ｚｅｉｌｅ 4 im Code.")) == ["d"]
     assert regeln(kd(massnahme=KD_VORSPANN + "Siehe ｈｔｔｐｓ：／／ａ．ｄｅ im Netz.")) == ["url"]
-    assert [t[3] for t in bericht.kunden_verstoesse(kd(massnahme=KD_VORSPANN + "Die Stelle ／ａｐｉ／ｏｒｄｅｒｓ／９ wird geändert."))] == ["/api/orders/9"]
+    assert [t[3] for t in a_treffer(kd(massnahme=KD_VORSPANN + "Die Stelle ／ａｐｉ／ｏｒｄｅｒｓ／９ wird geändert."))] == ["/api/orders/9"]
     # Pfade und poc-Token in Kompatibilitätsschreibweise treffen ebenso
     assert regeln(kd(massnahme=KD_VORSPANN + "Betrifft ｓｒｃ／ａｐｉ／ｏｒｄｅｒｓ．ｔｓ im Code.")) == ["e"]
     assert regeln(kd(massnahme=KD_VORSPANN + "Betrifft den Parameter ｏｒｇ＿ｉｄ im Code.")) == ["a"]
@@ -2130,7 +2135,7 @@ def test_kopf_verstoesse_regeln_a_und_b_fuer_projekt_und_teilpfad_haertung():
     """Kopfangaben (Projektname, Teilpfad) stehen im Kundenbericht, ohne durch `kunden_verstoesse` zu laufen: ein poc-Token (Regel a) oder
     ein Request (Regel b) darin ist ein Verstoß; gewöhnliche Namen und Pfade nicht. Das Detail ist fest, nie Wert oder Token."""
     d = kd()
-    A, B = ("a", "Text aus einem poc"), ("b", "HTTP-Methode mit Pfad")
+    A, B = ("a", "Text aus einem poc"), ("b", "Request oder Pfad mit Schrägstrich")
     assert bericht.kopf_verstoesse(d, {"projekt": "Portal 2.0", "teilpfad": "apps/web/src"}) == []
     assert bericht.kopf_verstoesse(d, {"projekt": "Kundenportal Müller & Söhne", "teilpfad": "apps/api_v2"}) == []
     assert bericht.kopf_verstoesse(d, {"projekt": "/api/orders/9"}) == [("projekt", *A)]
@@ -2149,7 +2154,7 @@ def test_kopf_verstoesse_fail_closed_wie_bei_den_befundfeldern_haertung(monkeypa
     assert bericht.kopf_verstoesse(d, {"projekt": "Portal"}) == [fest]
     monkeypatch.setattr(bericht, "_MAX_SCHRITTE", 1)
     d = _poc_mit_praefix(2, 5)
-    assert bericht.kopf_verstoesse(d, {"projekt": "Die Seite /api/o"}) == [fest]
+    assert bericht.kopf_verstoesse(d, {"projekt": "Die Seite api/or"}) == [fest]
 
 
 def test_kopf_verstoesse_interner_fehler_wird_nicht_verschluckt_haertung(monkeypatch):
@@ -2186,3 +2191,40 @@ def test_rendern_warnung_genau_31_zeilen_haertung(tmp_path):
     pfad.write_text(json.dumps(d))
     p = lauf("rendern", str(pfad))
     assert p.stderr.count("Regel du") == 30 and "… und 1 weitere" in p.stderr
+
+
+# ------------------------------------------------------------------------------------ Review R1-1: Pfade mit Schrägstrich ohne poc
+
+@pytest.mark.parametrize("satz", [
+    "Der Endpunkt /api/orders liefert per GET-Anfrage fremde Bestellungen aus.",
+    "Ein POST-Request an /api/admin/users mit role admin legt Konten an.",
+    "Über den Pfad /api/orders/10 sind fremde Daten abrufbar.",
+    "Der Zugriff über POST-/api/orders ist möglich.",
+    "Der Pfad (/admin) ist offen.",
+])
+def test_regel_b_pfad_mit_fuehrendem_schraegstrich_ohne_poc_r1_1(satz):
+    """R1-1: Ein Pfad mit führendem Schrägstrich ist ein Verstoß gegen Regel b, auch wenn kein `poc` ihn enthält."""
+    d = kd(massnahme=KD_VORSPANN + satz, poc="--methode GET --pfad /api/orders/9")
+    assert "b" in regeln(d, "massnahme")
+    d = kd(zusammenfassung=KD_ZUSAMMENFASSUNG + " " + satz, poc="x")
+    assert "b" in regeln(d, "zusammenfassung")
+    assert "b" in [r for r, _ in bericht.text_verstoesse(satz)]
+
+
+@pytest.mark.parametrize("satz", [
+    "Wir empfehlen, und/oder die Rechte zu begrenzen.", "Der Dienst läuft rund um die Uhr (24/7).",
+    "Die Lese-/Schreibrechte sind zu eng zu fassen.", "Zugriff auf Ein-/Ausgabe nur für Mitarbeiter.",
+    "Verfügbarkeit von 99,9 % bei 1/2 der Kunden und TCP/IP.", "Das Verhältnis Nutzer / Administrator ändert sich.",
+])
+def test_regel_b_schraegstrich_im_fliesstext_bleibt_erlaubt_r1_1(satz):
+    d = kd(massnahme=KD_VORSPANN + satz, poc="x")
+    assert "b" not in regeln(d, "massnahme")
+    assert "b" not in [r for r, _ in bericht.text_verstoesse(satz)]
+
+
+def test_regel_b_funktionsname_ist_keine_maschinelle_regel_r1_1():
+    """R1-1: Bezeichner aus dem Code (camelCase, snake_case), die nicht im `poc` stehen, prüft das Skript nicht; `bericht-format.md` sagt das."""
+    d = kd(massnahme=KD_VORSPANN + "Die Funktion getOrderById prüft order_id nicht.", poc="x")
+    assert regeln(d, "massnahme") == []
+    doku = open(os.path.join(SKRIPTE, "..", "references", "bericht-format.md"), encoding="utf-8").read()
+    assert "Bezeichner aus dem Code prüft das Skript nur, wenn sie im `poc` stehen" in doku
