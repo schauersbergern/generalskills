@@ -614,15 +614,19 @@ def pruefe_hinweise(bericht: dict | None, erwartung: dict) -> list[str]:
 KUNDE_KOPF = "# Manibase · Sicherheitsprüfung"
 _KUNDE_MAX_MELDUNGEN = 5
 _MD_ESCAPE = re.compile(r"\\([\\`*_{}\[\]<>!$^~@&|#])")
+KUNDE_PDF_MIN = 1024        # Mindestgröße eines Kunden-PDF; ein `%PDF-1.7` mit nichts dahinter ist eine Attrappe (Review 5, Minor 1)
 _DATEI_ZAHL = re.compile(r"[\w./-]+\.[A-Za-z0-9]{1,8}:\d+\b|\b(?:Dockerfile|Makefile|Containerfile)[\w.-]*:\d+\b")
 
 
 def pruefe_kundenbericht(bericht: dict | None, kunde: dict | None) -> list[str]:
-    """TF4-D6: `kunde` (`{"md": str | None, "pdf_anfang": bytes | None, "projekt": str | None}`, von `run_eval.py`) ist da;
-    das Markdown beginnt mit dem Kopf und trägt bei gesetztem `projekt` den escapten Namen (`kundenbericht.escape`) in der
-    ersten Zeile; das PDF beginnt mit `%PDF`; `bericht.kunden_verstoesse` auf dem Bericht-JSON ist leer; im Markdown steht
-    kein `code_pfad`-Eintrag und kein `datei:zahl`. „Vorhanden“ heißt nicht `None`. Die Meldungen nennen nur die fehlende
-    Bedingung (bei Verstößen Befund, Feld und Regel), nie Text aus dem Markdown oder den Berichtfeldern."""
+    """TF4-D6: `kunde` (`{"md": str | None, "md_abgeschnitten": bool, "pdf_anfang": bytes | None, "pdf_groesse": int | None,
+    "pdf_ende": bytes | None, "projekt": str | None}`, von `run_eval.py`) ist da;
+    das Markdown beginnt mit dem Kopf, ist vollständig gelesen (`md_abgeschnitten` ist nicht wahr) und trägt bei gesetztem `projekt`
+    den escapten Namen (`kundenbericht.escape`) in der ersten Zeile; das PDF beginnt mit `%PDF`, ist mindestens `KUNDE_PDF_MIN` Bytes
+    groß und trägt `%%EOF` in den letzten 1024 Bytes (`pdf_ende`; fehlt eine der beiden Angaben, gilt das als nicht geprüft und ist
+    rot); `bericht.kunden_verstoesse` auf dem Bericht-JSON ist leer (scheitert die Prüfung selbst, ist das rot, nie „keine Verstöße“);
+    im Markdown steht kein `code_pfad`-Eintrag und kein `datei:zahl`. „Vorhanden“ heißt nicht `None`. Die Meldungen nennen nur die
+    fehlende Bedingung (bei Verstößen Befund, Feld und Regel), nie Text aus dem Markdown oder den Berichtfeldern."""
     if not isinstance(kunde, dict):
         return ["keine Kundendaten"]
     fehler: list[str] = []
@@ -638,13 +642,25 @@ def pruefe_kundenbericht(bericht: dict | None, kunde: dict | None) -> list[str]:
         elif isinstance(projekt, str) and projekt:
             if unicodedata.normalize("NFC", erste) != f"{KUNDE_KOPF} {kundenbericht.escape(unicodedata.normalize('NFC', projekt))}":
                 fehler.append("Kundenbericht: Projektname fehlt in der ersten Zeile (oder stimmt nicht, escapt erwartet)")
+        if kunde.get("md_abgeschnitten") is not False:
+            fehler.append("Kundenbericht (Markdown) größer als die Lesegrenze, nicht vollständig geprüft")
         fehler += _md_spuren(md, bericht)
     if pdf is None:
         fehler.append("Kundenbericht (PDF) fehlt")
     elif not isinstance(pdf, (bytes, bytearray)) or not bytes(pdf).startswith(b"%PDF"):
         fehler.append("Kundenbericht (PDF): beginnt nicht mit %PDF")
+    else:
+        groesse, ende = kunde.get("pdf_groesse"), kunde.get("pdf_ende")
+        if type(groesse) is not int or groesse < KUNDE_PDF_MIN:
+            fehler.append(f"Kundenbericht (PDF): kleiner als {KUNDE_PDF_MIN} Bytes (oder Größe unbekannt)")
+        if not isinstance(ende, (bytes, bytearray)) or b"%%EOF" not in bytes(ende):
+            fehler.append("Kundenbericht (PDF): %%EOF fehlt am Ende")
     if bericht is not None:
-        gefunden = bericht_schema.kunden_verstoesse(bericht)
+        try:
+            gefunden = bericht_schema.kunden_verstoesse(bericht)
+        except Exception as ex:  # noqa: BLE001 - die Prüfung selbst ist gescheitert: rot, nie „keine Verstöße“ (nur der Typ, kein Text)
+            fehler.append(f"Kundenprüfung nicht möglich ({type(ex).__name__})")
+            gefunden = []
         fehler += [f"{i} {feld}: Regel {regel}" for i, feld, regel, _detail in gefunden[:_KUNDE_MAX_MELDUNGEN]]
         if len(gefunden) > _KUNDE_MAX_MELDUNGEN:
             fehler.append(f"… und {len(gefunden) - _KUNDE_MAX_MELDUNGEN} weitere Verstöße der Kundenfelder")

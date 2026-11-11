@@ -33,7 +33,10 @@ MUSTER = ["fixture.invalid"]
 # Plan-Nachtrag R1 B2: fixture-web hat TF1-D1 bis D7 und wegen `ki_hinweis` TF3-D4; TF4 R1-W4: wegen `kundenbericht` auch TF4-D6
 DOD_WEB = {f"TF1-D{i}" for i in range(1, 8)} | {"TF3-D4", "TF4-D6"}
 # TF4-D6: Kundendaten, wie `run_eval` sie übergibt (Markdown mit Kopf ohne Projekt, PDF-Anfang)
-KUNDE_OK = {"md": "# Manibase · Sicherheitsprüfung Projekt\n\n**Datum:** 2026-11-10\n", "pdf_anfang": b"%PDF-1.7", "projekt": None}
+# (TF4 Härtung, Review 5 Minor 1: das PDF gilt erst mit Mindestgröße 1 KiB und `%%EOF` in den letzten 1024 Bytes)
+KUNDE_OK = {"md": "# Manibase · Sicherheitsprüfung Projekt\n\n**Datum:** 2026-11-10\n", "md_abgeschnitten": False, "pdf_anfang": b"%PDF-1.7",
+            "pdf_groesse": 35000, "pdf_ende": b"endobj\ntrailer\nstartxref\n123\n%%EOF\n", "projekt": None}
+KUNDE_LEER = {"md": None, "md_abgeschnitten": False, "pdf_anfang": None, "pdf_groesse": None, "pdf_ende": None, "projekt": None}
 # W6: Namen der Test-App `fixture-deps` dürfen im Skill-Text, in den references und im kopierten Skill nicht stehen
 VERBOTENE_NAMEN_TF2 = ("config/keys.js", "src/routes/vorlage.js", "_.template", "variable:", "lodash", "minimist")
 # R2 B1-neu: Namen und Marker der Test-App `fixture-ki` (dazu alle `dateien` der Erwartung außer generischen Namen) dürfen im
@@ -778,7 +781,7 @@ if modus in ("bericht", "docker_rest"):
     with open(os.path.join(ordner, "x-kunde.md"), "w", encoding="utf-8") as f:
         f.write("# Manibase · Sicherheitsprüfung " + name + "\\n")
     with open(os.path.join(ordner, "x-kunde.pdf"), "wb") as f:
-        f.write(b"%PDF-1.7\\n")
+        f.write(b"%PDF-1.7\\n" + b"x" * 2048 + b"\\n%%EOF\\n")
 if modus == "docker_rest":
     docker_rest()
 home = os.path.expanduser("~")
@@ -3067,6 +3070,48 @@ def test_auswertung_tf4_d6_pdf_fehlt_rot(bericht, erwartung, stream):
     assert alles(bericht, erwartung, stream, kunde=_kunde(pdf_anfang=b"%PDF-1.4"))["dod"]["TF4-D6"]["ok"] is True
 
 
+def test_auswertung_tf4_d6_pdf_attrappe_rot_review5_minor1(bericht, erwartung, stream):
+    """TF4 Review 5 (Minor 1): ein `%PDF-1.7` mit nichts dahinter ist kein PDF: Mindestgröße 1 KiB und `%%EOF` am Ende."""
+    for ueberschreibe, teil in ((dict(pdf_groesse=9), "kleiner"), (dict(pdf_groesse=1023), "kleiner"), (dict(pdf_ende=b"endobj\n"), "%%EOF"),
+                                (dict(pdf_ende=b""), "%%EOF"), (dict(pdf_ende=None), "%%EOF"), (dict(pdf_groesse=None), "kleiner"),
+                                (dict(pdf_groesse=True), "kleiner"), (dict(pdf_groesse="5000"), "kleiner")):
+        d = alles(bericht, erwartung, stream, kunde=_kunde(**ueberschreibe))["dod"]["TF4-D6"]
+        assert d["ok"] is False and any(teil in x and "PDF" in x for x in d["details"]), (ueberschreibe, d)
+    for fehlt in ("pdf_groesse", "pdf_ende"):                               # unbekannt heißt nicht geprüft: rot
+        kunde = _kunde()
+        del kunde[fehlt]
+        assert alles(bericht, erwartung, stream, kunde=kunde)["dod"]["TF4-D6"]["ok"] is False, fehlt
+    assert alles(bericht, erwartung, stream, kunde=_kunde(pdf_groesse=1024))["dod"]["TF4-D6"]["ok"] is True
+    assert alles(bericht, erwartung, stream, kunde=_kunde(pdf_ende=b"x" * 1019 + b"%%EOF"))["dod"]["TF4-D6"]["ok"] is True
+
+
+def test_auswertung_tf4_d6_markdown_abgeschnitten_rot_haertung(bericht, erwartung, stream):
+    """Ein Markdown über der Lesegrenze wäre nur teilweise auf Spuren geprüft: das sagt die Auswertung, statt still zu bestehen."""
+    d = alles(bericht, erwartung, stream, kunde=_kunde(md_abgeschnitten=True))["dod"]["TF4-D6"]
+    assert d["ok"] is False and any("Markdown" in x and "nicht vollständig geprüft" in x for x in d["details"])
+
+
+def test_auswertung_tf4_d6_pruefung_scheitert_ist_rot_haertung(bericht, erwartung, stream, monkeypatch):
+    """Scheitert `bericht.kunden_verstoesse` selbst, ist das nicht „keine Verstöße“ (früher gab es dann `[]` und der Eval bestand)."""
+    def kaputt(*_a, **_k):
+        raise RuntimeError("geheimer Text")
+    monkeypatch.setattr(bericht_schema, "_regex_treffer", kaputt)
+    d = alles(bericht, erwartung, stream)["dod"]["TF4-D6"]
+    assert d["ok"] is False and d["details"] == ["Kundenprüfung nicht möglich (RuntimeError)"]
+
+
+def test_auswertung_tf4_d6_code_pfad_ohne_zeile_im_md_review5_minor4(bericht, erwartung, stream):
+    """TF4 Review 5 (Minor 4): auch ein `code_pfad`-Eintrag ohne Zeile (Schema-Verstoß, aber Rohdaten) und sein escapter Name im
+    Markdown fallen auf; ohne diesen Test waren der `code_pfad`-Abgleich und das Entfernen der Backslashes ohne Wirkung."""
+    befund(bericht, "src/routes/projects.js")["code_pfad"] = ["src/a.js", "web/mein_modul.ts"]
+    kopf = KUNDE_OK["md"]
+    for zusatz in ("Stelle src/a.js im Code", "Stelle web/mein\\_modul.ts im Code"):
+        d = alles(bericht, erwartung, stream, kunde=_kunde(md=kopf + zusatz + "\n"))["dod"]["TF4-D6"]
+        assert d["ok"] is False and "Kundenbericht: Code-Pfad aus dem Bericht im Markdown" in d["details"], zusatz
+        assert not any("src/" in x or "modul" in x for x in d["details"])
+    assert alles(bericht, erwartung, stream, kunde=_kunde(md=kopf + "Stelle im Code\n"))["dod"]["TF4-D6"]["ok"] is True
+
+
 def test_auswertung_tf4_d6_md_fehlt_rot(bericht, erwartung, stream):
     e = alles(bericht, erwartung, stream, kunde=_kunde(md=None))
     assert e["dod"]["TF4-D6"]["ok"] is False and any("Markdown" in d for d in e["dod"]["TF4-D6"]["details"])
@@ -3163,11 +3208,20 @@ def test_run_eval_kunde_lesen(tmp_path):
     json_pfad = tmp_path / "b.json"
     (tmp_path / "b-kunde.md").write_text("# Manibase · Sicherheitsprüfung X\nümlaut\n", encoding="utf-8")
     (tmp_path / "b-kunde.pdf").write_bytes(b"%PDF-1.7\nrest rest rest")
-    assert run_eval._kunde_lesen(str(json_pfad), "X") == {"md": "# Manibase · Sicherheitsprüfung X\nümlaut\n",
-                                                          "pdf_anfang": b"%PDF-1.7", "projekt": "X"}
+    assert run_eval._kunde_lesen(str(json_pfad), "X") == {"md": "# Manibase · Sicherheitsprüfung X\nümlaut\n", "md_abgeschnitten": False,
+                                                          "pdf_anfang": b"%PDF-1.7", "pdf_groesse": 23,
+                                                          "pdf_ende": b"%PDF-1.7\nrest rest rest", "projekt": "X"}
     assert run_eval._kunde_lesen(None, None) is None                    # ohne Bericht-Pfad: kunde=None
     leer = run_eval._kunde_lesen(str(tmp_path / "andere.json"), None)
-    assert leer == {"md": None, "pdf_anfang": None, "projekt": None}    # fehlende Dateien: None
+    assert leer == KUNDE_LEER                                           # fehlende Dateien: None
+
+
+def test_run_eval_kunde_lesen_pdf_ende_und_groesse_haertung(tmp_path):
+    """Größe aus `fstat`, Ende = die letzten 1024 Bytes (Review 5, Minor 1)."""
+    (tmp_path / "p-kunde.pdf").write_bytes(b"%PDF-1.7\n" + b"a" * 5000 + b"\n%%EOF\n")
+    k = run_eval._kunde_lesen(str(tmp_path / "p.json"), None)
+    assert k["pdf_groesse"] == 9 + 5000 + 7 and len(k["pdf_ende"]) == 1024 and k["pdf_ende"].endswith(b"%%EOF\n")
+    assert k["pdf_anfang"] == b"%PDF-1.7"
 
 
 def test_run_eval_kunde_lesen_grenzen(tmp_path):
@@ -3175,16 +3229,23 @@ def test_run_eval_kunde_lesen_grenzen(tmp_path):
     (tmp_path / "ziel.txt").write_text("# geheim\n", encoding="utf-8")
     os.symlink(str(tmp_path / "ziel.txt"), str(tmp_path / "s-kunde.md"))
     os.symlink(str(tmp_path / "ziel.txt"), str(tmp_path / "s-kunde.pdf"))
-    assert run_eval._kunde_lesen(str(tmp_path / "s.json"), None) == {"md": None, "pdf_anfang": None, "projekt": None}
+    assert run_eval._kunde_lesen(str(tmp_path / "s.json"), None) == KUNDE_LEER
     os.mkdir(tmp_path / "v-kunde.md")
     os.mkdir(tmp_path / "v-kunde.pdf")
-    assert run_eval._kunde_lesen(str(tmp_path / "v.json"), None) == {"md": None, "pdf_anfang": None, "projekt": None}
+    assert run_eval._kunde_lesen(str(tmp_path / "v.json"), None) == KUNDE_LEER
+    os.mkfifo(tmp_path / "f-kunde.md")           # Review 5, Minor 5: keine Datei, nichts zu lesen, und es hängt nicht (kein Prozess, kein Signal)
+    os.mkfifo(tmp_path / "f-kunde.pdf")
+    assert run_eval._kunde_lesen(str(tmp_path / "f.json"), None) == KUNDE_LEER
     (tmp_path / "g-kunde.md").write_bytes(b"a" * (3 * 1024 * 1024))
-    assert len(run_eval._kunde_lesen(str(tmp_path / "g.json"), None)["md"]) == 1024 * 1024
+    gross = run_eval._kunde_lesen(str(tmp_path / "g.json"), None)
+    assert len(gross["md"]) == 1024 * 1024 and gross["md_abgeschnitten"] is True          # nicht mehr still: die Auswertung erfährt es
+    (tmp_path / "e-kunde.md").write_bytes(b"a" * (1024 * 1024))
+    assert run_eval._kunde_lesen(str(tmp_path / "e.json"), None)["md_abgeschnitten"] is False      # genau die Grenze ist noch vollständig
     (tmp_path / "u-kunde.md").write_bytes(b"\xff\xfe# x\n")              # kein UTF-8: ersetzt, nicht abgebrochen
     assert isinstance(run_eval._kunde_lesen(str(tmp_path / "u.json"), None)["md"], str)
     (tmp_path / "k-kunde.pdf").write_bytes(b"%P")
     assert run_eval._kunde_lesen(str(tmp_path / "k.json"), None)["pdf_anfang"] == b"%P"
+    assert run_eval._kunde_lesen(str(tmp_path / "k.json"), None)["pdf_groesse"] == 2
 
 
 def test_run_eval_projekt_im_prompt(ev, capsys):

@@ -54,6 +54,7 @@ SMOKE_PROMPT = "Antworte nur mit ok."
 PROMPTS = {"slash": f"/{SKILL_NAME}", "text": f"Nutze den Skill {SKILL_NAME} auf diesem Repo."}
 PROJEKT_MUSTER = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,59}")
 KUNDE_MD_MAX = 1024 * 1024                                 # TF4-D6: so viel vom Kunden-Markdown wird gelesen
+KUNDE_PDF_ENDE = 1024                                      # TF4-D6: so viel vom Ende des Kunden-PDF wird gelesen (`%%EOF`)
 SMOKE_TIMEOUT = 300
 DOCKER_TIMEOUT = 60
 KILL_WARTEN = 10
@@ -643,33 +644,54 @@ def _bericht_lesen(ordner: str) -> tuple[dict | None, str | None]:
     return None, pfade[0]
 
 
-def _kunde_datei(pfad: str, max_bytes: int) -> bytes | None:
-    """Höchstens `max_bytes` der Datei, ohne Symlinks zu folgen (O_NOFOLLOW) und nur als reguläre Datei; sonst None."""
+def _kunde_oeffnen(pfad: str, lesen):
+    """Öffnet `pfad` ohne Symlinks zu folgen (O_NOFOLLOW), nur als reguläre Datei (kein Verzeichnis, keine FIFO: O_NONBLOCK hängt nicht),
+    und gibt `lesen(datei, groesse)` zurück; sonst None."""
     try:
         fd = os.open(pfad, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
     except OSError:
         return None
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
             return None
         with os.fdopen(fd, "rb", closefd=False) as f:
-            return f.read(max_bytes)
+            return lesen(f, st.st_size)
     except OSError:
         return None
     finally:
         os.close(fd)
 
 
+def _kunde_datei(pfad: str, max_bytes: int) -> bytes | None:
+    """Höchstens `max_bytes` der Datei, ohne Symlinks zu folgen (O_NOFOLLOW) und nur als reguläre Datei; sonst None."""
+    return _kunde_oeffnen(pfad, lambda f, _groesse: f.read(max_bytes))
+
+
+def _kunde_pdf(pfad: str) -> tuple[bytes, int, bytes] | None:
+    """(erste 8 Bytes, Größe, letzte `KUNDE_PDF_ENDE` Bytes) eines regulären PDF ohne Symlink; sonst None."""
+    def lesen(f, groesse):
+        anfang = f.read(8)
+        f.seek(max(0, groesse - KUNDE_PDF_ENDE))
+        return anfang, groesse, f.read(KUNDE_PDF_ENDE)
+    return _kunde_oeffnen(pfad, lesen)
+
+
 def _kunde_lesen(bericht_pfad: str | None, projekt: str | None) -> dict | None:
-    """Kundendaten für TF4-D6: `{"md": str | None, "pdf_anfang": bytes | None, "projekt": str | None}`. Die Pfade
-    leiten sich aus dem Bericht-JSON ab (`<Basis>-kunde.md`, `<Basis>-kunde.pdf`); eine fehlende, nicht reguläre oder per
-    Symlink gelegte Datei ergibt None. Ohne Bericht-Pfad: None (ganz)."""
+    """Kundendaten für TF4-D6: `{"md": str | None, "md_abgeschnitten": bool, "pdf_anfang": bytes | None, "pdf_groesse": int | None,
+    "pdf_ende": bytes | None, "projekt": str | None}`. Die Pfade leiten sich aus dem Bericht-JSON ab (`<Basis>-kunde.md`,
+    `<Basis>-kunde.pdf`); eine fehlende, nicht reguläre oder per Symlink gelegte Datei ergibt None. Das Markdown wird bis
+    `KUNDE_MD_MAX` Bytes gelesen; ist es länger, ist `md_abgeschnitten` wahr (die Auswertung meldet das, statt still nur den
+    Anfang zu prüfen). Ohne Bericht-Pfad: None (ganz)."""
     if bericht_pfad is None:
         return None
     basis = os.path.splitext(bericht_pfad)[0]
-    md = _kunde_datei(basis + "-kunde.md", KUNDE_MD_MAX)
-    return {"md": None if md is None else md.decode("utf-8", "replace"),
-            "pdf_anfang": _kunde_datei(basis + "-kunde.pdf", 8), "projekt": projekt}
+    md = _kunde_datei(basis + "-kunde.md", KUNDE_MD_MAX + 1)
+    pdf = _kunde_pdf(basis + "-kunde.pdf")
+    return {"md": None if md is None else md[:KUNDE_MD_MAX].decode("utf-8", "replace"),
+            "md_abgeschnitten": md is not None and len(md) > KUNDE_MD_MAX,
+            "pdf_anfang": None if pdf is None else pdf[0], "pdf_groesse": None if pdf is None else pdf[1],
+            "pdf_ende": None if pdf is None else pdf[2], "projekt": projekt}
 
 
 def _projekt_arg(wert: str) -> str:
