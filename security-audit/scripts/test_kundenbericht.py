@@ -616,11 +616,16 @@ def test_hilfe_nennt_unterbefehl_erstellen():
     assert re.search(r"\{erstellen\}", p.stdout)
 
 
-@pytest.mark.parametrize("argumente", [["erstellen", "--help"], ["erstellen", "-h"], ["erstellen", "--json", "x.json", "--help"]])
-def test_erstellen_help_ist_exit5_nie_exit0_ohne_dateien_r1_7(tmp_path, argumente):
-    """R1-7: Exit 0 heißt „Markdown und PDF erstellt“; `erstellen --help` darf nicht mit 0 enden (die Eval-Erlaubnisregel lässt den Aufruf zu)."""
-    p = lauf(None, argumente=argumente)
-    assert p.returncode == 5 and zeilen(p) == ["kategorie: eingabe"], p.stdout + p.stderr
+@pytest.mark.parametrize("argumente", [["--help"], ["erstellen", "--help"], ["erstellen", "-h"], ["erstellen", "--json", "x.json", "--help"]])
+def test_help_endet_mit_0_ohne_dateien_und_ohne_pfadzeilen_r1_7(tmp_path, argumente):
+    """R1-7: Exit 0 heißt sonst „Markdown und PDF erstellt“. `--help` ist die einzige Ausnahme; `bericht-format.md` und das Skript-Docstring nennen sie.
+    Sie schreibt nichts und gibt weder `kunde-md:` noch `kunde-pdf:` aus (auch nicht neben einer vorhandenen JSON)."""
+    pfad = schreibe(tmp_path / "out", bericht_daten(), name="x.json")
+    p = subprocess.run([sys.executable, "-I", KUNDENBERICHT, *argumente], capture_output=True, text=True, cwd=tmp_path / "out")
+    assert p.returncode == 0 and "kunde-md:" not in p.stdout and "kunde-pdf:" not in p.stdout, p.stdout + p.stderr
+    assert inhalt(tmp_path / "out") == ["x.json"]
+    doku = open(os.path.join(os.path.dirname(KUNDENBERICHT), "..", "references", "bericht-format.md"), encoding="utf-8").read()
+    assert "nur `--help` endet ebenfalls mit Exit 0" in doku and "auch `--help`" in open(KUNDENBERICHT, encoding="utf-8").read()
 
 
 @pytest.mark.parametrize("argumente", [[], ["erstellen"], ["unbekannt"], ["erstellen", "--json"], ["erstellen", "--json", "x.json", "y"]])

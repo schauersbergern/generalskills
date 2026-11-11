@@ -6,8 +6,8 @@
 Exit-Codes (bei Exit != 0 ist die erste Zeile auf stdout `kategorie: <wert>`; danach `kunde-md:`, wenn das Markdown liegt, und die Meldungen):
 Zeilengrenze: höchstens 30 Meldungszeilen, ohne `kategorie:`, `kunde-md:` und `kunde-pdf:`; jede weitere Meldung ersetzt die Zeile
 `… und <n> weitere` (sie kommt zu den 30 hinzu und fehlt bei genau 30 Meldungen).
-  0  Markdown und PDF erstellt (stdout: `kunde-md: <pfad>`, `kunde-pdf: <pfad>`); nur `kundenbericht.py --help` ohne Unterbefehl endet mit 0 und
-     ohne Dateien (`erstellen --help` ist Exit 5)
+  0  Markdown und PDF erstellt (stdout: `kunde-md: <pfad>`, `kunde-pdf: <pfad>`); auch `--help` (mit oder ohne `erstellen`) endet mit 0, schreibt aber
+     keine Dateien und nennt weder `kunde-md:` noch `kunde-pdf:`
   1  `intern`            unerwarteter Fehler (eine Zeile ohne Traceback; auch eine gescheiterte Inhaltsprüfung, nie „keine Verstöße“);
                          liegt das Markdown schon, steht `kunde-md:` davor
   2  `inhalt`            Kundenfelder fehlen oder verstoßen gegen die Inhaltsregeln; mit Feldkorrektur behebbar; keine Kundendateien
@@ -767,7 +767,7 @@ def main(argv: list[str]) -> int:
     ende = time.monotonic() + poc._nur_verkuerzt("SECURITY_AUDIT_KUNDE_BUDGET", KUNDE_BUDGET)
     ap = _Parser(prog="kundenbericht.py", allow_abbrev=False)
     sub = ap.add_subparsers(dest="befehl", required=True)
-    e = sub.add_parser("erstellen", allow_abbrev=False, add_help=False)   # `erstellen --help` wäre Exit 0 ohne Dateien (R1-7)
+    e = sub.add_parser("erstellen", allow_abbrev=False)
     e.add_argument("--json", required=True, help="Bericht-JSON <ausgabe_ordner>/<basisname>.json")
     try:
         args = ap.parse_args(argv)
