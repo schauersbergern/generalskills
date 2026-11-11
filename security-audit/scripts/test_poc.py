@@ -2713,18 +2713,29 @@ def test_modell_protokoll_maskierwerte_nur_gewaehlte_api_keys(umg, tmp_path):
     assert werte == [{"name": "ANTHROPIC_API_KEY", "wert": "poc-dummy-anthropic"}]
 
 
-def test_modell_protokoll_hoechstens_50_werte(umg, tmp_path):
-    """Mi-4: mehr als 50 Werte: die 50 längsten gehen an den Mock, der Hinweis steht auf stderr (ohne Werte)."""
-    envs = [a for i in range(55) for a in ("--env", f"V{i:02d}=" + "x" * (6 + i))]
+def test_modell_protokoll_hoechstens_200_werte(umg, tmp_path):
+    """Review R1-5: Die Grenze ist die des Mocks (200 Werte). Alle Werte ab 6 Zeichen gehen an den Mock, auch die kürzesten; darüber Exit 2
+    ohne Docker-Aufruf statt Werte wegzulassen (sonst stünde GEHEIM roh im Protokoll)."""
+    envs = [a for i in range(55) for a in ("--env", f"V{i:02d}=" + "x" * (10 + i))] + ["--env", "GEHEIM=s3cr3tPW"]
     mit_mock(umg, tmp_path, *envs)
     umg.konfig({"exec -i": {"stdout": '{"eintraege":[],"gekuerzt":0}\n'}})
     r = modell(umg, "--protokoll")
     assert r.returncode == 0, r.stderr
     werte = json.loads(exec_aufrufe(umg)[0]["stdin"])["werte"]
-    assert len(werte) == 50
-    assert {w["name"] for w in werte} >= {f"V{i:02d}" for i in range(6, 55)} | {"OPENAI_API_KEY"}
-    assert not {w["name"] for w in werte} & {f"V{i:02d}" for i in range(0, 6)}      # die kürzesten (6 bis 11 Zeichen) entfallen
-    assert "50" in r.stderr and "56" in r.stderr and "xxxxxx" not in r.stderr
+    assert len(werte) == 57 and "GEHEIM" in {w["name"] for w in werte}
+    assert r.stderr == ""
+
+
+@pytest.mark.parametrize("n, rc", [(199, 0), (200, 2)])     # dazu kommt der Dummy-Schlüssel von --modell-mock openai: 200 bzw. 201 Werte
+def test_modell_protokoll_genau_200_werte_ok_201_exit2(umg, tmp_path, n, rc):
+    mit_mock(umg, tmp_path, *[a for i in range(n) for a in ("--env", f"W{i:03d}=wert-{i:03d}-xyz")])
+    umg.konfig({"exec -i": {"stdout": '{"eintraege":[],"gekuerzt":0}\n'}})
+    r = modell(umg, "--protokoll")
+    assert r.returncode == rc, r.stderr
+    if rc == 0:
+        assert len(json.loads(exec_aufrufe(umg)[0]["stdin"])["werte"]) == 200
+    else:
+        assert "201" in r.stderr and "wert-" not in r.stderr and exec_aufrufe(umg) == []
 
 
 def test_modell_protokoll_wert_zu_lang_exit2(umg, tmp_path):

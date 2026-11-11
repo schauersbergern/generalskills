@@ -90,7 +90,7 @@ DB_URL = "postgres://poc:poc@db:5432/poc"
 ANTWORTEN_MAX = 20               # Einträge einer Antwortliste für den Modell-Mock
 ANTWORTEN_DATEI_MAX = 64 * 1024  # `--antworten-datei` (Grenze des Mocks für stdin)
 ANTWORT_TEXT_MAX = 16384         # Zeichen je `text` (Grenze des Mocks)
-MASKIER_WERTE_MAX = 50           # Werte, die `modell --protokoll` dem Mock zum Maskieren übergibt
+MASKIER_WERTE_MAX = 200          # Grenze des Mocks für die Zahl der Werte (`modell --protokoll`); mehr: Exit 2
 MASKIER_WERT_MIN = 6             # kürzere --env-Werte werden nicht maskiert
 MASKIER_WERT_MAX = 4096          # Grenze des Mocks je Wert (Zeichen)
 MASKIER_NAME_MAX = 64            # Grenze des Mocks für den Namen
@@ -1175,8 +1175,8 @@ def _maskier_paare(z: dict) -> list[tuple[str, str]]:
 
 def _maskier_werte(z: dict) -> bytes:
     """stdin für `llm-mock.mjs --protokoll`: `{"werte":[{name,wert}]}` mit den Werten aus `_maskier_paare` ab 6 Zeichen, längste zuerst.
-    Mehr als 50 Werte: die 50 längsten (Hinweis auf stderr, ohne Werte). Ein Wert über 4096 UTF-16-Einheiten (Zählweise des Mocks) oder
-    eine Liste über 64 KiB lässt sich nicht maskieren, ebenso ein Wert mit ungültigem UTF-8: Exit 2 statt Werte wegzulassen."""
+    Mehr als 200 Werte (Grenze des Mocks), ein Wert über 4096 UTF-16-Einheiten (Zählweise des Mocks), eine Liste über 64 KiB oder ein Wert
+    mit ungültigem UTF-8 lassen sich nicht maskieren: Exit 2 statt Werte wegzulassen."""
     gesehen: set[tuple[str, str]] = set()
     werte = []
     for name, wert in _maskier_paare(z):
@@ -1192,8 +1192,7 @@ def _maskier_werte(z: dict) -> bytes:
         if _utf16_laenge(wert) > MASKIER_WERT_MAX:
             raise PocFehler(f"--env {name}: Wert länger als {MASKIER_WERT_MAX} Zeichen, lässt sich nicht maskieren")
     if len(werte) > MASKIER_WERTE_MAX:
-        print(f"modell: {len(werte)} Werte zu maskieren, nur die {MASKIER_WERTE_MAX} längsten werden maskiert", file=sys.stderr)
-        werte = werte[:MASKIER_WERTE_MAX]
+        raise PocFehler(f"{len(werte)} Werte der Rolle zu maskieren, höchstens {MASKIER_WERTE_MAX} möglich: weniger --env-Werte übergeben")
     nutzlast = json.dumps({"werte": [{"name": n, "wert": w} for n, w in werte]}, ensure_ascii=False).encode("utf-8", "replace")
     if len(nutzlast) > STDIN_MAX_MOCK:
         raise PocFehler(f"Maskierwerte der Rolle zusammen größer als {STDIN_MAX_MOCK // 1024} KiB, lassen sich nicht maskieren")

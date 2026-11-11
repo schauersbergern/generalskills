@@ -1578,16 +1578,16 @@ def test_protokoll_ist_daten_in_schritt_6_und_im_briefing_m24_m25_m4():
     assert "replace(/[\\r\\n\\u2028\\u2029]/g" in b                                         # fundstelle ist einzeilig
 
 
-def test_mehr_als_50_maskierwerte_ist_ein_hinweis_im_bericht_task4_m6():
-    """4ab M-6: Der stderr-Hinweis bedeutet, dass kürzere Werte unmaskiert bleiben können; die Hauptsession schreibt ihn als Hinweis in
-    den Bericht."""
-    assert poc.MASKIER_WERTE_MAX == 50
-    assert "nur die {MASKIER_WERTE_MAX} längsten werden maskiert" in _lies(os.path.join(HIER, "poc.py"))
-    s6 = _s6()
-    z = _punkt(s6, r"nur die 50 längsten werden maskiert")
-    assert "kürzere Werte" in z and "unmaskiert" in z and "`bericht.hinweise`" in z and "`HINWEIS:`" in z, z
-    briefing = _punkt(_mock_abschnitt_briefing(), r"nur die 50 längsten werden maskiert")
-    assert "HINWEIS:" in briefing
+def test_mehr_als_200_maskierwerte_sind_exit_2_ohne_protokoll_review_r1_5():
+    """Review R1-5: Die Grenze ist die des Mocks (200). Mehr Werte sind ein Fehler (Exit 2), nie ein Weglassen; SKILL.md und das Briefing sagen das."""
+    quelle = _lies(os.path.join(HIER, "poc.py"))
+    assert poc.MASKIER_WERTE_MAX == 200 and "nur die {MASKIER_WERTE_MAX} längsten" not in quelle
+    assert "höchstens {MASKIER_WERTE_MAX} möglich" in quelle
+    assert "daten.werte.length > 200" in _lies(os.path.join(HIER, "..", "docker", "llm-mock.mjs"))       # dieselbe Grenze im Mock
+    z = _punkt(_s6(), r"mehr als 200 zu maskierende Werte")
+    assert "Exit 2" in z and "ohne Protokoll" in z and "`unbestätigt`" in z and "50 längsten" not in z, z
+    briefing = _punkt(_mock_abschnitt_briefing(), r"höchstens 200 möglich")
+    assert "Exit 2" in briefing and "unbestätigt" in briefing and "50 längsten" not in briefing
 
 
 def test_grundregel_3_und_schritt_3_nennen_den_d3_satz_m3():
