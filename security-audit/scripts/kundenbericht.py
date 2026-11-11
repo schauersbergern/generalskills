@@ -249,22 +249,30 @@ _NACHWEIS_ANNAHME = "im Test nachgestellt unter der Annahme, dass das KI-Modell 
 _NACHWEIS_ABGELEITET = "aus dem Quellcode abgeleitet, im Test nicht bestätigt (mögliche Schwachstelle)"
 
 # Management-Zusammenfassung: je Stufe die Auswirkung (nur bei `bestätigt`, enthält „ausnutzbar“, Singular und Plural) und die Empfehlung
-# für bestätigte und für nur unbestätigte Lagen (R1-K11, K13). „ausnutzbar“ steht nie in einem Satz zu `unbestätigt`.
+# für bestätigte und für nur unbestätigte Lagen (R1-K11, K13), je als (Singular, Plural): der Singular steht bei genau einer
+# Schwachstelle der Stufe, sonst der Plural (TF4 Review 2, N5-5). „ausnutzbar“ steht nie in einem Satz zu `unbestätigt`.
 # Jede Empfehlung enthält „Sie“ oder beginnt mit „Wir empfehlen“ (ein Test sichert die Sie-Form: Du-Imperative erkennt text_verstoesse nicht).
 _STUFE_TEXT = {
     "Kritisch": (("die ohne Anmeldung oder über die Grenzen zwischen Kundenkonten hinweg ausnutzbar ist",
                   "die ohne Anmeldung oder über die Grenzen zwischen Kundenkonten hinweg ausnutzbar sind"),
-                 "Lassen Sie die betroffenen Stellen umgehend beheben.",
-                 "Lassen Sie diese Stellen umgehend prüfen und, falls sie sich bestätigen, beheben."),
+                 ("Lassen Sie die betroffene Stelle umgehend beheben.", "Lassen Sie die betroffenen Stellen umgehend beheben."),
+                 ("Lassen Sie diese Stelle umgehend prüfen und, falls sie sich bestätigt, beheben.",
+                  "Lassen Sie diese Stellen umgehend prüfen und, falls sie sich bestätigen, beheben.")),
     "Hoch": (("die ausnutzbar ist und erheblichen Schaden verursachen kann", "die ausnutzbar sind und erheblichen Schaden verursachen können"),
-             "Wir empfehlen, die betroffenen Stellen vor dem nächsten Release zu beheben.",
-             "Wir empfehlen, die betroffenen Stellen vor dem nächsten Release zu prüfen und bei Bestätigung zu beheben."),
+             ("Wir empfehlen, die betroffene Stelle vor dem nächsten Release zu beheben.",
+              "Wir empfehlen, die betroffenen Stellen vor dem nächsten Release zu beheben."),
+             ("Wir empfehlen, die betroffene Stelle vor dem nächsten Release zu prüfen und bei Bestätigung zu beheben.",
+              "Wir empfehlen, die betroffenen Stellen vor dem nächsten Release zu prüfen und bei Bestätigung zu beheben.")),
     "Mittel": (("die ausnutzbar ist, deren Auswirkung aber begrenzt bleibt", "die ausnutzbar sind, deren Auswirkungen aber begrenzt bleiben"),
-               "Wir empfehlen, die betroffenen Stellen zeitnah einzuplanen und zu beheben.",
-               "Wir empfehlen, die betroffenen Stellen zeitnah zu prüfen und bei Bestätigung zu beheben."),
+               ("Wir empfehlen, die betroffene Stelle zeitnah einzuplanen und zu beheben.",
+                "Wir empfehlen, die betroffenen Stellen zeitnah einzuplanen und zu beheben."),
+               ("Wir empfehlen, die betroffene Stelle zeitnah zu prüfen und bei Bestätigung zu beheben.",
+                "Wir empfehlen, die betroffenen Stellen zeitnah zu prüfen und bei Bestätigung zu beheben.")),
     "Niedrig": (("die ausnutzbar ist, deren Auswirkung aber gering ist", "die ausnutzbar sind, deren Auswirkungen aber gering sind"),
-                "Wir empfehlen, die betroffenen Stellen bei nächster Gelegenheit zu beheben.",
-                "Wir empfehlen, die betroffenen Stellen bei nächster Gelegenheit zu prüfen und bei Bestätigung zu beheben."),
+                ("Wir empfehlen, die betroffene Stelle bei nächster Gelegenheit zu beheben.",
+                 "Wir empfehlen, die betroffenen Stellen bei nächster Gelegenheit zu beheben."),
+                ("Wir empfehlen, die betroffene Stelle bei nächster Gelegenheit zu prüfen und bei Bestätigung zu beheben.",
+                 "Wir empfehlen, die betroffenen Stellen bei nächster Gelegenheit zu prüfen und bei Bestätigung zu beheben.")),
 }
 # Einordnung der Kundenstufen (fester Text unter der Stufentabelle)
 _EINORDNUNG = (
@@ -276,23 +284,24 @@ _EINORDNUNG = (
 _ZAHLWOERTER = ("", "eine", "zwei", "drei", "vier", "fünf", "sechs", "sieben", "acht", "neun", "zehn", "elf", "zwölf")
 _KEINE_SCHWACHSTELLEN = "In der geprüften Version wurden keine ausnutzbaren Schwachstellen gefunden."
 
-# Eingeschränkte Prüfung: abschließende Tabelle aus Spec R2-W-5 (Teilstring in `hinweise`, ohne Beachtung der Schreibweise -> Kundentext).
-# „nicht geschwärzt“ entfällt (R2-K-12). Jeder Text erscheint höchstens einmal, in der Reihenfolge der Tabelle.
-# Die Kundentexte „Nachstellung in einer Testumgebung“ und „Abschluss einzelner Prüfungen (Zeitlimit)“ ändern R2-W-5 bewusst (TF4 Review 2).
+# Eingeschränkte Prüfung: Tabelle aus Spec R2-W-5 (Teilstring in `hinweise`, ohne Beachtung der Schreibweise -> Kundentext). „nicht geschwärzt“
+# entfällt (R2-K-12). Jeder Text erscheint höchstens einmal, in der Reihenfolge der Tabelle. Die Kundentexte ändern R2-W-5 bewusst
+# (TF4 Review 2: „Nachstellung in einer Testumgebung“, „Zeitlimit“; TF4 Härtung, N5-5: jeder Eintrag ist ein Satzteil, der sagt, was
+# eingeschränkt war, ohne Klammer; in einer Klammer gelesen wirkten Suche und Abgleich selbst wie die Einschränkung).
 # Die gitleaks-Standardausnahmen (`gitleaks-Standardausnahmen nicht geprüft`) stehen bewusst nicht in der Tabelle: sie treten fast immer auf
 # (Lockfiles) und würden fast jeden Bericht als eingeschränkt kennzeichnen.
 _EINGESCHRAENKT = (
-    (("gitleaks fehlt",), "Suche nach Zugangsschlüsseln"),
-    (("osv-scanner fehlt", "abhaengigkeiten fehlgeschlagen"), "Abgleich der Abhängigkeiten"),
-    (("lieferkette fehlgeschlagen",), "Prüfung der Build-Konfiguration"),
+    (("gitleaks fehlt",), "die Suche nach Zugangsschlüsseln war nicht möglich"),
+    (("osv-scanner fehlt", "abhaengigkeiten fehlgeschlagen"), "der Abgleich der Abhängigkeiten war nicht möglich"),
+    (("lieferkette fehlgeschlagen",), "die Prüfung der Build-Konfiguration war nicht möglich"),
     (("docker-fehlt", "build-fehler", "build-timeout", "start-fehler", "lockfile-fehlt", "lockfile-fremde-quelle", "nicht-npm"),
-     "Nachstellung in einer Testumgebung"),
-    (("zeitbudget",), "Abschluss einzelner Prüfungen (Zeitlimit)"),
-    (("ki.py erkennen fehlgeschlagen", "modell-mock nicht möglich"), "Prüfung der KI-Funktionen"),
+     "die Nachstellung in einer Testumgebung war nicht möglich"),
+    (("zeitbudget",), "einzelne Prüfungen konnten wegen des Zeitlimits nicht abgeschlossen werden"),
+    (("ki.py erkennen fehlgeschlagen", "modell-mock nicht möglich"), "die Prüfung der KI-Funktionen war nicht möglich"),
 )
 
 _GRENZEN = (
-    "Geprüft wurde der oben genannte Commit.",
+    "Geprüft wurde der oben unter „Geprüfter Stand (Commit)“ genannte Stand.",
     "Methode: Code-Analyse durch KI-Agenten; Nachweise entstanden nur in einer isolierten Testumgebung ohne Zugriff auf Produktivsysteme.",
     "Es besteht keine Garantie auf Vollständigkeit.",
     "Der technische Bericht mit Details liegt Manibase vor.",
@@ -360,7 +369,7 @@ def _eingeschraenkt(daten: dict) -> list[str]:
     """Kundentexte der zutreffenden Einträge: zuerst der Teilpfad, dann die Tabelle (jeder Text höchstens einmal)."""
     texte: list[str] = []
     if teilpfad := _text(daten.get("teilpfad")):
-        texte.append(f"nur der Teilbereich {escape(teilpfad)}")
+        texte.append(f"geprüft wurde nur der Teilbereich {escape(teilpfad)}")
     hinweise = [h.lower() for h in daten.get("hinweise", []) if isinstance(h, str)] if isinstance(daten.get("hinweise"), list) else []
     for muster, text in _EINGESCHRAENKT:
         if text not in texte and any(m in h for h in hinweise for m in muster):
@@ -369,7 +378,7 @@ def _eingeschraenkt(daten: dict) -> list[str]:
 
 
 def _eingeschraenkt_satz(texte: list[str]) -> str:
-    return f"Die Prüfung war eingeschränkt ({', '.join(texte)}); das Ergebnis ist deshalb nicht vollständig."
+    return f"Die Prüfung war eingeschränkt: {'; '.join(texte)}. Das Ergebnis ist deshalb nicht vollständig."
 
 
 def _zahl(n: int) -> str:
@@ -378,7 +387,7 @@ def _zahl(n: int) -> str:
 
 def _zusammenfassung(zaehler: dict[tuple[str, str], int]) -> list[str]:
     """Tabelle der Anzahlen, die Einordnung der Stufen und je Stufe ein Absatz: ein Satz je Status mit Anzahl > 0, danach die Empfehlung
-    (bei gemischtem Status die für bestätigte Lagen)."""
+    (bei gemischtem Status die für bestätigte Lagen; Singular nur bei genau einer Schwachstelle der Stufe)."""
     z = ["| Kundenstufe | Anzahl |", "|---|---|"]
     z += [f"| {st} | {zaehler.get((st, 'bestätigt'), 0) + zaehler.get((st, 'unbestätigt'), 0)} |" for st in KUNDENSTUFEN]
     z += [""] + [f"- {st}: {text}" for st, text in _EINORDNUNG]
@@ -393,7 +402,8 @@ def _zusammenfassung(zaehler: dict[tuple[str, str], int]) -> list[str]:
             saetze.append(f"Es besteht eine mögliche Schwachstelle der Stufe {st}, die im Test nicht nachgestellt werden konnte." if n_unbest == 1
                           else f"Es bestehen {_zahl(n_unbest)} mögliche Schwachstellen der Stufe {st}, die im Test nicht nachgestellt werden konnten.")
         if saetze:
-            z += ["", " ".join(saetze + [empfehlung_best if n_best else empfehlung_unbest])]
+            empfehlung = empfehlung_best if n_best else empfehlung_unbest
+            z += ["", " ".join(saetze + [empfehlung[0] if n_best + n_unbest == 1 else empfehlung[1]])]
     return z
 
 

@@ -2125,7 +2125,7 @@ def test_bericht_format_kundenbericht_stufen_nachweis_und_kundentexte_entspreche
     assert "„Es besteht eine mögliche Schwachstelle der Stufe …, die im Test nicht nachgestellt werden konnte“" in zeile
     assert "bei `unbestätigt`" in zeile and "nie „ausnutzbar“" in zeile and "Empfehlung in Sie-Form" in zeile
     for stufe, ((sg, pl), best, unbest) in kundenbericht._STUFE_TEXT.items():
-        assert "ausnutzbar" in sg and "ausnutzbar" in pl and "ausnutzbar" not in unbest and "ausnutzbar" not in best, stufe
+        assert "ausnutzbar" in sg and "ausnutzbar" in pl and not any("ausnutzbar" in x for x in (*best, *unbest)), stufe       # je (Singular, Plural)
 
 
 def test_bericht_format_kundenbericht_eingeschraenkte_pruefung():
@@ -2141,12 +2141,14 @@ def test_bericht_format_kundenbericht_eingeschraenkte_pruefung():
             assert f"`{m}`" in schluessel, (m, schluessel)
     assert len(zeilen) - 1 == len(kundenbericht._EINGESCHRAENKT)                       # plus die Kopfzeile der Tabelle
     satz = _punkt(k, r"^\*\*Eingeschränkte Prüfung:\*\* Fehlt eine Prüfung")
-    assert "„Die Prüfung war eingeschränkt (<Kundentexte>); das Ergebnis ist deshalb nicht vollständig.“" in satz
-    assert kundenbericht._eingeschraenkt_satz(["X"]) == "Die Prüfung war eingeschränkt (X); das Ergebnis ist deshalb nicht vollständig."
+    assert "„Die Prüfung war eingeschränkt: <Kundentexte>. Das Ergebnis ist deshalb nicht vollständig.“" in satz
+    assert kundenbericht._eingeschraenkt_satz(["X"]) == "Die Prüfung war eingeschränkt: X. Das Ergebnis ist deshalb nicht vollständig."
+    assert kundenbericht._eingeschraenkt_satz(["X", "Y"]) == "Die Prüfung war eingeschränkt: X; Y. Das Ergebnis ist deshalb nicht vollständig."
+    assert not any("(" in t for _m, t in kundenbericht._EINGESCHRAENKT), "keine verschachtelte Klammer im Satz"
     _kette(satz, "am Ende der Management-Zusammenfassung", "statt der Entwarnung", "unter „Umfang und Grenzen“")
     assert "gitleaks-Standardausnahmen nicht geprüft" in k
     assert not any("standardausnahmen" in m for muster, _t in kundenbericht._EINGESCHRAENKT for m in muster)
-    assert "„nur der Teilbereich <Teilpfad>“" in k
+    assert "„geprüft wurde nur der Teilbereich <Teilpfad>“" in k
 
 
 def test_bericht_format_exit_tabelle_zeilenweise():

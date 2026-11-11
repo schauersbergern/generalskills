@@ -138,22 +138,22 @@ Für Befunde mit `werkzeug` `gitleaks` steht im Kundenbericht der feste Titel �
 
 **Umfang und Grenzen** (fester Text):
 
-- Geprüft wurde der oben genannte Commit.
+- Geprüft wurde der oben unter „Geprüfter Stand (Commit)“ genannte Stand.
 - Methode: Code-Analyse durch KI-Agenten; Nachweise entstanden nur in einer isolierten Testumgebung ohne Zugriff auf Produktivsysteme.
 - Es besteht keine Garantie auf Vollständigkeit.
 - Der technische Bericht mit Details liegt Manibase vor.
 - Nach Umsetzung der Maßnahmen empfehlen wir eine erneute Prüfung.
 
-**Eingeschränkte Prüfung:** Fehlt eine Prüfung oder ist sie unvollständig, steht der Satz „Die Prüfung war eingeschränkt (<Kundentexte>); das Ergebnis ist deshalb nicht vollständig.“ am Ende der Management-Zusammenfassung (statt der Entwarnung) und unter „Umfang und Grenzen“. Die Kundentexte folgen aus den `hinweise` (Teilstring, ohne Beachtung der Schreibweise), jeder höchstens einmal; bei einem `teilpfad` steht zuerst „nur der Teilbereich <Teilpfad>“. Der Hinweis „gitleaks-Standardausnahmen nicht geprüft“ zählt nicht, er tritt fast immer auf.
+**Eingeschränkte Prüfung:** Fehlt eine Prüfung oder ist sie unvollständig, steht der Satz „Die Prüfung war eingeschränkt: <Kundentexte>. Das Ergebnis ist deshalb nicht vollständig.“ am Ende der Management-Zusammenfassung (statt der Entwarnung) und unter „Umfang und Grenzen“. Die Kundentexte folgen aus den `hinweise` (Teilstring, ohne Beachtung der Schreibweise), jeder höchstens einmal, getrennt mit Semikolon; bei einem `teilpfad` steht zuerst „geprüft wurde nur der Teilbereich <Teilpfad>“. Jeder Kundentext sagt, was eingeschränkt war (keine Klammern im Satz). Der Hinweis „gitleaks-Standardausnahmen nicht geprüft“ zählt nicht, er tritt fast immer auf.
 
 | Teilstring in `hinweise` | Kundentext |
 |---|---|
-| `gitleaks fehlt` | Suche nach Zugangsschlüsseln |
-| `osv-scanner fehlt`, `abhaengigkeiten fehlgeschlagen` | Abgleich der Abhängigkeiten |
-| `lieferkette fehlgeschlagen` | Prüfung der Build-Konfiguration |
-| `docker-fehlt`, `build-fehler`, `build-timeout`, `start-fehler`, `lockfile-fehlt`, `lockfile-fremde-quelle`, `nicht-npm` | Nachstellung in einer Testumgebung |
-| `zeitbudget` | Abschluss einzelner Prüfungen (Zeitlimit) |
-| `ki.py erkennen fehlgeschlagen`, `modell-mock nicht möglich` | Prüfung der KI-Funktionen |
+| `gitleaks fehlt` | die Suche nach Zugangsschlüsseln war nicht möglich |
+| `osv-scanner fehlt`, `abhaengigkeiten fehlgeschlagen` | der Abgleich der Abhängigkeiten war nicht möglich |
+| `lieferkette fehlgeschlagen` | die Prüfung der Build-Konfiguration war nicht möglich |
+| `docker-fehlt`, `build-fehler`, `build-timeout`, `start-fehler`, `lockfile-fehlt`, `lockfile-fremde-quelle`, `nicht-npm` | die Nachstellung in einer Testumgebung war nicht möglich |
+| `zeitbudget` | einzelne Prüfungen konnten wegen des Zeitlimits nicht abgeschlossen werden |
+| `ki.py erkennen fehlgeschlagen`, `modell-mock nicht möglich` | die Prüfung der KI-Funktionen war nicht möglich |
 
 **Exit-Codes.** Bei Exit ≠ 0 ist die erste Zeile auf stdout `kategorie: <wert>`; danach folgt `kunde-md: <pfad>`, wenn das Markdown liegt: bei Exit 3 und 4 immer, bei Exit 1 und 5 nur, wenn der Fehler nach dem Schreiben des Markdown auftrat. Bei Exit 0 stehen `kunde-md:` und `kunde-pdf:` auf stdout. Die Meldungen stehen auf stdout (höchstens 30 Zeilen, danach eine Zeile „… und <n> weitere“); bei Exit 2 haben sie die Form `<id> <feld>: Regel <regel>[ (<detail>)]` und nennen nie den Treffertext.
 

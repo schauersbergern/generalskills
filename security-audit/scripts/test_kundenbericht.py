@@ -851,11 +851,35 @@ def test_zusammenfassung_zahlwoerter():
 
 
 def test_zusammenfassung_kritisch_umgehend():
-    assert "Lassen Sie die betroffenen Stellen umgehend beheben." in zus(md_von(befund(1)))
+    assert "Lassen Sie die betroffene Stelle umgehend beheben." in zus(md_von(befund(1)))
     z = zus(md_von(befund(1, **UNB)))
-    assert "Lassen Sie diese Stellen umgehend prüfen und, falls sie sich bestätigen, beheben." in z
+    assert "Lassen Sie diese Stelle umgehend prüfen und, falls sie sich bestätigt, beheben." in z
     assert "umgehend beheben" not in z
     assert "umgehend" not in zus(md_von(befund(1, stufe="P2")))
+    assert "Lassen Sie die betroffenen Stellen umgehend beheben." in zus(md_von(befund(1), befund(2)))
+    assert "Lassen Sie diese Stellen umgehend prüfen und, falls sie sich bestätigen, beheben." in zus(md_von(befund(1, **UNB), befund(2, **UNB)))
+
+
+def test_empfehlung_singular_nur_bei_genau_einer_schwachstelle_review2_n5_5():
+    """TF4 Review 2 (N5-5): „die betroffene Stelle“ bei genau einer Schwachstelle der Stufe, sonst (auch bei bestätigt plus unbestätigt)
+    „die betroffenen Stellen“."""
+    for stufe, extra, sg, pl in (
+            ("P1", {}, "die betroffene Stelle umgehend beheben", "die betroffenen Stellen umgehend beheben"),
+            ("P1", HOCH, "die betroffene Stelle vor dem nächsten Release zu beheben", "die betroffenen Stellen vor dem nächsten Release zu beheben"),
+            ("P2", {}, "die betroffene Stelle zeitnah einzuplanen und zu beheben", "die betroffenen Stellen zeitnah einzuplanen und zu beheben"),
+            ("P3", {}, "die betroffene Stelle bei nächster Gelegenheit zu beheben", "die betroffenen Stellen bei nächster Gelegenheit zu beheben")):
+        assert sg in zus(md_von(befund(1, stufe=stufe, **extra))), (stufe, sg)
+        assert pl in zus(md_von(befund(1, stufe=stufe, **extra), befund(2, stufe=stufe, **extra))), (stufe, pl)
+        assert pl in zus(md_von(befund(1, stufe=stufe, **extra), befund(2, stufe=stufe, **extra, **UNB))), (stufe, "gemischt")
+    for stufe, extra, sg, pl in (
+            ("P1", HOCH, "die betroffene Stelle vor dem nächsten Release zu prüfen und bei Bestätigung zu beheben",
+             "die betroffenen Stellen vor dem nächsten Release zu prüfen und bei Bestätigung zu beheben"),
+            ("P2", {}, "die betroffene Stelle zeitnah zu prüfen und bei Bestätigung zu beheben",
+             "die betroffenen Stellen zeitnah zu prüfen und bei Bestätigung zu beheben"),
+            ("P3", {}, "die betroffene Stelle bei nächster Gelegenheit zu prüfen und bei Bestätigung zu beheben",
+             "die betroffenen Stellen bei nächster Gelegenheit zu prüfen und bei Bestätigung zu beheben")):
+        assert sg in zus(md_von(befund(1, stufe=stufe, **extra, **UNB))), (stufe, sg)
+        assert pl in zus(md_von(befund(1, stufe=stufe, **extra, **UNB), befund(2, stufe=stufe, **extra, **UNB))), (stufe, pl)
 
 
 def test_zusammenfassung_ausnutzbar_nur_bestaetigt():
@@ -900,8 +924,9 @@ def test_zusammenfassung_ton_der_bausteine():
 def test_empfehlungen_in_sie_form():
     """Jede Empfehlung enthält „Sie“ oder beginnt mit „Wir empfehlen“; Du-Imperative („Prüfe“, „Plane“) erkennt text_verstoesse nicht."""
     for stufe, (_auswirkung, best, unbest) in kundenbericht._STUFE_TEXT.items():
-        for satz in (best, unbest):
+        for satz in (*best, *unbest):                     # je Empfehlung Singular und Plural
             assert satz.startswith("Wir empfehlen") or re.search(r"\bSie\b", satz), (stufe, satz)
+        assert len(best) == 2 and len(unbest) == 2
     assert set(kundenbericht._STUFE_TEXT) == set(kundenbericht.KUNDENSTUFEN)
 
 
@@ -934,37 +959,47 @@ def test_zusammenfassung_ohne_befunde_entwarnung():
 # --- Eingeschränkte Prüfung
 
 EINGESCHRAENKT = [
-    ("gitleaks fehlt (Standardausnahmen)", "Suche nach Zugangsschlüsseln"),
-    ("osv-scanner fehlt", "Abgleich der Abhängigkeiten"),
-    ("abhaengigkeiten fehlgeschlagen (Exit 2)", "Abgleich der Abhängigkeiten"),
-    ("lieferkette fehlgeschlagen (Exit 1)", "Prüfung der Build-Konfiguration"),
-    ("docker-fehlt", "Nachstellung in einer Testumgebung"), ("build-fehler", "Nachstellung in einer Testumgebung"),
-    ("build-timeout", "Nachstellung in einer Testumgebung"),
-    ("start-fehler", "Nachstellung in einer Testumgebung"), ("lockfile-fehlt", "Nachstellung in einer Testumgebung"),
-    ("lockfile-fremde-quelle", "Nachstellung in einer Testumgebung"), ("nicht-npm", "Nachstellung in einer Testumgebung"),
-    ("Zeitbudget von bericht.py kontext erschöpft", "Abschluss einzelner Prüfungen (Zeitlimit)"),
-    ("ki.py erkennen fehlgeschlagen (Exit 1)", "Prüfung der KI-Funktionen"),
-    ("Modell-Mock nicht möglich: kein Modell", "Prüfung der KI-Funktionen"),
+    ("gitleaks fehlt (Standardausnahmen)", "die Suche nach Zugangsschlüsseln war nicht möglich"),
+    ("osv-scanner fehlt", "der Abgleich der Abhängigkeiten war nicht möglich"),
+    ("abhaengigkeiten fehlgeschlagen (Exit 2)", "der Abgleich der Abhängigkeiten war nicht möglich"),
+    ("lieferkette fehlgeschlagen (Exit 1)", "die Prüfung der Build-Konfiguration war nicht möglich"),
+    ("docker-fehlt", "die Nachstellung in einer Testumgebung war nicht möglich"), ("build-fehler", "die Nachstellung in einer Testumgebung war nicht möglich"),
+    ("build-timeout", "die Nachstellung in einer Testumgebung war nicht möglich"),
+    ("start-fehler", "die Nachstellung in einer Testumgebung war nicht möglich"), ("lockfile-fehlt", "die Nachstellung in einer Testumgebung war nicht möglich"),
+    ("lockfile-fremde-quelle", "die Nachstellung in einer Testumgebung war nicht möglich"), ("nicht-npm", "die Nachstellung in einer Testumgebung war nicht möglich"),
+    ("Zeitbudget von bericht.py kontext erschöpft", "einzelne Prüfungen konnten wegen des Zeitlimits nicht abgeschlossen werden"),
+    ("ki.py erkennen fehlgeschlagen (Exit 1)", "die Prüfung der KI-Funktionen war nicht möglich"),
+    ("Modell-Mock nicht möglich: kein Modell", "die Prüfung der KI-Funktionen war nicht möglich"),
 ]
+SATZ_ENDE = ". Das Ergebnis ist deshalb nicht vollständig."
+
+
+def einschraenkung(text):
+    """Der Satz zur eingeschränkten Prüfung (TF4 Review 2, N5-5: keine verschachtelte Klammer; jeder Eintrag sagt, was eingeschränkt war)."""
+    return f"Die Prüfung war eingeschränkt: {text}{SATZ_ENDE}"
 
 
 @pytest.mark.parametrize("hinweis,text", EINGESCHRAENKT)
 def test_eingeschraenkt_tabelle(hinweis, text):
     md = md_von(befund(), hinweise=[hinweis])
-    satz = [x for x in abschnitt(md, "## Umfang und Grenzen") if x.startswith("Die Prüfung war eingeschränkt (")]
-    assert satz == [f"Die Prüfung war eingeschränkt ({text}); das Ergebnis ist deshalb nicht vollständig."]
+    satz = [x for x in abschnitt(md, "## Umfang und Grenzen") if x.startswith("Die Prüfung war eingeschränkt")]
+    assert satz == [einschraenkung(text)]
+    assert "(" not in satz[0] and ")" not in satz[0], "keine Klammer im Satz (auch keine verschachtelte)"
 
 
 def test_eingeschraenkt_mehrere_hinweise():
     md = md_von(befund(), hinweise=["KI-Prüfpunkte: angewendet (sdk)", "gitleaks fehlt (nicht im PATH)", "osv-scanner fehlt", "docker-fehlt",
                                     "build-fehler", "Zeitbudget erschöpft", "ki.py erkennen fehlgeschlagen (Exit 1)", "Modell-Mock nicht möglich: x",
                                     "gitleaks-Standardausnahmen nicht geprüft: abc", "native-module"], teilpfad="apps/web")
-    satz = next(x for x in abschnitt(md, "## Umfang und Grenzen") if x.startswith("Die Prüfung war eingeschränkt ("))
-    for text in ("nur der Teilbereich apps/web", "Suche nach Zugangsschlüsseln", "Abgleich der Abhängigkeiten",
-                 "Nachstellung in einer Testumgebung", "Abschluss einzelner Prüfungen (Zeitlimit)", "Prüfung der KI-Funktionen"):
+    satz = next(x for x in abschnitt(md, "## Umfang und Grenzen") if x.startswith("Die Prüfung war eingeschränkt"))
+    teile = ["geprüft wurde nur der Teilbereich apps/web", "die Suche nach Zugangsschlüsseln war nicht möglich", "der Abgleich der Abhängigkeiten war nicht möglich",
+             "die Nachstellung in einer Testumgebung war nicht möglich", "einzelne Prüfungen konnten wegen des Zeitlimits nicht abgeschlossen werden",
+             "die Prüfung der KI-Funktionen war nicht möglich"]
+    for text in teile:
         assert satz.count(text) == 1, (text, satz)
-    assert "Prüfung der Build-Konfiguration" not in satz
-    assert satz.endswith("; das Ergebnis ist deshalb nicht vollständig.")
+    assert "Build-Konfiguration" not in satz
+    assert satz == einschraenkung("; ".join(teile)), "Reihenfolge der Tabelle, getrennt mit Semikolon"
+    assert "(" not in satz
     # nichts zutreffend: kein Satz (auch kein Treffer auf bloße Erwähnung ähnlicher Hinweise)
     ohne = md_von(befund(), hinweise=["KI-Prüfpunkte: nicht anwendbar (kein LLM- oder Agenten-SDK in package.json)", "native-module"])
     assert "Die Prüfung war eingeschränkt" not in ohne
@@ -974,7 +1009,7 @@ def test_eingeschraenkt_keine_befunde_kein_entwarnungssatz():
     md = md_von(befund(1, status="verworfen", grund="Kein Fehler"), hinweise=["gitleaks fehlt (nicht im PATH)"])
     z = zus(md)
     assert "keine ausnutzbaren Schwachstellen" not in md and "keine Schwachstellen" not in md
-    assert "Die Prüfung war eingeschränkt (Suche nach Zugangsschlüsseln); das Ergebnis ist deshalb nicht vollständig." in z
+    assert einschraenkung("die Suche nach Zugangsschlüsseln war nicht möglich") in z
     assert "Die Prüfung war eingeschränkt" in "\n".join(abschnitt(md, "## Umfang und Grenzen"))
     assert tabelle(md) == {"Kritisch": 0, "Hoch": 0, "Mittel": 0, "Niedrig": 0}
 
@@ -982,17 +1017,17 @@ def test_eingeschraenkt_keine_befunde_kein_entwarnungssatz():
 def test_teilpfad_eingeschraenkt():
     md = md_von(befund(1, status="verworfen", grund="Kein Fehler"), teilpfad="apps/web")
     assert "In der geprüften Version wurden keine ausnutzbaren Schwachstellen gefunden." not in md
-    assert "Die Prüfung war eingeschränkt (nur der Teilbereich apps/web); das Ergebnis ist deshalb nicht vollständig." in md
+    assert einschraenkung("geprüft wurde nur der Teilbereich apps/web") in md
     kopf = md_zeilen(md)[:abschnitt_ende(md)]
     assert any("nur der Teilbereich apps/web" in x for x in kopf)
     mit = md_von(befund(), teilpfad="apps/web")
-    assert "Die Prüfung war eingeschränkt (nur der Teilbereich apps/web)" in "\n".join(abschnitt(mit, "## Umfang und Grenzen"))
+    assert einschraenkung("geprüft wurde nur der Teilbereich apps/web") in abschnitt(mit, "## Umfang und Grenzen")
 
 
 def test_teilpfad_im_eingeschraenkt_satz_escaped():
     """M22: der Teilpfad im Satz „Die Prüfung war eingeschränkt“ geht wie im Kopf durch escape()."""
     md = md_von(befund(), teilpfad="apps/web_ui")
-    satz = "Die Prüfung war eingeschränkt (nur der Teilbereich apps/web\\_ui); das Ergebnis ist deshalb nicht vollständig."
+    satz = einschraenkung("geprüft wurde nur der Teilbereich apps/web\\_ui")
     assert satz in abschnitt(md, "## Umfang und Grenzen")
     assert satz in abschnitt(md, "## Management-Zusammenfassung")
 
@@ -1000,7 +1035,7 @@ def test_teilpfad_im_eingeschraenkt_satz_escaped():
 def test_eingeschraenkt_satz_auch_am_ende_der_zusammenfassung_mit_befunden():
     """TF4 Review 2 (I4): bei eingeschränkter Prüfung steht der Satz am Ende der Management-Zusammenfassung und unter „Umfang und Grenzen“."""
     md = md_von(befund(), hinweise=["osv-scanner fehlt"])
-    satz = "Die Prüfung war eingeschränkt (Abgleich der Abhängigkeiten); das Ergebnis ist deshalb nicht vollständig."
+    satz = einschraenkung("der Abgleich der Abhängigkeiten war nicht möglich")
     z = [x for x in abschnitt(md, "## Management-Zusammenfassung") if x]
     assert z[-1] == satz and z.count(satz) == 1
     assert abschnitt(md, "## Umfang und Grenzen").count(satz) == 1
@@ -1017,7 +1052,7 @@ def test_abschnittsfolge_und_fuss():
     assert md_zeilen(md).index("## Befunde") < md.splitlines().index("### S-1 · Kritisch · Fremde Bestellungen einsehbar") < md_zeilen(md).index("## Umfang und Grenzen")
     assert md.endswith("\n\nManibase · vertraulich\n") and md.count("Manibase · vertraulich") == 1
     grenzen = "\n".join(abschnitt(md, "## Umfang und Grenzen"))
-    for satz in ("Geprüft wurde der oben genannte Commit.", "Code-Analyse durch KI-Agenten", "isolierten Testumgebung ohne Zugriff auf Produktivsysteme",
+    for satz in ("Geprüft wurde der oben unter „Geprüfter Stand (Commit)“ genannte Stand.", "Code-Analyse durch KI-Agenten", "isolierten Testumgebung ohne Zugriff auf Produktivsysteme",
                  "keine Garantie auf Vollständigkeit", "Der technische Bericht mit Details liegt Manibase vor.",
                  "Nach Umsetzung der Maßnahmen empfehlen wir eine erneute Prüfung."):
         assert satz in grenzen, satz
@@ -1136,9 +1171,10 @@ def test_feste_texte_ohne_du_und_spuren():
     texte = {z for d in feste_texte_faelle() for z in md_zeilen(kundenbericht.markdown_erzeugen(d))}
     assert any("Es bestehen zwei Schwachstellen der Stufe Kritisch" in t for t in texte)
     for stufe in kundenbericht.KUNDENSTUFEN:               # alle Empfehlungen sind in den Fällen enthalten und bestehen die Prüfung
-        for satz in kundenbericht._STUFE_TEXT[stufe][1:]:
-            assert any(satz in t for t in texte), satz
+        for satz in (*kundenbericht._STUFE_TEXT[stufe][1], *kundenbericht._STUFE_TEXT[stufe][2]):
             assert bericht.text_verstoesse(satz) == [], satz
+            if "Stellen" in satz:                              # der Plural steht in den Fällen, der Singular in `test_empfehlung_singular_…`
+                assert any(satz in t for t in texte), satz
     for t in texte:
         assert bericht.text_verstoesse(t) == [], t
 
@@ -1149,7 +1185,7 @@ def test_feste_texte_enthalten_keine_nachtraeglichen_datenwerte():
     for zeile in md_zeilen(md):
         if NEUTRAL in zeile:
             assert zeile.startswith(("# Manibase · Sicherheitsprüfung ", "### S-", "**Risiko:** ", "**Maßnahme:** ", "**Betroffene Datei:** ",
-                                     "**Geprüfter Bereich:** ", "Die Prüfung war eingeschränkt (", "**Geprüfter Bereich:** ")), zeile
+                                     "**Geprüfter Bereich:** ", "Die Prüfung war eingeschränkt: ", "**Geprüfter Bereich:** ")), zeile
 
 
 def test_erstellen_schreibt_neues_markdown(tmp_path):
