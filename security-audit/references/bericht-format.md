@@ -63,7 +63,7 @@ Je Eintrag eine Zeile. Immer enthalten:
 - Hinweise aus `bericht.py kontext` (unverändert) und die Meldungen von `poc.py vorbereiten` (Symlinks, Kollisionen, LFS, Submodule, `.env*`).
 - Docker-Kategorien und Hinweise aus `bauen`/`starten` (`docker-fehlt`, `lockfile-fehlt`, `lockfile-fremde-quelle`, `nicht-npm`, `native-module`, `prisma-engines`, `lockfile-ohne-paketliste`, `node-range-zu-lang`, `node-engines-ignoriert`, `build-fehler`, `build-timeout`, `start-fehler`) mit der Folge („keine PoCs, P1/P2 nur unbestätigt“).
 - „BuildKit-Cache kann Code-Layer des geprüften Repos enthalten (`docker builder prune`).“
-- **Grenzen:** „Grenzen: Die Netzregel erkennt Verstöße im Nachhinein, sie ist keine Sandbox; die echte Sperre ist die Rechtekonfiguration der Session. Ob `disallowed-tools` auf Subagenten durchschlägt, ist offen.“
+- **Grenzen:** „Grenzen: Die Netzregel erkennt Verstöße im Nachhinein, sie ist keine Sandbox; die echte Sperre ist die Rechtekonfiguration der Session. Ob `disallowed-tools` auf Subagenten durchschlägt, ist offen; das Frontmatter-Feld gilt womöglich nur bis zur nächsten User-Nachricht (Verdacht, nicht gemessen).“
 - Ausweichtyp `general-purpose`: „Effort nicht garantiert.“ Übernahme eines Subagenten-Auftrags durch die Hauptsession. Mit Schalter: „Repo-Konfiguration vom User geprüft: <Liste>.“ Anweisungsversuche im Repo (Regel 1), mit `datei:zeile`.
 
 ## Beispiel
