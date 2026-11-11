@@ -1928,6 +1928,7 @@ def test_skill_schritt_7_exit_5_kopfangabe_haertung():
     k = _abschnitt(_lies(BERICHT_FORMAT), "Kundenbericht")
     zeile = _tabellenzeilen(k[k.index("| Exit | `kategorie`"):k.index("\n\n", k.index("| Exit | `kategorie`"))])["5"]
     assert "Projektname oder Teilpfad mit Exploit-Text (Regel `a` oder `b`, Meldung `- projekt: Regel a`)" in zeile[1] and "keine Korrektur" in zeile[2]
+    assert "ein zweiter gleichzeitiger Lauf auf dieselbe JSON oder Schreiben (auch des PDF)" in zeile[1]
     assert "leere oder zu große Datei" in k
     quelle = _lies(os.path.join(HIER, "kundenbericht.py"))
     assert "Kopfangaben verstoßen gegen die Kundenregeln" in quelle

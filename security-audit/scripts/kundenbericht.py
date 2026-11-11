@@ -13,7 +13,8 @@ Zeilengrenze: höchstens 30 Meldungszeilen, ohne `kategorie:`, `kunde-md:` und `
   3  `pdf-werkzeug-fehlt` pandoc oder weasyprint fehlt oder ist nicht startbar; nur das Markdown liegt (zweite Zeile `kunde-md:`)
   4  `pdf-fehler`        PDF-Kette gescheitert (HTML-Prüfung, stderr, leere oder zu große Datei, Timeout); nur das Markdown liegt
   5  `eingabe`           Argumente, Eingabedatei, Kollision, Ziel, Schema außerhalb der Kundenfelder (nur ID und Feld, nie ein Wert), Kopfangaben
-                         (Projektname, Teilpfad) mit Exploit-Text (Regel a oder b, `- <feld>: Regel <regel>`), Schreiben; keine Korrektur
+                         (Projektname, Teilpfad) mit Exploit-Text (Regel a oder b, `- <feld>: Regel <regel>`), ein zweiter gleichzeitiger Lauf
+                         auf dieselbe JSON (Sperre), Schreiben; keine Korrektur
 
 Die Meldungen zu Exit 2 haben die Form `<id> <feld>: Regel <regel>[ (<detail>)]` und nennen nie den Treffertext; ausgenommen sind
 das Du-Wort und das Token bei Regel a (siehe bericht.kunden_verstoesse); bei mehr als 200000 Token in den `poc`-Feldern, einem `poc`
@@ -22,6 +23,9 @@ jedes geprüfte Feld Regel a mit dem festen Detail „zu viele Token zum Prüfen
 bleibt für Argumentfehler (Usage). Nur Standardbibliothek.
 """
 import argparse
+import contextlib
+import errno
+import fcntl
 import json
 import os
 import re
@@ -683,16 +687,43 @@ def pdf_erstellen(md_pfad: str, pdf_pfad: str, titel: str, ende: float) -> tuple
 
 # ------------------------------------------------------------------------------------ CLI
 
+@contextlib.contextmanager
+def _sperre(pfad: str):
+    """Sperre (flock, nicht blockierend) auf die Eingabe-JSON für die Dauer eines Laufs: zwei `erstellen` auf dieselbe Datei würden sich die
+    Kundendateien gegenseitig entfernen (das Entfernen kommt vor dem Lesen) und ihr PDF aus dem Markdown des anderen bauen. Der zweite Lauf
+    endet mit Exit 5. Die Sperre hängt am offenen Dateideskriptor: sie endet mit dem Lauf, auch nach einem Absturz oder SIGKILL (nie eine
+    Sperrdatei, die liegen bleibt). Nur zwischen Läufen von `erstellen`; `rendern` und das Schreiben der JSON sperrt sie nicht."""
+    try:
+        fd = os.open(pfad, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        raise Abbruch(5, "eingabe", ["Die Eingabedatei ist nicht lesbar."]) from None
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as ex:
+            if ex.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                raise Abbruch(5, "eingabe", ["Ein anderer Lauf von erstellen bearbeitet diese Datei gerade."]) from None
+            raise Abbruch(5, "eingabe", ["Die Eingabedatei lässt sich nicht sperren."]) from None
+        yield
+    finally:
+        os.close(fd)
+
+
 def _erstellen(pfad: str, ende: float) -> tuple[int, str | None, list[str]]:
     pfad = os.path.abspath(pfad)
     try:
         md, pdf = _pfade_pruefen(pfad)
-        _alte_dateien_entfernen(md, pdf)
-        daten = _lesen(pfad)
-        _pruefen(daten)
-        _ablegen(md, markdown_erzeugen(daten))
+        with _sperre(pfad):
+            return _erstellen_gesperrt(pfad, md, pdf, ende)
     except Abbruch as a:
         return a.code, a.kategorie, a.zeilen
+
+
+def _erstellen_gesperrt(pfad: str, md: str, pdf: str, ende: float) -> tuple[int, str | None, list[str]]:
+    _alte_dateien_entfernen(md, pdf)
+    daten = _lesen(pfad)
+    _pruefen(daten)
+    _ablegen(md, markdown_erzeugen(daten))
     zeilen = [f"kunde-md: {_t(md, 4096)}"]
     try:
         code, kategorie, meldungen = pdf_erstellen(md, pdf, pagetitle(daten), ende)

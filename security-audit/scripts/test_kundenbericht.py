@@ -1925,6 +1925,57 @@ def test_pruefen_ohne_kopfverstoss_aendert_nichts_haertung(tmp_path):
     assert lauf(pfad).returncode == 3
 
 
+# ------------------------------------------------------------------------------------ TF4 Härtung: zwei Läufe gleichzeitig
+
+def test_zweiter_lauf_auf_dieselbe_json_endet_mit_exit5_und_entfernt_nichts_haertung(tmp_path):
+    """Zwei `erstellen` auf dieselbe JSON: der zweite würde die frischen Kundendateien des ersten entfernen (das Entfernen vor dem Lesen) und
+    mit ihm um `-kunde.md` und `-kunde.pdf` streiten. Eine Sperre (flock auf die Eingabe-JSON, bis zum Ende des Laufs gehalten) macht ihn
+    zu Exit 5; sein Entfernen kommt nach der Sperre, also nie vor dem Ende des ersten."""
+    import fcntl
+    pfad = schreibe(tmp_path / "out", bericht_daten())
+    for endung in ("md", "pdf"):
+        open(kunde_pfad(pfad, endung), "w").write("Stand des ersten Laufs")
+    fd = os.open(pfad, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)                      # so hält ein laufender erster Lauf die Datei
+        p = lauf(pfad)
+        assert p.returncode == 5, p.stdout + p.stderr
+        assert zeilen(p) == ["kategorie: eingabe", "Ein anderer Lauf von erstellen bearbeitet diese Datei gerade."]
+        assert [open(kunde_pfad(pfad, e)).read() for e in ("md", "pdf")] == ["Stand des ersten Laufs"] * 2, "nichts entfernt, nichts überschrieben"
+        assert inhalt(tmp_path / "out") == [BASIS + "-kunde.md", BASIS + "-kunde.pdf", BASIS + ".json"]
+    finally:
+        os.close(fd)
+    p = lauf(pfad)                                                           # Sperre frei: der Lauf geht durch (ohne Werkzeuge bis Exit 3)
+    assert p.returncode == 3, p.stdout + p.stderr
+    assert "Stand des ersten Laufs" not in open(kunde_pfad(pfad, "md"), encoding="utf-8").read()
+
+
+def test_sperre_wird_nach_jedem_lauf_frei_haertung(tmp_path):
+    """Auch nach Exit 2 (Inhaltsfehler) und Exit 5 (Eingabe) bleibt die Sperre nicht hängen."""
+    import fcntl
+    pfad = schreibe(tmp_path / "out", bericht_daten(befund(1, massnahme=VORSPANN + "Bring dir den Zugriff.")))
+    assert lauf(pfad).returncode == 2
+    fd = os.open(pfad, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)                      # wirft, wenn der Lauf sie behalten hätte
+    finally:
+        os.close(fd)
+
+
+def test_sperre_nicht_moeglich_exit5_haertung(tmp_path, monkeypatch, capsys):
+    """Lässt sich die Datei nicht sperren (andere Ursache als ein zweiter Lauf), endet der Lauf mit Exit 5 statt ohne Schutz weiterzulaufen."""
+    import fcntl
+
+    def kaputt(fd, art):
+        raise OSError(errno_enolck, "keine Sperren")
+    errno_enolck = __import__("errno").ENOLCK
+    monkeypatch.setattr(fcntl, "flock", kaputt)
+    pfad = schreibe(tmp_path / "out", bericht_daten())
+    assert kundenbericht.main(["erstellen", "--json", str(pfad)]) == 5
+    assert capsys.readouterr().out.splitlines() == ["kategorie: eingabe", "Die Eingabedatei lässt sich nicht sperren."]
+    assert inhalt(tmp_path / "out") == [BASIS + ".json"]
+
+
 # ------------------------------------------------------------------------------------ Opt-in: echte Werkzeuge (SECURITY_AUDIT_PDF=1)
 
 nur_echt = pytest.mark.skipif(os.environ.get("SECURITY_AUDIT_PDF") != "1", reason="echte pandoc und weasyprint nur mit SECURITY_AUDIT_PDF=1")
