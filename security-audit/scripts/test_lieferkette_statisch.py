@@ -1213,3 +1213,49 @@ def test_lieferkette_budget_laeuft_ueber_den_deckel_r1_4(umg, monkeypatch, capsy
     rc = lieferkette.main(["lieferkette", "--lauf", LAUF, "--quelle", umg.quelle()])
     capsys.readouterr()
     assert rc == 0 and aufrufe == [("SECURITY_AUDIT_LK_BUDGET", 60)]
+
+
+# ------------------------------------------------------------------------------------ npm-Aliasse, npx, pnpm recursive (Review R1-5)
+
+@pytest.mark.parametrize("zeile,genannt", [
+    ("RUN npm add express", "`npm add`"), ("RUN npm it", "`npm it`"), ("RUN npm install-test", "`npm install-test`"),
+    ("RUN npm isntall", "`npm isntall`"), ("RUN npm in", "`npm in`"), ("RUN npm ins", "`npm ins`"),
+    ("RUN npm inst", "`npm inst`"), ("RUN npm insta", "`npm insta`"), ("RUN npm instal", "`npm instal`"),
+    ("RUN npm isnt", "`npm isnt`"), ("RUN npm isnta", "`npm isnta`"), ("RUN npm isntal", "`npm isntal`"),
+    ("RUN npx -y pnpm install", "`pnpm install`"), ("RUN npx --yes yarn", "nacktes `yarn`"), ("RUN npx pnpm", "nacktes `pnpm`"),
+    ("RUN npx -y npm install", "`npm install`"), ("RUN npx --package=pnpm@9 pnpm i", "`pnpm i`"),
+    ("RUN pnpm recursive install", "`pnpm install`"), ("RUN pnpm multi i", "`pnpm i`"), ("RUN pnpm m install", "`pnpm install`"),
+    ("RUN pnpm -r install", "`pnpm install`"),
+    ("RUN pnpm install --frozen-lockfile --no-frozen-lockfile", "`pnpm install`"),          # R1-10c: letzte Angabe gilt
+    ("RUN yarn install --immutable --no-immutable", "`yarn install`"),
+])
+def test_installation_alias_befund_r1_5(umg, zeile, genannt):
+    umg.schreibe("Dockerfile", f"FROM node\n{zeile}\n")
+    (e,) = umg.entwuerfe("installation-ohne-lockfile-treue")
+    assert e["zeile"] == 2 and genannt in e["beschreibung"]
+
+
+@pytest.mark.parametrize("zeile", [
+    "RUN npx -y pnpm install --frozen-lockfile", "RUN npx --yes yarn install --immutable", "RUN npx cowsay hi",
+    "RUN npx -y", "RUN npx --package=pnpm@9", "RUN npm add -g pm2", "RUN npm isntall -g x", "RUN npm it --package-lock-only",
+    "RUN pnpm recursive", "RUN pnpm recursive run build", "RUN pnpm recursive install --frozen-lockfile",
+    "RUN npm ic", "RUN npm install-clean", "RUN npm cit",
+])
+def test_installation_alias_negativfaelle_r1_5(umg, zeile):
+    umg.schreibe("Dockerfile", f"FROM node\n{zeile}\n")
+    assert umg.entwuerfe("installation-ohne-lockfile-treue") == []
+
+
+@pytest.mark.parametrize("zeile", ["RUN npm install --ignore-scripts --no-ignore-scripts", "RUN npm add --ignore-scripts=false",
+                                   "RUN pnpm install --ignore-scripts --no-ignore-scripts"])
+def test_install_skripte_offen_no_flag_hebt_ignore_scripts_auf_r1_10c(umg, zeile):
+    umg.schreibe("package-lock.json" if zeile.startswith("RUN npm") else "pnpm-lock.yaml",
+                 npm_lock_mit_skripten(["fsevents"]) if zeile.startswith("RUN npm") else PNPM_LOCK_V6)
+    umg.schreibe("Dockerfile", f"FROM node\n{zeile}\n")
+    assert len(umg.entwuerfe("install-skripte-offen")) == 1
+
+
+def test_install_skripte_offen_alias_mit_ignore_scripts_schuetzt_r1_5(umg):
+    umg.schreibe("package-lock.json", npm_lock_mit_skripten(["fsevents"]))
+    umg.schreibe("Dockerfile", "FROM node\nRUN npm add --ignore-scripts left-pad\n")
+    assert umg.entwuerfe("install-skripte-offen") == []

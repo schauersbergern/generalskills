@@ -1482,6 +1482,11 @@ YAML_PRAEFIX = re.compile(r"(?:-\s+|(?:run|script|before_script|after_script|com
 ENV_ZUWEISUNG = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 BEFEHLSTRENNER = re.compile(r"&&|\|\||;|\|")
 KURZ_GLOBAL = re.compile(r"-[A-Za-z]*g[A-Za-z]*")
+# npm-Aliasse von `install` (npm `lib/utils/cmd-list.js`, `install-test` mit `it`); `ci` und seine Aliasse sind lockfile-treu
+NPM_INSTALL_ALIASSE = ("install", "i", "in", "ins", "inst", "insta", "instal", "isnt", "isnta", "isntal", "isntall", "add",
+                       "install-test", "it")
+PNPM_REKURSIV = ("recursive", "multi", "m")
+NPX_WERT_OPTIONEN = frozenset(("-p", "--package", "-c", "--call"))
 WERT_OPTIONEN = frozenset(("--prefix", "-C", "--cwd", "--workspace", "-w", "--registry", "--cache", "--loglevel",
                            "--userconfig", "--filter", "-F", "--dir", "--modules-folder"))
 VORSATZ_BEFEHLE = ("sudo", "env", "exec", "time", "nohup", "timeout")
@@ -1864,30 +1869,52 @@ def _flag_an(args: list[str], name: str) -> bool:
     return an
 
 
-def _bewerte(tok: list[str]) -> tuple[str, str | None, bool | None] | None:
-    """(Paketmanager, Label, skripte_aus) für npm-, pnpm- und yarn-Befehle, die installieren; sonst None. Label None: der Aufruf
-    ist lockfile-treu (`npm ci`, `--frozen-lockfile`, `--immutable`, jeweils nicht `=false`) oder ein Sonderfall (global,
-    nur Lockfile). `skripte_aus` nur für npm- und pnpm-Installationen: trägt der Aufruf `--ignore-scripts`?"""
-    pm = tok[0]
-    if pm not in ("npm", "pnpm", "yarn"):
-        return None
-    args = tok[1:]
-    flags = {a.split("=", 1)[0] for a in args if a.startswith("-")}
-    sub = None
-    i = 0
+def _naechstes_wort(args: list[str], ab: int) -> tuple[str | None, int]:
+    """Erstes Wort ohne führendes `-` ab Index `ab` (Optionen mit Wert, `WERT_OPTIONEN`, überspringen ihr Argument) und sein
+    Index; (None, len(args)) ohne ein solches Wort."""
+    i = ab
     while i < len(args):
         a = args[i]
         if a.startswith("-"):
             i += 2 if (a in WERT_OPTIONEN and "=" not in a) else 1
             continue
-        sub = a
-        break
+        return a, i
+    return None, len(args)
+
+
+def _bewerte_npx(args: list[str]) -> tuple[str, str | None, bool | None] | None:
+    """`npx [Optionen] <npm|pnpm|yarn>[@Version] …`: wie der Paketmanager ohne `npx` bewerten; sonst None."""
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        i += 2 if args[i] in NPX_WERT_OPTIONEN else 1
+    if i >= len(args):
+        return None
+    name = args[i].split("@", 1)[0]
+    return _bewerte([name, *args[i + 1:]]) if name in ("npm", "pnpm", "yarn") else None
+
+
+def _bewerte(tok: list[str]) -> tuple[str, str | None, bool | None] | None:
+    """(Paketmanager, Label, skripte_aus) für npm-, pnpm- und yarn-Befehle, die installieren; sonst None. Label None: der Aufruf
+    ist lockfile-treu (`npm ci`, `--frozen-lockfile`, `--immutable`, jeweils nicht `=false`) oder ein Sonderfall (global,
+    nur Lockfile). `skripte_aus` nur für npm- und pnpm-Installationen: trägt der Aufruf `--ignore-scripts`?"""
+    pm = tok[0]
+    if pm == "npx":                                          # `npx -y pnpm install` führt den Paketmanager aus
+        return _bewerte_npx(tok[1:])
+    if pm not in ("npm", "pnpm", "yarn"):
+        return None
+    args = tok[1:]
+    flags = {a.split("=", 1)[0] for a in args if a.startswith("-")}
+    sub, i = _naechstes_wort(args, 0)
+    if pm == "pnpm" and sub in PNPM_REKURSIV:                # `pnpm recursive install`: das Wort danach ist der Unterbefehl
+        sub, i = _naechstes_wort(args, i + 1)
+        if sub is None:
+            return None
     ist_global = bool({"--global", "--package-lock-only", "--lockfile-only"} & flags) or "--location=global" in args or \
         any(KURZ_GLOBAL.fullmatch(a) for a in args if not a.startswith("--"))
     if pm == "npm":
-        if sub not in ("install", "i", "ci", "clean-install") or ist_global:
+        if sub not in NPM_INSTALL_ALIASSE + ("ci", "clean-install") or ist_global:
             return None
-        return pm, (f"npm {sub}" if sub in ("install", "i") else None), _flag_an(args, "--ignore-scripts")
+        return pm, (f"npm {sub}" if sub in NPM_INSTALL_ALIASSE else None), _flag_an(args, "--ignore-scripts")
     if sub is None and flags & {"--version", "-v", "--help", "-h"}:
         return None
     if pm == "pnpm":
