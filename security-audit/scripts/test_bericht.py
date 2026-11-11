@@ -135,6 +135,29 @@ def test_vorhandene_ergebnisdateien_ohne_reservierung_kollidieren_r1_5(tmp_path)
         os.remove(os.path.join(ordner, k1["basisname"] + ext))
 
 
+def test_teilpfad_mit_steuerzeichen_ist_ungueltig_auch_wenn_der_pfad_existiert_r1_20(tmp_path):
+    r = neues_repo(tmp_path / "r", {"src\nx/a.js": "x", "ok.js": "y"})
+    with pytest.raises(bericht.KontextFehler, match="Ungültiger Teilpfad"):
+        bericht.kontext(str(r), "src\nx", JETZT)
+
+
+def test_kontext_zeitbudget_nach_repo_hinweise_reserviert_nichts_r1_20(tmp_path, monkeypatch):
+    r = neues_repo(tmp_path / "kunde-portal", origin="https://github.com/a/kunde-portal.git")
+    monkeypatch.setattr(bericht.gitkopie, "repo_hinweise", lambda *a, **k: [])
+    monkeypatch.setattr(bericht.gitkopie, "frist_erschoepft", lambda: True)
+    with pytest.raises(bericht.KontextFehler, match="Zeitbudget"):
+        bericht.kontext(str(r), None, JETZT)
+    ordner = os.path.join(str(tmp_path / "home"), ".claude", "security-reviews", "kunde-portal")
+    assert not os.path.isdir(ordner) or not os.listdir(ordner)
+
+
+def test_kontext_ausgabe_ist_ascii_r1_20(tmp_path):
+    r = neues_repo(tmp_path / "r", {"ä/a.js": "x"})
+    p = lauf("kontext", "--repo", str(r), "--teilpfad", "ä")
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.isascii() and json.loads(p.stdout)["teilpfad"] == "ä"
+
+
 def test_teilpfad_slug_und_normalisierung(tmp_path):
     r = neues_repo(tmp_path / "kunde-portal", {"Src/API v2/x.js": "x", "lib/b.js": "y"},
                    origin="https://github.com/a/kunde-portal.git")
@@ -389,6 +412,33 @@ def test_schema_ungueltiger_status_wird_abgelehnt_r1_5(status):
     d["befunde"] = [befund(id="S-9", status=status)]
     fehler = bericht.pruefe_schema(d)
     assert any("S-9" in f and "status" in f for f in fehler), fehler
+
+
+@pytest.mark.parametrize("version", [2, 0, "1", 1.0, True, None])
+def test_schema_version_muss_1_sein_r1_20(version):
+    d = beispiel()
+    d["version"] = version
+    assert "version muss 1 sein" in bericht.pruefe_schema(d)
+
+
+@pytest.mark.parametrize("eintrag", [{"flaeche": "API", "dateien": [1]}, {"flaeche": "API", "dateien": "x.js"},
+                                     {"flaeche": 1, "dateien": []}, {"dateien": []}, "API", None])
+def test_schema_karte_nicht_text_wirft_nie_r1_20(eintrag):
+    """R1-20: `pruefe_schema` wirft nie, auch bei Nicht-Text in `karte[].dateien`."""
+    d = beispiel()
+    d["karte"] = [eintrag]
+    assert any(f.startswith("karte[0]") for f in bericht.pruefe_schema(d))
+
+
+def test_rendern_json_groessengrenze_r1_20(tmp_path, monkeypatch, capsys):
+    pfad = tmp_path / "b.json"
+    pfad.write_text(json.dumps(beispiel()))
+    grenze = os.path.getsize(pfad)
+    monkeypatch.setattr(bericht, "MAX_JSON_BYTES", grenze)
+    assert bericht._rendern(str(pfad)) == 0                      # genau an der Grenze: erlaubt
+    pfad.write_text(json.dumps(beispiel()) + " ")
+    assert bericht._rendern(str(pfad)) == 2                      # ein Byte darüber: abgelehnt
+    assert "größer als 16 MB" in capsys.readouterr().err
 
 
 PFLICHT_JE_STATUS = [("bestätigt", "poc"), ("unbestätigt", "code_pfad"), ("verworfen", "grund")]

@@ -799,8 +799,31 @@ def test_starten_vorhandene_container_werden_ersetzt(umg, tmp_path):
 
 def test_starten_netz_existiert_schon(umg, tmp_path):
     vorbereitet(umg, tmp_path)
-    umg.konfig({"network create": {"rc": 1, "stderr": "Error response from daemon: network with name x already exists"}})
+    umg.konfig({"network create": {"rc": 1, "stderr": "Error response from daemon: network with name x already exists"},
+                "network inspect": {"stdout": "true\n"}})
     assert umg.poc("starten", "--lauf", LAUF, "--rolle", "p1", "--start-befehl", "x", "--port", "1").returncode == 0
+    assert ["network", "inspect", "--format", "{{.Internal}}", f"security-audit-{LAUF}-p1"] in [a["args"] for a in umg.aufrufe()]
+
+
+@pytest.mark.parametrize("inspect", [{"stdout": "false\n"}, {"stdout": ""}, {"rc": 1, "stderr": "Error: No such network"},
+                                     {"stdout": "true false\n"}])
+def test_starten_vorhandenes_netz_muss_intern_sein_r1_20(umg, tmp_path, inspect):
+    """R1-20: Ein vorhandenes Netz gleichen Namens, das nicht als `--internal` bestätigt ist, wird nicht weiterverwendet."""
+    vorbereitet(umg, tmp_path)
+    umg.konfig({"network create": {"rc": 1, "stderr": "Error response from daemon: network with name x already exists"},
+                "network inspect": inspect})
+    r = umg.poc("starten", "--lauf", LAUF, "--rolle", "p1", "--start-befehl", "x", "--port", "1")
+    assert r.returncode == 4 and r.stdout.splitlines()[0] == "kategorie: start-fehler"
+    assert "nicht als intern bestätigt" in r.stdout
+    assert laeufe(umg) == []                                           # kein Container im fremden Netz gestartet
+
+
+def test_starten_anderer_netzfehler_ist_start_fehler_r1_20(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    umg.konfig({"network create": {"rc": 1, "stderr": "Error response from daemon: Pool overlaps with other one"}})
+    r = umg.poc("starten", "--lauf", LAUF, "--rolle", "p1", "--start-befehl", "x", "--port", "1")
+    assert r.returncode == 4 and "Pool overlaps" in r.stdout
+    assert laeufe(umg) == [] and not [a for a in umg.aufrufe() if a["args"][:2] == ["network", "inspect"]]
 
 
 # ------------------------------------------------------------------------------------ neustart / ausfuehren

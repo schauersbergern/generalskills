@@ -277,6 +277,13 @@ def test_netz_poc_im_bericht(bericht):
     assert fehler and any("S-5" in f for f in fehler)
 
 
+def test_netz_poc_mit_fremdem_host_im_bericht_r1_20(bericht):
+    """R1-20: Hostprüfung des poc-Texts selbst (kein verbotenes Muster, nur ein nicht erlaubter Host)."""
+    befund(bericht, "src/routes/preview.js")["poc"] = f"{POC} anfrage --pfad /p -> Antwort von http://evil.test/x"
+    fehler = auswertung.pruefe_netz([], bericht, MUSTER)
+    assert any("S-5" in f and "evil.test" in f and "nicht erlaubter Host" in f for f in fehler), fehler
+
+
 def test_netz_bericht_none(stream):
     assert auswertung.pruefe_netz(stream, None, MUSTER) == []
     assert auswertung.pruefe_netz([bash("a", "curl http://evil.test")], None, MUSTER)

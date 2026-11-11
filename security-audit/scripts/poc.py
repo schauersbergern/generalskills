@@ -873,6 +873,11 @@ def _starte(lauf: str, rolle: str, p: dict) -> int:
     r = _docker(["network", "create", "--internal", netz], KURZ_TIMEOUT)
     if not r.ok and "already exists" not in r.text:
         return _start_fehler(lauf, rolle, f"Netz {netz} nicht erstellt: {r.text}")
+    if not r.ok:       # Netz gab es schon (Rest eines früheren Starts): nur weiterverwenden, wenn es `--internal` ist
+        intern = _docker(["network", "inspect", "--format", "{{.Internal}}", netz], KURZ_TIMEOUT)
+        if not intern.ok or intern.text.strip() != "true":
+            return _start_fehler(lauf, rolle, f"Netz {netz} existiert schon und ist nicht als intern bestätigt "
+                                              f"(`network inspect`: {_tail(intern.text, 2) or 'keine Antwort'})")
     if p["dienst"] == "postgres":
         if not _docker(["image", "inspect", POSTGRES_IMAGE], KURZ_TIMEOUT).ok:
             r = _docker(["pull", POSTGRES_IMAGE], PULL_TIMEOUT)
