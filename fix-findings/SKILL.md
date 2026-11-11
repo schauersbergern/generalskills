@@ -84,9 +84,9 @@ Die teuersten Fixer-Threads von Haas Runde 2 (#174, #176) kamen auf 150 bzw. 192
    - **Hast du an einen Subagenten delegiert** und liegt dessen Ausgabe des Testlaufs vor, prüfst du danach nur Typecheck und die gezielten Tests. Kein zweiter Lauf.
    - **Hat der PR eine CI, macht sie den Rest.** Grüne CI ist ohnehin die Abbruchbedingung der Review-Schleife.
 6. **Pushen** auf den PR-Branch, ohne nachzufragen.
-   - **Audit-Liste:** `git push -u origin <branch> 2>&1`, ohne nachzufragen. Kein PR, kein `gh pr create`. Sichtbarkeit per `gh repo view --json visibility` (im Repo); bei `PUBLIC` steht unter der Tabelle „Öffentliches Repo: Branch, Commits und Tests beschreiben die Lücken, bevor sie deployt sind.“ Danach `git worktree remove <pfad>`, wenn `git status` sauber ist, sonst den Pfad nennen. Scheitert der Push, steht statt des Links „Nicht gepusht: <Fehler>“ unter der Tabelle, und der Worktree bleibt mit Pfadangabe stehen.
+   - **Audit-Liste:** Vor dem Push die Sichtbarkeit per `gh repo view --json visibility` (im Repo) bestimmen. Bei `PUBLIC` oder wenn sie sich nicht bestimmen lässt: **kein Push**, auch nicht auf Nachfrage im selben Lauf. Unter der Tabelle steht „Nicht gepusht: öffentliches Repo — Branch, Commits und Tests würden die Lücken vor dem Deploy offenlegen. Branch `<branch>` liegt lokal in `<pfad>`.“ (bzw. „… Sichtbarkeit nicht bestimmbar …“), und der Worktree bleibt stehen. Sonst `git push -u origin <branch> 2>&1`, ohne nachzufragen. Kein PR, kein `gh pr create`. Danach `git worktree remove <pfad>`, wenn `git status` sauber ist, sonst den Pfad nennen. Scheitert der Push, steht statt des Links „Nicht gepusht: <Fehler>“ unter der Tabelle, und der Worktree bleibt mit Pfadangabe stehen.
 7. **Abschluss:** Tabelle unten. Kam die Liste per Nachricht aus einem Reviewer-Thread, dorthin per `SendMessage` antworten und den neuen Head-SHA nennen. Adresse: `from` der Nachricht, sonst die Zeile „Antwort an:“ aus der Liste (`SendMessage` nimmt auch `local_…`-IDs). Fehlt beides, die Tabelle in den Chat.
-   - **Audit-Liste:** Ist `origin` ein GitHub-Repo (`gh repo view --json url` im Repo), steht unter der Tabelle immer `<url>/compare/<basis>...<branch>?expand=1`, sonst „Branch gepusht: `<branch>` (Basis `<basis>`)“. Ein PR wird nicht geöffnet. Die Antwortregel oben (`SendMessage`, `from` bzw. „Antwort an:“, neuer Head-SHA) gilt unverändert auch für Audit-Listen.
+   - **Audit-Liste:** Wurde gepusht und ist `origin` ein GitHub-Repo (`gh repo view --json url` im Repo), steht unter der Tabelle `<url>/compare/<basis>...<branch>?expand=1`, sonst „Branch gepusht: `<branch>` (Basis `<basis>`)“. Ein PR wird nicht geöffnet. Die Antwortregel oben (`SendMessage`, `from` bzw. „Antwort an:“, neuer Head-SHA) gilt unverändert auch für Audit-Listen.
 
 ## Agent-Statistik
 
@@ -116,7 +116,7 @@ Nicht gemergt, nicht deployt.
 
 Die letzte Zeile entfällt nur, wenn mit Befehlswort gemergt bzw. deployt wurde. Dann steht dort, was passiert ist, samt Merge-SHA und Ergebnis des Deploy-Laufs. Oder die Rückfrage zum Auto-Deploy, siehe oben.
 
-**Audit-Liste:** Die erste Zeile lautet `Security-Audit <sha7> · Branch <name> · Head <neuer-sha>`. Basis, Rückstand, Verdachtsfälle, Warnsatz bei öffentlichem Repo und PR-Link (bzw. der Satz „Nicht gepusht: …“) stehen unter der Tabelle. „Nicht gemergt, nicht deployt.“ bleibt; mit „mergen“ oder „deployen“ in der Eingabe steht darunter „Kein PR vorhanden: Merge und Deploy entscheidest du nach dem PR.“
+**Audit-Liste:** Die erste Zeile lautet `Security-Audit <sha7> · Branch <name> · Head <neuer-sha>`. Basis, Rückstand, Verdachtsfälle und PR-Link (bzw. der Satz „Nicht gepusht: …“, bei öffentlichem Repo immer) stehen unter der Tabelle. „Nicht gemergt, nicht deployt.“ bleibt; mit „mergen“ oder „deployen“ in der Eingabe steht darunter „Kein PR vorhanden: Merge und Deploy entscheidest du nach dem PR.“
 
 ## Ausreden und was stimmt
 

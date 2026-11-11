@@ -68,3 +68,8 @@ Zusätzlich (Workflow, Vertrag zwischen zwei Skills — kein Prosatest, analog `
 **R2 (opus-xhigh):** 1 Blocker, 5 Wichtig, 6 Klein — alle angenommen (B1 immer pushen wie entschieden, W1 `bericht.py repo` in SKILL.md, W2 compare-Link statt pull/new, W3 prune/origin-only/nächster Branch, W4 Worktree-Pfad, Abhängigkeiten, Aufräumen, W5 Basis per Merge hereinholen, K1–K6).
 
 **R1 (opus-xhigh):** 1 Blocker, 7 Wichtig, 7 Klein — alle angenommen (B1 Erkennung, W1 Basis/ungepushte Commits, W2 Abgleich, W3 Worktree, W4 öffentliches Repo als Default, W5 PR-Link, W6 Rahmen-Abgrenzung, W7 Verdacht/Verworfen/repo-weit, K1 `bericht.py repo`, K2 Negativtests, K3 ls-remote/Datum, K4 Statistik-Kopf, K5 CI-Hinweise, K6 Kleinbuchstaben-Hex, K7 README).
+
+## Nachtrag 2026-11-11: Entscheidungen des Users (Vorrang vor Punkt 10 und Entscheidung 4)
+
+- **Öffentliche Repos ohne Push:** Bei `PUBLIC` oder nicht bestimmbarer Sichtbarkeit wird der Audit-Branch nicht gepusht; er bleibt lokal im Worktree, unter der Tabelle steht „Nicht gepusht: öffentliches Repo — …“. Ersetzt den Warnsatz.
+- **„Nie“-Regeln des Feature-Files** (kein Kundencode auf dem Host, Netz-Allowlist) binden den Audit-Skill, nicht `fix-findings` (normaler Fix-Prozess im eigenen Repo) — bestätigt.
