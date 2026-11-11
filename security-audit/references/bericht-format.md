@@ -44,7 +44,7 @@ Zusätzlich je Status:
 
 | Status | Pflicht | Hinweis |
 |---|---|---|
-| `bestätigt` | `poc` | Text: Request(s) und beobachtete Antwort. Nur die Hosts `app`, `db`, `localhost`, `127.0.0.1`, `::1`, `0.0.0.0`; ein fremder Host (auch URL-kodiert) lässt `rendern` scheitern. |
+| `bestätigt` | `poc` | Text: Request(s) und beobachtete Antwort. Nur die Hosts `app`, `db`, `localhost`, `127.0.0.1`, `::1`, `0.0.0.0`; ein fremder Host (auch URL-kodiert) lässt `rendern` scheitern. Tokens stehen als Platzhalter (`<TOKEN_A>`), nie als echter Seed-Wert. |
 | `unbestätigt` | `code_pfad` | Liste von mindestens 2 Einträgen `datei:zeile` von der Eingabe bis zur Senke |
 | `verworfen` | `grund` | eine Zeile mit Beleg (`datei:zeile`) |
 | `verdacht` | – | nicht in der Befundliste |

@@ -6,7 +6,7 @@
   bericht.py rendern <json>                       Schema prüfen, <basisname>.md neben das JSON schreiben
                                                   (Exit 2 mit Fehlerliste auf stderr)
 
-Die Befundliste im ersten Codeblock des Markdown nimmt /fix-findings an (Format wie pr-review-loop).
+Die Befundliste im ersten Codeblock des Markdown ist für /fix-findings gedacht (Format wie pr-review-loop; Eingang ohne PR ab TF5).
 Nur Standardbibliothek; git-Aufrufe über gitkopie.git.
 """
 import argparse
