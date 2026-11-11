@@ -1230,6 +1230,18 @@ def test_modell_mock_bereit_frist_nur_verkuerzend(monkeypatch):
     assert poc.MOCK_BEREIT == 30 and poc._mock_bereit_sekunden() == 30
 
 
+def test_modell_mock_start_zeitueberschreitung_nennt_den_grund_haertung(umg, tmp_path):
+    """Härtung (Frage 5): Hängt `docker run` des Mocks bis zum Timeout, steht im Fehlertext „Zeitüberschreitung“ statt eines leeren
+    „nicht gestartet: “. Die App startet nicht, die Container der Rolle werden entfernt."""
+    vorbereitet(umg, tmp_path)
+    umg.konfig({"run": {"sleep": 30}})
+    r = starten(umg, "--modell-mock", "openai", env=umg.env(SECURITY_AUDIT_DOCKER_TIMEOUT="1"))
+    assert r.returncode == 4 and r.stdout.splitlines()[0] == "kategorie: start-fehler", r.stdout + r.stderr
+    assert "Modell-Mock: nicht gestartet: Zeitüberschreitung" in r.stdout, r.stdout
+    assert run_mit_name(umg, APP) == []
+    assert ["rm", "-f", "-v", APP, f"security-audit-{LAUF}-p1-db", LLM] == [a["args"] for a in umg.aufrufe()][-1]
+
+
 def test_modell_mock_start_fehler_ohne_bereitschaft_bei_run_fehler(umg, tmp_path):
     vorbereitet(umg, tmp_path)
     umg.konfig({"run": {"rc": 125, "stderr": "docker: Error response from daemon: mock-boom\n"}})
@@ -2723,6 +2735,28 @@ def test_modell_protokoll_wert_zu_lang_exit2(umg, tmp_path):
     assert starten(umg, "--modell-mock", "openai", "--env", "GRENZE=" + "x" * 4096).returncode == 0
     umg.konfig({"exec -i": {"stdout": '{"eintraege":[],"gekuerzt":0}\n'}})
     assert modell(umg, "--protokoll").returncode == 0
+
+
+def test_modell_protokoll_ungueltiges_utf8_im_env_wert_exit2_haertung(umg, tmp_path):
+    """Härtung (Frage 5, stiller Fallback): Ein `--env`-Wert mit ungültigem UTF-8 (argv-Surrogat) lässt sich dem Mock nicht übergeben; bisher
+    wurde das Zeichen still durch `?` ersetzt und der Wert so nie maskiert. Jetzt Exit 2 mit dem Namen, ohne Docker-Aufruf und ohne den Wert.
+    Werte mit gültigem UTF-8 (auch Emojis) und Werte unter 6 Zeichen bleiben unberührt."""
+    z = {"env": ["POC_TOKEN=poc-dummy-\udc80xyz", "KURZ=\udc80", "GUT=poc-dummy-ä😀"], "modell_mock": ["openai"]}
+    with pytest.raises(poc.PocFehler) as e:
+        poc._maskier_werte(z)
+    assert e.value.code == 2 and "POC_TOKEN" in str(e.value) and "xyz" not in str(e.value) and "KURZ" not in str(e.value)
+    ok = poc._maskier_werte({"env": ["KURZ=\udc80", "GUT=poc-dummy-ä😀"], "modell_mock": []})
+    assert json.loads(ok)["werte"] == [{"name": "GUT", "wert": "poc-dummy-ä😀"}]
+
+
+@pytest.mark.parametrize("args", [("--env", "POC_TOKEN=poc-dummy-\udc80xyz"), ("--seed", "node seed.js \udc80xyz")])
+def test_starten_ungueltiges_utf8_im_argument_exit2_ohne_traceback_haertung(umg, tmp_path, args):
+    """Härtung (Frage 5): Ein Argument mit ungültigem UTF-8 (argv-Surrogat) endete bisher mit einem Traceback (Exit 1) beim Schreiben der
+    Rollendatei, mitten in `starten`. Jetzt weist `argparse` es mit Exit 2 ab, ohne Docker-Aufruf und ohne das Argument zu nennen."""
+    vorbereitet(umg, tmp_path)
+    r = starten(umg, "--modell-mock", "openai", *args)
+    assert r.returncode == 2 and "Traceback" not in r.stderr and "UTF-8" in r.stderr, r.stderr
+    assert "xyz" not in r.stderr and umg.aufrufe() == []
 
 
 def test_modell_protokoll_werte_gesamt_zu_gross_exit2(umg, tmp_path):

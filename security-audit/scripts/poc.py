@@ -938,7 +938,7 @@ def _mock_starten(lauf: str, rolle: str) -> str | None:
                  _image(lauf), "node", "/poc/llm-mock.mjs", "--server", "--port", str(MOCK_PORT),
                  "--steuer-port", str(MOCK_STEUER_PORT)], 120)
     if not r.ok:
-        return f"nicht gestartet: {r.text}"
+        return f"nicht gestartet: {'Zeitüberschreitung' if r.rc is None else r.text}"
     frist = _mock_bereit_sekunden()
     ende = time.monotonic() + frist
     while True:
@@ -1176,11 +1176,15 @@ def _maskier_paare(z: dict) -> list[tuple[str, str]]:
 def _maskier_werte(z: dict) -> bytes:
     """stdin für `llm-mock.mjs --protokoll`: `{"werte":[{name,wert}]}` mit den Werten aus `_maskier_paare` ab 6 Zeichen, längste zuerst.
     Mehr als 50 Werte: die 50 längsten (Hinweis auf stderr, ohne Werte). Ein Wert über 4096 UTF-16-Einheiten (Zählweise des Mocks) oder
-    eine Liste über 64 KiB lässt sich nicht maskieren: Exit 2 statt Werte wegzulassen."""
+    eine Liste über 64 KiB lässt sich nicht maskieren, ebenso ein Wert mit ungültigem UTF-8: Exit 2 statt Werte wegzulassen."""
     gesehen: set[tuple[str, str]] = set()
     werte = []
     for name, wert in _maskier_paare(z):
         if len(wert) >= MASKIER_WERT_MIN and (name, wert) not in gesehen:
+            try:
+                wert.encode("utf-8")
+            except UnicodeEncodeError:                             # `starten` lässt das nicht zu (`_typ_env`); alte Rollendatei o. ä.
+                raise PocFehler(f"--env {name}: Wert ist kein gültiges UTF-8, lässt sich nicht maskieren") from None
             gesehen.add((name, wert))
             werte.append((name[:MASKIER_NAME_MAX], wert))
     werte.sort(key=lambda p: -len(p[1]))                   # stabil: bei gleicher Länge die Reihenfolge von `--env`
@@ -1355,10 +1359,20 @@ def _typ_port(s: str) -> int:
     return int(s)
 
 
+def _utf8_pruefen(s: str, option: str) -> None:
+    """Ein argv-Surrogat (ungültiges UTF-8) lässt sich weder in der Rollendatei speichern noch dem Mock zum Maskieren übergeben: Exit 2
+    mit der Option, nie mit dem Wert (statt eines Tracebacks beim Schreiben oder eines still unmaskierten Werts)."""
+    try:
+        s.encode("utf-8")
+    except UnicodeEncodeError:
+        raise argparse.ArgumentTypeError(f"{option}: kein gültiges UTF-8") from None
+
+
 def _typ_env(s: str) -> str:
     name, gleich, _wert = s.partition("=")
     if not gleich or not ENV_NAME_RE.fullmatch(name) or "\x00" in s:
         raise argparse.ArgumentTypeError("--env: K=V erwartet (K: Buchstaben, Ziffern, _)")
+    _utf8_pruefen(s, "--env")
     return s
 
 
@@ -1378,6 +1392,7 @@ def _typ_marker(s: str) -> str:
 def _typ_text(s: str) -> str:
     if not s.strip() or "\x00" in s:
         raise argparse.ArgumentTypeError("leerer Wert oder NUL-Zeichen")
+    _utf8_pruefen(s, "Wert")
     return s
 
 
