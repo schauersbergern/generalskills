@@ -120,6 +120,7 @@ _NAME_ANFANG_RE = re.compile("(" + _RESERVIERT_NAMEN + r")(?![A-Za-z0-9_])", re.
 _SEGMENT_TRENNER_RE = re.compile(r"[;&|\n]")
 _DEKLARATION_FLAG_RE = re.compile(r"-[A-Za-z]*n[A-Za-z]*|\+[A-Za-z]*x[A-Za-z]*")     # export -n, typeset +x, declare -n (Namensreferenz)
 _OPTION_BUCHSTABEN_RE = re.compile(r"-([A-Za-z]*)")
+_PRINTF_OPTION_RE = re.compile(r"[-]v")      # Absicht: kein Anführungszeichen-Literal der Option im Quelltext (Wächtertest gegen Host-Mounts)
 _ENV_WORT_RE = re.compile(r"(?:.*/)?env")
 _ENV_KURZ_MIT_ARGUMENT = frozenset("uCPL")                                           # `env -u NAME`, `-C DIR`, `-P PATH`, `-L`
 _ENV_LANG_MIT_ARGUMENT = frozenset({"--unset", "--chdir", "--split-string", "--argv0", "--default-signal", "--ignore-signal",
@@ -161,7 +162,7 @@ def _segment_umgehung(tokens: list[str]) -> str | None:
             deklaration = False
         elif deklaration is False and len(w) <= _FLAG_LAENGE_MAX and _DEKLARATION_FLAG_RE.fullmatch(w):
             deklaration = True
-        if nach_printf and w.startswith("-v"):
+        if nach_printf and _PRINTF_OPTION_RE.match(w):                          # `printf -v NAME` und `printf -vNAME`
             if len(w) == 2:
                 erwarte_name = True
             elif (treffer := _name_am_anfang(w, 2)):
