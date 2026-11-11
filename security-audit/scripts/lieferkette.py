@@ -26,7 +26,7 @@ ohne `node_modules/`) mit seinem Dateinamen in einen eigenen leeren Ordner unter
 Kundenrepo, keine `osv-scanner.toml` des Repos). Ausgabe (JSON auf stdout): `pakete` je Paket (nicht je Advisory) mit `paket`,
 `version`, `lockfile`, `zeile`, `advisories` (`id`, `aliase`, `zusammenfassung` ≤ 200, `details` ≤ 500 Zeichen, einzeilig),
 `behoben_in` (je Advisory die kleinste Fix-Version oberhalb der installierten im passenden Versionsbereich, davon das Maximum),
-`dev` (true nur bei `dev: true` im npm-Lockfile, sonst false; yarn und pnpm tragen keine Dev-Angabe) und `kev` (true/false, null
+`dev` (true nur bei `dev: true` im npm-Lockfile oder im pnpm-Lockfile bis Format 6.0, sonst false; yarn und pnpm ab Format 9 tragen keine Dev-Angabe) und `kev` (true/false, null
 wenn der Katalog nicht geladen werden konnte), dazu `hinweise`. Der KEV-Katalog der CISA wird je Lauf einmal geladen und zwischengespeichert
 (Cache `<zustand>/lieferkette/kev.json`; scheitert das Zwischenspeichern, lädt der nächste Aufruf erneut; Weiterleitungen nur auf https); `SECURITY_AUDIT_KEV_DATEI` ersetzt den Download durch eine lokale Datei. Aus Kundendateien
 erscheinen nur Paketnamen, Versionen und Pfade.
@@ -1382,7 +1382,8 @@ def _lockfile_eintraege(rel: str, name: str, text: bytes, osv_daten: object, end
         return []
     inhalt = text.decode("utf-8", "replace")
     zeilen = inhalt.splitlines()
-    index = _npm_index(inhalt) if name in NPM_LOCKFILES else _NpmIndex({}, {})
+    index = (_npm_index(inhalt) if name in NPM_LOCKFILES else _NpmIndex(_pnpm_dev(inhalt), {}) if name == "pnpm-lock.yaml"
+             else _NpmIndex({}, {}))
     sortiert = sorted(pakete, key=lambda p: (p[0], _version_key(p[1])))
     zeilen_index = _ZeilenIndex(zeilen, index, name, [(n, v) for n, v, _ in sortiert])
     erg = []
@@ -2058,6 +2059,46 @@ def _pnpm_name(kopf: str) -> str:
         start = schraeg + 1
     m = re.search(r"[@/]", h[start:])
     return h if m is None else h[:start + m.start()]
+
+
+def _pnpm_version(kopf: str, name: str) -> str | None:
+    """Version aus dem Kopf eines `packages:`-Eintrags (`/name@1.0.0`, `name@1.0.0(peer@2)`, `/name/1.0.0_peer@x`)."""
+    h = kopf.strip().rstrip(":").strip().strip("\"'").lstrip("/")
+    if not h.startswith(name) or len(h) <= len(name) or h[len(name)] not in "@/":
+        return None
+    version = re.split(r"[(_]", h[len(name) + 1:], maxsplit=1)[0]
+    return version or None
+
+
+def _pnpm_dev(text: str) -> dict[tuple[str, str], bool]:
+    """(Name, Version) -> True, wenn jeder `packages:`-Eintrag dazu `dev: true` trägt (Lockfile-Format 5.x und 6.0; ab Format 9
+    gibt es die Angabe nicht mehr: dann leer, `dev` bleibt false)."""
+    m = re.search(r"^lockfileVersion:\s*['\"]?(\d+)", text, re.MULTILINE)
+    if m is None or int(m.group(1)) >= 9:
+        return {}
+    eintraege: list[tuple[tuple[str, str], bool]] = []          # (Schlüssel, trägt `dev: true`) je Eintrag der Datei
+    in_paketen = False
+    for z in text.splitlines():
+        if z and not z[0].isspace() and z[0] != "#":
+            in_paketen = z.rstrip() == "packages:"
+            continue
+        if not in_paketen:
+            continue
+        k = re.match(r"  (\S.*):\s*$", z)
+        if k and not z.startswith("   "):
+            name = _pnpm_name(k.group(1))
+            version = _pnpm_version(k.group(1), name)
+            if version:
+                eintraege.append(((name, version), False))
+            else:
+                eintraege.append((("", ""), False))              # nicht lesbarer Kopf: Zeilen darunter gehören keinem Paket
+        elif eintraege and re.fullmatch(r"    dev:\s*true\s*", z):
+            eintraege[-1] = (eintraege[-1][0], True)
+    dev: dict[tuple[str, str], bool] = {}
+    for schluessel, ist_dev in eintraege:
+        if schluessel != ("", ""):
+            dev[schluessel] = dev.get(schluessel, True) and ist_dev
+    return dev
 
 
 def _pnpm_skript_pakete(text: str) -> list[tuple[str, int]]:

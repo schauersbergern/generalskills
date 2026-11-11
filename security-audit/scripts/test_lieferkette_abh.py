@@ -1398,3 +1398,43 @@ def test_ohne_osv_scanner_toml_kein_konfig_hinweis_r1_7(umg):
     umg.schreibe("package-lock.json", "{}")
     umg.fake_osv({"rc": 0, "stdout": {"results": []}})
     assert not [h for h in ausgabe(umg.abh())["hinweise"] if "osv-scanner.toml" in h]
+
+
+# ------------------------------------------------------------------------------------ dev aus pnpm-Lockfiles < 9 (Review R1-8)
+
+PNPM_V6_DEV = ("lockfileVersion: '6.0'\n\npackages:\n\n"
+               "  /prod-pkg@1.0.0:\n    resolution: {integrity: x}\n    dev: false\n\n"
+               "  /dev-pkg@2.0.0:\n    resolution: {integrity: x}\n    dev: true\n\n"
+               "  /@scope/dev-scoped@3.0.0(peer@1.0.0):\n    resolution: {integrity: x}\n    dev: true\n\n"
+               "  /ohne-angabe@4.0.0:\n    resolution: {integrity: x}\n\n"
+               "  /gemischt@5.0.0:\n    resolution: {integrity: x}\n    dev: true\n\n"
+               "  /gemischt@5.0.0(peer@2.0.0):\n    resolution: {integrity: x}\n    dev: false\n\n"
+               "snapshots:\n\n  /x@1.0.0:\n    dev: true\n")
+PNPM_V5_DEV = ("lockfileVersion: 5.4\n\npackages:\n\n"
+               "  /prod-pkg/1.0.0:\n    resolution: {integrity: x}\n    dev: false\n\n"
+               "  /dev-pkg/2.0.0:\n    resolution: {integrity: x}\n    dev: true\n\n"
+               "  /@scope/dev-scoped/3.0.0_peer@1.0.0:\n    resolution: {integrity: x}\n    dev: true\n")
+
+
+def _pnpm_dev_ausgabe(umg, text, *pakete):
+    umg.schreibe("pnpm-lock.yaml", text)
+    umg.fake_osv({"rc": 1, "stdout": osv_ausgabe(*[(n, v, [vuln(n)]) for n, v in pakete])})
+    return je_paket(ausgabe(umg.abh()))
+
+
+def test_pnpm_lockfile_v6_liefert_dev_je_paket_r1_8(umg):
+    pakete = _pnpm_dev_ausgabe(umg, PNPM_V6_DEV, ("prod-pkg", "1.0.0"), ("dev-pkg", "2.0.0"), ("@scope/dev-scoped", "3.0.0"),
+                               ("ohne-angabe", "4.0.0"), ("gemischt", "5.0.0"))
+    dev = {k[0]: p["dev"] for k, p in pakete.items()}
+    assert dev == {"prod-pkg": False, "dev-pkg": True, "@scope/dev-scoped": True, "ohne-angabe": False, "gemischt": False}
+
+
+def test_pnpm_lockfile_v5_liefert_dev_je_paket_r1_8(umg):
+    pakete = _pnpm_dev_ausgabe(umg, PNPM_V5_DEV, ("prod-pkg", "1.0.0"), ("dev-pkg", "2.0.0"), ("@scope/dev-scoped", "3.0.0"))
+    assert {k[0]: p["dev"] for k, p in pakete.items()} == {"prod-pkg": False, "dev-pkg": True, "@scope/dev-scoped": True}
+
+
+def test_pnpm_lockfile_ab_format_9_traegt_keine_dev_angabe_r1_8(umg):
+    text = "lockfileVersion: '9.0'\n\npackages:\n\n  dev-pkg@2.0.0:\n    resolution: {integrity: x}\n    dev: true\n"
+    pakete = _pnpm_dev_ausgabe(umg, text, ("dev-pkg", "2.0.0"))
+    assert pakete[("dev-pkg", "2.0.0", "pnpm-lock.yaml")]["dev"] is False
