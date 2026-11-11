@@ -4,9 +4,13 @@ Aufruf: python3 -m pytest security-audit/scripts/test_poc.py -q
 Der Fake protokolliert jeden Aufruf (Argumente, stdin) als JSON-Zeile und liefert Ausgaben aus einer
 Konfigurationsdatei (Schlüssel: die ersten zwei Argumente, sonst das erste). Alles liegt in tmp_path.
 """
+import http.client
 import json
 import os
 import re
+import select
+import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -2159,3 +2163,456 @@ def test_bauen_marker_und_fertig_marker_ohne_kennung_gelten_nicht_als_gleich(umg
     umg.marker_setzen(kopie=None)
     r = umg.poc("bauen", "--lauf", LAUF, env=umg.env(SECURITY_AUDIT_OHNE=""))
     assert r.returncode == 4 and r.stdout.splitlines()[0] == "kategorie: nicht-geschwaerzt"
+
+
+# ------------------------------------------------------------------------------------ TF3: poc.py modell
+
+def mit_mock(umg, tmp_path, *extra, rolle="p1", apis="openai"):
+    """Lauf vorbereiten, Rolle mit Modell-Mock starten, Docker-Protokoll leeren."""
+    vorbereitet(umg, tmp_path)
+    r = starten(umg, "--modell-mock", apis, *extra, rolle=rolle)
+    assert r.returncode == 0, r.stdout + r.stderr
+    umg.log_datei.unlink(missing_ok=True)
+
+
+def modell(umg, *args, rolle="p1", env=None):
+    return umg.poc("modell", "--lauf", LAUF, "--rolle", rolle, *args, env=env)
+
+
+def antworten_datei(tmp_path, inhalt, name="antworten.json"):
+    pfad = tmp_path / name
+    pfad.write_text(inhalt if isinstance(inhalt, str) else json.dumps(inhalt))
+    return str(pfad)
+
+
+def exec_aufrufe(umg):
+    return [a for a in umg.aufrufe() if a["args"][0] == "exec"]
+
+
+MOCK_CLI = ["node", "/poc/llm-mock.mjs"]
+GUELTIGE_ANTWORTEN = [
+    [],
+    [{"text": "hallo"}],
+    [{"text": "ä ö ü 😀"}],
+    [{"werkzeug": {"name": "datei.lesen-1", "argumente": {"pfad": "/x", "n": 1}}}],
+    [{"werkzeug": {"name": "ohne_argumente"}}],
+    [{"text": "a", "wenn_enthaelt": "POCMARKER-abc-1"}, {"werkzeug": {"name": "w", "argumente": {}}, "wenn_enthaelt": "POCMARKER-x"}],
+    [{"text": str(i)} for i in range(20)],
+    [{"text": "x" * 16384}],
+]
+
+
+@pytest.mark.parametrize("liste", GUELTIGE_ANTWORTEN, ids=range(len(GUELTIGE_ANTWORTEN)))
+def test_modell_antworten_gueltig(umg, tmp_path, liste):
+    mit_mock(umg, tmp_path)
+    r = modell(umg, "--antworten-datei", antworten_datei(tmp_path, liste))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout == f"modell: {len(liste)} Antworten gesetzt (Rolle p1)\n"
+    aufrufe = exec_aufrufe(umg)
+    assert len(aufrufe) == 1
+    assert aufrufe[0]["args"] == ["exec", "-i", LLM, *MOCK_CLI, "--setzen", "--steuer-port", "4011"]
+    assert json.loads(aufrufe[0]["stdin"]) == liste                        # geprüfte Liste auf stdin, nicht in argv
+    assert str(tmp_path) not in " ".join(aufrufe[0]["args"])
+
+
+UNGUELTIGE_ANTWORTEN = {
+    "objekt": {}, "string": "x", "null": None, "21 Eintraege": [{"text": "a"}] * 21,
+    "eintrag kein objekt": ["a"], "eintrag null": [None],
+    "text und werkzeug": [{"text": "a", "werkzeug": {"name": "w"}}], "weder noch": [{}], "nur marker": [{"wenn_enthaelt": "POCMARKER-a"}],
+    "fremdes feld": [{"text": "a", "x": 1}], "text kein string": [{"text": 1}], "text null": [{"text": None}],
+    "text zu lang": [{"text": "x" * 16385}],
+    "werkzeug kein objekt": [{"werkzeug": "w"}], "werkzeug liste": [{"werkzeug": []}], "werkzeug ohne name": [{"werkzeug": {"argumente": {}}}],
+    "name leer": [{"werkzeug": {"name": ""}}], "name leerzeichen": [{"werkzeug": {"name": "a b"}}],
+    "name schraegstrich": [{"werkzeug": {"name": "a/b"}}], "name zu lang": [{"werkzeug": {"name": "a" * 65}}],
+    "name umlaut": [{"werkzeug": {"name": "füge"}}], "name zahl": [{"werkzeug": {"name": 1}}],
+    "name zeilenumbruch": [{"werkzeug": {"name": "a\n"}}],
+    "argumente liste": [{"werkzeug": {"name": "w", "argumente": []}}], "argumente string": [{"werkzeug": {"name": "w", "argumente": "x"}}],
+    "werkzeug fremdes feld": [{"werkzeug": {"name": "w", "x": 1}}],
+    "marker beliebig": [{"text": "a", "wenn_enthaelt": "hallo"}], "marker leer": [{"text": "a", "wenn_enthaelt": ""}],
+    "marker ohne suffix": [{"text": "a", "wenn_enthaelt": "POCMARKER-"}], "marker gross": [{"text": "a", "wenn_enthaelt": "POCMARKER-ABC"}],
+    "marker zu lang": [{"text": "a", "wenn_enthaelt": "POCMARKER-" + "a" * 41}], "marker zahl": [{"text": "a", "wenn_enthaelt": 5}],
+    "marker mit zusatz": [{"text": "a", "wenn_enthaelt": "xPOCMARKER-a"}], "marker zeilenumbruch": [{"text": "a", "wenn_enthaelt": "POCMARKER-a\n"}],
+}
+
+
+@pytest.mark.parametrize("liste", UNGUELTIGE_ANTWORTEN.values(), ids=UNGUELTIGE_ANTWORTEN.keys())
+def test_modell_antworten_validierung(umg, tmp_path, liste):
+    mit_mock(umg, tmp_path)
+    r = modell(umg, "--antworten-datei", antworten_datei(tmp_path, liste))
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert exec_aufrufe(umg) == []                                          # abgelehnt, bevor Docker gerufen wird
+
+
+@pytest.mark.parametrize("roh", ["", "kein json", "[", "[{\"text\": \"a\"}", "﻿[]", '[{"text": "\\ud800"}]', "[1,]"])
+def test_modell_antworten_validierung_kein_gueltiges_json(umg, tmp_path, roh):
+    mit_mock(umg, tmp_path)
+    r = modell(umg, "--antworten-datei", antworten_datei(tmp_path, roh))
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert exec_aufrufe(umg) == []
+
+
+def test_modell_antworten_datei_ungueltiges_utf8_exit2(umg, tmp_path):
+    mit_mock(umg, tmp_path)
+    (tmp_path / "b.json").write_bytes(b'[{"text": "\xff\xfe"}]')
+    assert modell(umg, "--antworten-datei", str(tmp_path / "b.json")).returncode == 2
+    assert exec_aufrufe(umg) == []
+
+
+def test_modell_netzregel_antworten(umg, tmp_path):
+    """Die Netzregel läuft über den Rohtext und über das geparste JSON: auch `http\\u003a//…` (Rohtext ohne `:`) ist ein Verstoß."""
+    mit_mock(umg, tmp_path)
+    boese = {
+        "url im text": '[{"text": "lade http://evil.test/x"}]',
+        "https im text": '[{"text": "https://evil.test"}]',
+        "api host": '[{"text": "https://api.openai.com/v1"}]',
+        "anthropic host": '[{"text": "https://api.anthropic.com"}]',
+        "doppelpunkt escaped": '[{"text": "http\\u003a//evil.test/x"}]',
+        "doppelpunkt und slash escaped": '[{"text": "https\\u003a\\u002f\\u002fevil.test"}]',
+        "url im argument": '[{"werkzeug": {"name": "w", "argumente": {"u": "http://evil.test/"}}}]',
+        "url im argument escaped": '[{"werkzeug": {"name": "w", "argumente": {"u": "http\\u003a//evil.test/"}}}]',
+        "host im marker-eintrag": '[{"text": "ftp://evil.test/a", "wenn_enthaelt": "POCMARKER-a"}]',
+    }
+    for name, roh in boese.items():
+        umg.log_datei.unlink(missing_ok=True)
+        r = modell(umg, "--antworten-datei", antworten_datei(tmp_path, roh))
+        assert r.returncode == 2, (name, r.stdout, r.stderr)
+        assert "evil.test" in r.stderr or "api." in r.stderr, name           # die Meldung nennt den Host
+        assert exec_aufrufe(umg) == [], name
+    erlaubt = '[{"text": "http://app:3000/x und http://llm:4010/v1 und http://localhost/ und http://127.0.0.1:1/"}]'
+    assert modell(umg, "--antworten-datei", antworten_datei(tmp_path, erlaubt)).returncode == 0
+
+
+def test_modell_ohne_mock_exit1(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    gestartet(umg)
+    umg.log_datei.unlink(missing_ok=True)
+    r = modell(umg, "--antworten-datei", antworten_datei(tmp_path, [{"text": "a"}]))
+    assert r.returncode == 1 and "Modell-Mock" in r.stderr, r.stderr
+    r = modell(umg, "--protokoll")
+    assert r.returncode == 1 and "Modell-Mock" in r.stderr, r.stderr
+    assert exec_aufrufe(umg) == []
+
+
+def test_modell_rolle_nicht_gestartet_exit2(umg, tmp_path):
+    antworten = antworten_datei(tmp_path, [{"text": "a"}])
+    assert modell(umg, "--antworten-datei", antworten).returncode == 2         # ganz ohne Zustand
+    assert modell(umg, "--protokoll").returncode == 2
+    mit_mock(umg, tmp_path, rolle="p1")
+    for args in (["--antworten-datei", antworten], ["--protokoll"]):
+        r = modell(umg, *args, rolle="p2")                                       # p1 läuft, p2 nie gestartet
+        assert r.returncode == 2 and "Rolle p2 nicht gestartet" in r.stderr, r.stderr
+    assert not any(a["args"][0] in ("exec", "run") for a in umg.aufrufe())
+
+
+def test_modell_antworten_datei_zu_gross_exit2(umg, tmp_path):
+    """K10: höchstens 64 KiB (+ 1 Byte gelesen); nicht lesbar (fehlt, Ordner) endet mit Exit 2."""
+    mit_mock(umg, tmp_path)
+    grenze = 64 * 1024
+    ok = antworten_datei(tmp_path, "[]" + " " * (grenze - 2), "ok.json")
+    assert os.path.getsize(ok) == grenze
+    assert modell(umg, "--antworten-datei", ok).returncode == 0
+    umg.log_datei.unlink(missing_ok=True)
+    zu_gross = antworten_datei(tmp_path, "[]" + " " * (grenze - 1), "gross.json")
+    assert os.path.getsize(zu_gross) == grenze + 1
+    r = modell(umg, "--antworten-datei", zu_gross)
+    assert r.returncode == 2 and "64 KiB" in r.stderr, r.stderr
+    for pfad in (str(tmp_path / "fehlt.json"), str(tmp_path)):
+        assert modell(umg, "--antworten-datei", pfad).returncode == 2
+    assert exec_aufrufe(umg) == []
+
+
+def test_modell_suche_nur_marker(umg, tmp_path):
+    mit_mock(umg, tmp_path)
+    for suche in ("hallo", "POCMARKER-", "POCMARKER-A", "POCMARKER-x y", "POCMARKER-" + "a" * 41, "", "--x", "pocmarker-a",
+                  "POCMARKER-a\n", "xPOCMARKER-a", "POCMARKER-ä"):
+        r = modell(umg, "--protokoll", "--suche", suche)
+        assert r.returncode == 2, (suche, r.stdout, r.stderr)
+    r = modell(umg, "--antworten-datei", antworten_datei(tmp_path, []), "--suche", "POCMARKER-a")     # --suche gehört zu --protokoll
+    assert r.returncode == 2
+    assert exec_aufrufe(umg) == []
+    umg.konfig({"exec -i": {"stdout": '{"eintraege":[],"gekuerzt":0}\n'}})
+    r = modell(umg, "--protokoll", "--suche", "POCMARKER-" + "a" * 40)
+    assert r.returncode == 0, r.stderr
+    assert exec_aufrufe(umg)[0]["args"] == ["exec", "-i", LLM, *MOCK_CLI, "--protokoll", "--suche", "POCMARKER-" + "a" * 40,
+                                           "--steuer-port", "4011"]
+
+
+def test_modell_genau_eine_betriebsart(umg, tmp_path):
+    mit_mock(umg, tmp_path)
+    assert modell(umg).returncode == 2
+    assert modell(umg, "--protokoll", "--antworten-datei", antworten_datei(tmp_path, [])).returncode == 2
+    assert exec_aufrufe(umg) == []
+
+
+def test_modell_ein_docker_aufruf(umg, tmp_path):
+    """Realismus: je `modell` genau ein Docker-Aufruf (`exec -i`), kein `inspect`, kein `version`, kein `ps`."""
+    mit_mock(umg, tmp_path)
+    umg.konfig({"exec -i": {"stdout": '{"eintraege":[],"gekuerzt":0}\n'}})
+    for args in (["--antworten-datei", antworten_datei(tmp_path, [{"text": "a"}])], ["--protokoll"],
+                 ["--protokoll", "--suche", "POCMARKER-a"]):
+        umg.log_datei.unlink(missing_ok=True)
+        r = modell(umg, *args)
+        assert r.returncode == 0, r.stderr
+        aufrufe = umg.aufrufe()
+        assert len(aufrufe) == 1 and aufrufe[0]["args"][:3] == ["exec", "-i", LLM], [a["args"] for a in aufrufe]
+
+
+def test_modell_unter_rollensperre(umg, tmp_path):
+    """Nicht exklusiv: eine geteilte Sperre (laufende anfrage) blockiert `modell` nicht, eine exklusive (starten, neustart) schon."""
+    import fcntl
+    mit_mock(umg, tmp_path)
+    umg.konfig({"exec -i": {"stdout": '{"eintraege":[],"gekuerzt":0}\n'}})
+    antworten = antworten_datei(tmp_path, [{"text": "a"}])
+    fd = _sperre(umg, "p1", fcntl.LOCK_EX)
+    try:
+        for args in (["--antworten-datei", antworten], ["--protokoll"]):
+            umg.log_datei.unlink(missing_ok=True)
+            r = modell(umg, *args)
+            assert r.returncode == 1 and "Rolle p1" in r.stderr and "gerade" in r.stderr, (args, r.stderr)
+            assert umg.aufrufe() == [], args
+        r = modell(umg, "--protokoll", rolle="p2")                                # andere Rolle: die Sperre betrifft sie nicht
+        assert "gerade" not in r.stderr
+    finally:
+        os.close(fd)
+    fd = _sperre(umg, "p1", fcntl.LOCK_SH)
+    try:
+        assert modell(umg, "--antworten-datei", antworten).returncode == 0
+        assert modell(umg, "--protokoll").returncode == 0
+        assert umg.poc("neustart", "--lauf", LAUF, "--rolle", "p1").returncode == 1      # starten/neustart bleiben exklusiv
+    finally:
+        os.close(fd)
+
+
+def test_modell_budget(umg, tmp_path):
+    """K2: Budget 60 s, über SECURITY_AUDIT_MODELL_BUDGET nur verkürzbar; ein hängender exec endet nach dem Budget mit Exit 1."""
+    mit_mock(umg, tmp_path)
+    umg.konfig({"exec -i": {"sleep": 30}})
+    t0 = time.monotonic()
+    r = modell(umg, "--protokoll", env=umg.env(SECURITY_AUDIT_MODELL_BUDGET="2"))
+    assert 1.5 < time.monotonic() - t0 < 12
+    assert r.returncode == 1 and "Zeitüberschreitung" in r.stderr, r.stderr
+    assert r.stdout == ""
+    assert poc.MODELL_BUDGET == 60
+
+
+def test_modell_budget_nur_verkuerzend(monkeypatch):
+    try:
+        for gesetzt, erwartet in (("", 60), ("5", 5), ("59", 59), ("60", 60), ("1000", 60), ("0", 60), ("-3", 60), ("x", 60)):
+            monkeypatch.setenv("SECURITY_AUDIT_MODELL_BUDGET", gesetzt)
+            assert poc._nur_verkuerzt("SECURITY_AUDIT_MODELL_BUDGET", poc.MODELL_BUDGET) == erwartet, gesetzt
+            poc._frist_setzen("SECURITY_AUDIT_MODELL_BUDGET", poc.MODELL_BUDGET, verkuerzbar=True)
+            assert poc._BUDGET_SEKUNDEN == erwartet, gesetzt
+        monkeypatch.setenv("SECURITY_AUDIT_START_BUDGET", "1000")                    # Bestand: starten bleibt verlängerbar
+        poc._frist_setzen("SECURITY_AUDIT_START_BUDGET", poc.START_BUDGET)
+        assert poc._BUDGET_SEKUNDEN == 1000
+    finally:
+        poc._ohne_frist()
+
+
+def test_modell_antworten_ausgabe_und_fehler(umg, tmp_path):
+    mit_mock(umg, tmp_path)
+    antworten = antworten_datei(tmp_path, [{"text": "a"}, {"text": "b"}])
+    r = modell(umg, "--antworten-datei", antworten)
+    assert r.returncode == 0 and r.stdout == "modell: 2 Antworten gesetzt (Rolle p1)\n" and r.stderr == ""
+    for rc in (1, 2, 125):
+        umg.konfig({"exec -i": {"rc": rc, "stderr": "fehler: Steuerung nicht erreichbar\n"}})
+        r = modell(umg, "--antworten-datei", antworten)
+        assert r.returncode == 1, (rc, r.stderr)                                    # Exit ≠ 0 des Mocks: Exit 1
+        assert "Steuerung nicht erreichbar" in r.stderr and "gesetzt" not in r.stdout
+
+
+def test_modell_protokoll_ausgabe_unveraendert_und_entschaerft(umg, tmp_path):
+    mit_mock(umg, tmp_path)
+    gross = '{"eintraege":[{"nr":1,"methode":"POST","pfad":"/v1/x","body":"' + "a" * 65000 + '"}],"gekuerzt":0}\n'
+    umg.konfig({"exec -i": {"stdout": gross}})
+    r = modell(umg, "--protokoll")
+    assert r.returncode == 0 and r.stdout == gross and r.stderr == ""                # nicht gekürzt, unverändert
+    umg.konfig({"exec -i": {"stdout": '{"eintraege":[{"body":"a\x1b[31mb‮c\x00"}],"gekuerzt":0}\n'}})
+    r = modell(umg, "--protokoll")
+    assert r.returncode == 0
+    assert "\x1b" not in r.stdout and "‮" not in r.stdout and "\x00" not in r.stdout    # _entschaerfen, nicht _gib_aus
+    assert r.stdout.endswith("\n") and "a" in r.stdout and "b" in r.stdout and "[31m" in r.stdout
+
+
+def test_modell_protokoll_fehler_exit1_entschaerft_ohne_werte(umg, tmp_path):
+    geheim = "poc-dummy-geheimwert"
+    mit_mock(umg, tmp_path, "--env", f"X_TOKEN={geheim}")
+    umg.konfig({"exec -i": {"rc": 1, "stdout": "teil\n", "stderr": f"fehler\x1b[31m: Steuerung nicht erreichbar {geheim}\n"}})
+    r = modell(umg, "--protokoll")
+    assert r.returncode == 1, r.stderr
+    assert "Steuerung nicht erreichbar" in r.stderr and "\x1b" not in r.stderr
+    assert geheim not in r.stderr and geheim not in r.stdout                          # auch ein Wert im Fehlertext erscheint nicht
+    assert "teil" not in r.stdout
+
+
+def test_modell_protokoll_maskierwerte_per_stdin(umg, tmp_path):
+    """Die Werte gehen per stdin, nie per argv: alle `--env`-Werte der Rolle ab 6 Zeichen plus die Mock-Keys, längste zuerst."""
+    geheim = "poc-dummy-abcdef"
+    mit_mock(umg, tmp_path, "--env", f"X_TOKEN={geheim}", "--env", "KURZ=abc12", "--env", "GRENZ=sechs6",
+             "--env", "DATABASE_URL=postgres://poc:poc@db:5432/poc")
+    umg.konfig({"exec -i": {"stdout": '{"eintraege":[],"gekuerzt":0}\n'}})
+    r = modell(umg, "--protokoll", "--suche", "POCMARKER-a")
+    assert r.returncode == 0, r.stderr
+    a = exec_aufrufe(umg)[0]
+    assert a["args"] == ["exec", "-i", LLM, *MOCK_CLI, "--protokoll", "--suche", "POCMARKER-a", "--steuer-port", "4011"]
+    daten = json.loads(a["stdin"])
+    assert list(daten) == ["werte"]
+    werte = daten["werte"]
+    assert all(sorted(w) == ["name", "wert"] for w in werte)
+    assert {w["name"]: w["wert"] for w in werte} == {"DATABASE_URL": "postgres://poc:poc@db:5432/poc", "X_TOKEN": geheim,
+                                                       "GRENZ": "sechs6", "OPENAI_API_KEY": "poc-dummy-openai"}
+    laengen = [len(w["wert"]) for w in werte]
+    assert laengen == sorted(laengen, reverse=True)
+    allargs = " ".join(a["args"])
+    for w in werte:
+        assert w["wert"] not in allargs                                               # nie per argv
+    assert "abc12" not in a["stdin"]                                                  # unter 6 Zeichen: nicht maskiert
+    assert r.stderr == ""
+
+
+def test_modell_protokoll_maskierwerte_nur_gewaehlte_api_keys(umg, tmp_path):
+    mit_mock(umg, tmp_path, apis="anthropic")
+    umg.konfig({"exec -i": {"stdout": '{"eintraege":[],"gekuerzt":0}\n'}})
+    assert modell(umg, "--protokoll").returncode == 0
+    werte = json.loads(exec_aufrufe(umg)[0]["stdin"])["werte"]
+    assert werte == [{"name": "ANTHROPIC_API_KEY", "wert": "poc-dummy-anthropic"}]
+
+
+def test_modell_protokoll_hoechstens_50_werte(umg, tmp_path):
+    """Mi-4: mehr als 50 Werte: die 50 längsten gehen an den Mock, der Hinweis steht auf stderr (ohne Werte)."""
+    envs = [a for i in range(55) for a in ("--env", f"V{i:02d}=" + "x" * (6 + i))]
+    mit_mock(umg, tmp_path, *envs)
+    umg.konfig({"exec -i": {"stdout": '{"eintraege":[],"gekuerzt":0}\n'}})
+    r = modell(umg, "--protokoll")
+    assert r.returncode == 0, r.stderr
+    werte = json.loads(exec_aufrufe(umg)[0]["stdin"])["werte"]
+    assert len(werte) == 50
+    assert {w["name"] for w in werte} >= {f"V{i:02d}" for i in range(6, 55)} | {"OPENAI_API_KEY"}
+    assert not {w["name"] for w in werte} & {f"V{i:02d}" for i in range(0, 6)}      # die kürzesten (6 bis 11 Zeichen) entfallen
+    assert "50" in r.stderr and "56" in r.stderr and "xxxxxx" not in r.stderr
+
+
+def test_modell_protokoll_wert_zu_lang_exit2(umg, tmp_path):
+    """Ein Wert über 4096 Zeichen (Grenze des Mocks) lässt sich nicht maskieren: Exit 2 mit dem Namen, ohne Docker-Aufruf."""
+    mit_mock(umg, tmp_path, "--env", "GROSS=" + "x" * 4097)
+    r = modell(umg, "--protokoll")
+    assert r.returncode == 2 and "GROSS" in r.stderr and "xxxx" not in r.stderr, r.stderr
+    assert exec_aufrufe(umg) == []
+    assert starten(umg, "--modell-mock", "openai", "--env", "GRENZE=" + "x" * 4096).returncode == 0
+    umg.konfig({"exec -i": {"stdout": '{"eintraege":[],"gekuerzt":0}\n'}})
+    assert modell(umg, "--protokoll").returncode == 0
+
+
+def test_modell_protokoll_werte_gesamt_zu_gross_exit2(umg, tmp_path):
+    """Der Mock liest höchstens 64 KiB stdin: passt die Werteliste nicht hinein, bricht `modell` ab, statt Werte wegzulassen."""
+    envs = [a for i in range(20) for a in ("--env", f"G{i:02d}=" + chr(97 + i) * 4000)]
+    mit_mock(umg, tmp_path, *envs)
+    r = modell(umg, "--protokoll")
+    assert r.returncode == 2 and "64 KiB" in r.stderr and "xxxx" not in r.stderr, r.stderr
+    assert exec_aufrufe(umg) == []
+
+
+def test_modell_argumente(umg, tmp_path):
+    for args in (["--lauf", "xyz", "--rolle", "p1", "--protokoll"], ["--lauf", LAUF, "--rolle", "p3", "--protokoll"],
+                 ["--lauf", LAUF, "--protokoll"], ["--rolle", "p1", "--protokoll"]):
+        assert umg.poc("modell", *args).returncode == 2, args
+    assert umg.aufrufe() == []
+
+
+def test_poc_docstring_nennt_modell():
+    zeile = next(z for z in poc.__doc__.splitlines() if z.lstrip().startswith("python3 -I poc.py"))
+    assert " modell " in zeile, zeile
+
+
+# --- Ende zu Ende: poc.py modell gegen den echten Mock (lokal mit Node) --------------------------------------------
+
+ATTRAPPE = """#!{python}
+import os, sys
+args = sys.argv[1:]
+# erwartet: exec -i <name> node /poc/llm-mock.mjs <modus …> --steuer-port 4011; ersetzt sich durch den lokalen Mock-Client
+if args[:2] != ["exec", "-i"] or args[3:5] != ["node", "/poc/llm-mock.mjs"] or args[-2:] != ["--steuer-port", "4011"]:
+    sys.stderr.write("attrappe: unerwarteter Aufruf\\n")
+    sys.exit(99)
+os.execvp("node", ["node", {mock!r}, *args[5:-1], os.environ["ATTRAPPE_STEUER_PORT"]])
+"""
+
+
+class LokalerMock:
+    """Der echte Mock (`docker/llm-mock.mjs --server`) auf 127.0.0.1, Ports frei (0), als eigene Prozessgruppe.
+    Beendet wird nur der eigene Popen, und nur solange er läuft."""
+
+    def __init__(self):
+        self.p = subprocess.Popen(["node", os.path.join(SKILL, "docker", "llm-mock.mjs"), "--server", "--host", "127.0.0.1",
+                                   "--port", "0", "--steuer-port", "0"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, start_new_session=True)
+        try:
+            bereit, _, _ = select.select([self.p.stdout], [], [], 10)
+            assert bereit, "Mock meldet sich nicht"
+            m = re.fullmatch(r"bereit api=(\d+) steuer=(\d+)", self.p.stdout.readline().decode().strip())
+            assert m, "bereit-Zeile fehlt"
+            self.api, self.steuer = int(m.group(1)), int(m.group(2))
+        except BaseException:
+            self.beenden()
+            raise
+
+    def beenden(self):
+        if self.p.poll() is None:
+            os.killpg(self.p.pid, signal.SIGTERM)
+        try:
+            self.p.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            if self.p.poll() is None:
+                os.killpg(self.p.pid, signal.SIGKILL)
+            self.p.wait(timeout=10)
+        self.p.stdout.close()
+
+    def post(self, pfad, objekt):
+        c = http.client.HTTPConnection("127.0.0.1", self.api, timeout=10)
+        try:
+            c.request("POST", pfad, json.dumps(objekt), {"content-type": "application/json"})
+            r = c.getresponse()
+            return r.status, json.loads(r.read())
+        finally:
+            c.close()
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node fehlt")
+def test_modell_protokoll_maskierung_ende_zu_ende(umg, tmp_path):
+    """B1/K7: `poc.py modell` gegen den echten Mock. Die Docker-Attrappe ersetzt sich per `os.execvp` durch `node llm-mock.mjs` und
+    reicht stdin durch. Der `--env`-Wert erscheint im Protokoll weder roh noch JSON-escaped noch doppelt escaped."""
+    geheim = 'poc-dummy-a"b\\c'                                       # Anführungszeichen und Rückstrich: die escapten Formen weichen ab
+    json_form = json.dumps(geheim)[1:-1]
+    doppelt = json.dumps(json_form)[1:-1]
+    assert len({geheim, json_form, doppelt}) == 3
+    mit_mock(umg, tmp_path, "--env", f"X_TOKEN={geheim}")
+    mock = LokalerMock()
+    try:
+        attrappe = umg.bin / "docker"
+        attrappe.write_text(ATTRAPPE.format(python=sys.executable, mock=os.path.join(SKILL, "docker", "llm-mock.mjs")))
+        attrappe.chmod(0o755)
+        env = umg.env(ATTRAPPE_STEUER_PORT=str(mock.steuer))
+        r = modell(umg, "--antworten-datei", antworten_datei(tmp_path, [{"text": "mock-antwort-e2e", "wenn_enthaelt": "POCMARKER-e2e-1"}]),
+                   env=env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert r.stdout == "modell: 1 Antworten gesetzt (Rolle p1)\n"
+        inhalt = f"POCMARKER-e2e-1 token={geheim} key=poc-dummy-openai werkzeug={json.dumps({'k': geheim})}"
+        status, antwort = mock.post("/v1/chat/completions", {"model": "m", "messages": [{"role": "user", "content": inhalt}]})
+        assert status == 200 and antwort["choices"][0]["message"]["content"] == "mock-antwort-e2e", antwort
+        for suche in ([], ["--suche", "POCMARKER-e2e-1"]):
+            r = modell(umg, "--protokoll", *suche, env=env)
+            assert r.returncode == 0, r.stdout + r.stderr
+            for form in (geheim, json_form, doppelt, "poc-dummy-openai"):
+                assert form not in r.stdout, form
+            daten = json.loads(r.stdout)
+            assert daten["gekuerzt"] == 0 and len(daten["eintraege"]) == 1
+            body = daten["eintraege"][0]["body"]
+            assert "<ENV:X_TOKEN>" in body and "<ENV:OPENAI_API_KEY>" in body and "POCMARKER-e2e-1" in body
+            assert body.count("<ENV:X_TOKEN>") == 2                               # Rohform des Tokens und die im Werkzeug-JSON
+            for form in (geheim, json_form, doppelt):
+                assert form not in body, form
+            if suche:
+                assert "<ENV:X_TOKEN>" in daten["eintraege"][0]["fundstelle"]
+        r = modell(umg, "--protokoll", "--suche", "POCMARKER-nicht-da", env=env)
+        assert r.returncode == 0 and json.loads(r.stdout)["eintraege"] == []
+    finally:
+        mock.beenden()

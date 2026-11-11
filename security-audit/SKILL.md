@@ -121,6 +121,11 @@ Alle Werkzeugbefunde: `status` `unbestätigt`, `werkzeug` gesetzt, `code_pfad` m
 - Teile die P1/P2 (ohne Werkzeugbefunde aus Schritt 5b) auf die Prüfer auf (Prüfer 1 = Rolle `p1`, Prüfer 2 = `p2`), alle Befunde eines Prüfers in **einem** Briefing, keine Pakete per `SendMessage`. Briefing aus `references/agenten-briefings.md`, Abschnitt „Prüfer“. `<DATEIORDNER>` ist `<ausgabe_ordner>/anfragen`. `<SCHWAERZUNG>` füllst du wie in Schritt 4.
 - **Je Befund nur** ID, Titel, Kategorie, `datei:zeile` und die behauptete Eingabe. Nie Szenario, Code-Pfad oder Beschreibung des Reviewers.
 - Auftrag: widerlegen. Gelingt das nicht und läuft die Instanz, belegt der Prüfer per `poc.py anfrage --rolle <p1|p2>`, zwischen PoCs `poc.py neustart --rolle <p1|p2>`; `poc.py ausfuehren` prüft Zustand im Container. Ergebnis je Befund: `bestätigt` (Request und beobachtete Antwort), `unbestätigt` (eigener `code_pfad`), `verworfen` (`grund`). Stufenänderung mit Begründung ist erlaubt.
+
+```
+python3 -I ${CLAUDE_SKILL_DIR}/scripts/poc.py modell --lauf <id> --rolle <p1|p2> --antworten-datei <datei> | --protokoll [--suche <marker>]   # Details folgen in Task 5
+```
+
 - Mehr als 12 P1/P2 je Prüfer: priorisiere nach Stufe und Sicherheit der Herleitung. Der Rest bleibt `unbestätigt` mit dem Code-Pfad des Reviewers und dem Vermerk „nicht geprüft (Budget)“ in `beschreibung`.
 - Übernimm die Ergebnisse in die Befunde. Lies bei jedem `bestätigt` die Stelle gegen. Passt der PoC nicht zur Stelle, setze `unbestätigt`. Enthält ein `poc` eine fremde URL aus einem Antwort-Body, entferne diese URL aus dem Auszug (sonst scheitert `rendern`), statt den Befund herabzustufen. Fehlt ein Befund in der Antwort, war er nicht geprüft: `verdacht` und ein Hinweis.
 
