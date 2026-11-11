@@ -120,6 +120,21 @@ def test_basisname_und_kollision(tmp_path):
     assert bericht.kontext(str(r), None, JETZT)["basisname"] == k1["basisname"] + "-3"
 
 
+def test_vorhandene_ergebnisdateien_ohne_reservierung_kollidieren_r1_5(tmp_path):
+    """R1-5: Früherer Lauf gerendert (`rendern` löscht `.reserviert`), gleicher Repo/SHA/Tag: Basisname -2, nichts überschrieben."""
+    r = neues_repo(tmp_path / "kunde-portal", origin="https://github.com/a/kunde-portal.git")
+    k1 = bericht.kontext(str(r), None, JETZT)
+    ordner = k1["ausgabe_ordner"]
+    os.remove(os.path.join(ordner, k1["basisname"] + ".reserviert"))           # wie nach `rendern`
+    for ext in (".md", ".json"):
+        with open(os.path.join(ordner, k1["basisname"] + ext), "w") as f:
+            f.write("alt")
+        k2 = bericht.kontext(str(r), None, JETZT)
+        assert k2["basisname"] == k1["basisname"] + "-2", ext
+        os.remove(os.path.join(ordner, k2["basisname"] + ".reserviert"))
+        os.remove(os.path.join(ordner, k1["basisname"] + ext))
+
+
 def test_teilpfad_slug_und_normalisierung(tmp_path):
     r = neues_repo(tmp_path / "kunde-portal", {"Src/API v2/x.js": "x", "lib/b.js": "y"},
                    origin="https://github.com/a/kunde-portal.git")
@@ -318,6 +333,15 @@ def test_schema_teilpfad_und_projekt_gesetzt():
     d["teilpfad"] = "src"
     d["projekt"] = None
     assert bericht.pruefe_schema(d) == []
+
+
+@pytest.mark.parametrize("status", ["bestaetigt", "bestätigt ", "BESTÄTIGT", "offen", "", None, 1])
+def test_schema_ungueltiger_status_wird_abgelehnt_r1_5(status):
+    """R1-5: Ein Status außerhalb der vier erlaubten hätte sonst weder poc- noch code_pfad-Pflicht, und `markdown()` übergeht ihn."""
+    d = beispiel()
+    d["befunde"] = [befund(id="S-9", status=status)]
+    fehler = bericht.pruefe_schema(d)
+    assert any("S-9" in f and "status" in f for f in fehler), fehler
 
 
 PFLICHT_JE_STATUS = [("bestätigt", "poc"), ("unbestätigt", "code_pfad"), ("verworfen", "grund")]
