@@ -260,3 +260,127 @@ Die Befunde stehen mit Begründung und fertigem Nachtrag hier; bei Widerspruch g
 - **K13 Review Focus (Z. 23–41):** Mehrere Nachweise sind nicht genannt: Löschgrenzen, Treffertext, Proxy, feste Texte.
   > TF-Punkt 4 nennt zusätzlich `test_symlink_ziel_exit5`, `test_kunde_json_kollision_exit5` und `test_kunde_reserviert_kollision_exit5`. Neuer TF-Punkt 6, „Keine Exploit-Texte in Meldungen und keine Proxys“: `test_meldung_ohne_treffertext`, `test_werkzeug_umgebung_ohne_proxy`. TF-Punkt 3 nennt `test_feste_texte_ohne_du_und_spuren`. Punkt 3 der festen Checkliste nennt die Budget-Tests aus K5 einzeln.
 
+
+## Nachträge nach Plan-Review R2 (Vorrang vor allem oben; alle angenommen, Sätze wörtlich übernommen)
+
+#### W-1 Regel e: Ob die eigene `datei` zählt, ist offen (Spec Z. 199 gegen Z. 286 und Z. 333; Plan Z. 53–56, Z. 190)
+- Spec R1-W4 (e) nimmt „die eigene `datei`-Zeile“ aus. Diese Ausnahme stammt aus der Zeit, als das fertige Markdown geprüft wurde. Seit R2-W-3 werden die Rohwerte geprüft, und die Ausnahme hat keinen Gegenstand mehr.
+- R2-K-10 sagt nebenbei, der eigene Pfad in `massnahme` „wäre ein Treffer der Regel e“. Plan W1 nennt die Quellen für e (`datei` aller Befunde), aber keine Ausnahme.
+- Ein Task-1-Implementierer, der die Spec Z. 199 liest, baut die Ausnahme ein. Dann ist `test_datei_mit_dir_loest_nichts_aus` (K-10) inhaltlich anders gemeint als implementiert.
+- Für das Eval ist das der häufigste erwartbare Treffer, etwa „Ergänzen Sie in src/routes/projects.js …“.
+- **Nachtrag:** „Regel e gilt ohne Ausnahme: Auch die eigene `datei` eines Befunds ist in seinen Feldern `zusammenfassung`, `massnahme` und `titel` ein Treffer, sobald sie `/` enthält. Die Wendung ‚außer der eigenen `datei`-Zeile‘ (Spec R1-W4 e) entfällt mit R2-W-3. Test in Task 1: `test_kunden_verstoesse_e_eigene_datei` (eigene `datei` `src/x/y.ts` in `massnahme` ergibt `('S-1', 'massnahme', 'e', None)`).“
+
+#### W-2 Schritt 7 erklärt dem Modell die Regeln nicht, und die Schreibregel ist schwächer als die Prüfung (Plan Z. 125–132, W1 Z. 187, K2 Z. 239)
+- Die Exit-2-Meldung lautet `<id> <feld>: Regel <regel>[ (<detail>)]`. Bei b bis e und `url`/`email` gibt es kein Detail (Treffertext gesperrt). Das Modell muss also aus dem Buchstaben ableiten, was es ändern soll.
+- Task 4 verlangt keine Legende der `regel`-Werte. W1 setzt sie nur voraus („Schritt 7 erklärt die Meldung“).
+- Die Schreibregel „Keine Pfade mit Zeile“ (Z. 130) erlaubt Pfade ohne Zeile, Regel e verbietet sie. Regel c (`{ } < > =` und Backticks) fehlt in den Schreibregeln ganz. Modelle setzen Bezeichner gern in Backticks.
+- Beides zusammen macht die 2-Runden-Schleife und damit TF4-D6 im letzten Eval-Lauf unnötig fragil.
+- **Nachtrag:** „Task 4, Schritt 7 enthält eine Legende aller `regel`-Werte mit je einem Satz:
+  - `du`: Du-Form, Detail ist das Wort
+  - `a`: Text aus einem `poc`, Detail ist das Token
+  - `b`: HTTP-Methode mit Pfad
+  - `c`: Zeichen `{ } < > =` oder Backtick
+  - `d`: Datei mit Zeile, `#L…` oder ‚Zeile n‘
+  - `e`: Dateipfad oder Code-Pfad eines Befunds, auch der eigene
+  - `url`: URL oder `www.`
+  - `email`: E-Mail-Adresse
+  - `fehlt`, `schema`: siehe Klein K-1
+
+  Die Schreibregeln verbieten ausdrücklich Datei- und Pfadnamen (die betroffene Datei zeigt der Bericht selbst), Backticks und die Zeichen `{ } < > =`. Test: `test_skill_schritt_7_regel_legende` prüft, dass jeder Wert aus `bericht.KUNDEN_REGELN` (neue Konstante in Task 1) in Schritt 7 als `` `<wert>` `` steht.“
+
+#### W-3 `pdf_erstellen` hat keinen Kanal für Meldungen (Plan W2 Z. 197 gegen Z. 105–106 und Spec R2-K-2)
+- Laut W2 gibt `pdf_erstellen(...)` `tuple[int, str | None]` zurück, und Task 3 ersetzt „nur den Rumpf“.
+- Exit 4 soll aber den Tag- bzw. Attributnamen nennen (Z. 105), dazu die stderr-Kategorie. Die erste stdout-Zeile muss `kategorie: …` sein, die zweite `kunde-md: …` (K-2).
+- Druckt `pdf_erstellen` die Meldung selbst, steht sie vor der `kategorie:`-Zeile, die `main` erst nach der Rückkehr ausgibt. Gibt es sie zurück, ändert sich die Signatur.
+- **Nachtrag:** „`pdf_erstellen(md_pfad: str, pdf_pfad: str, titel: str, ende: float) -> tuple[int, str | None, list[str]]` (Exit-Code, Kategorie, Meldungszeilen ohne Werte aus Daten). `pdf_erstellen` schreibt nie auf stdout. `main` gibt `kategorie: …`, `kunde-md: …` und danach die Meldungen aus, höchstens 30 Zeilen insgesamt. Der Stub in 2a gibt `(3, 'pdf-werkzeug-fehlt', [])` zurück.“
+
+#### W-4 Welche Tests jeder Task ausführt (Plan Z. 21, W3 Z. 203)
+- `test_skill_text.py::test_keine_namen_der_ki_fixture_in_scripts_und_docker` (`test_skill_text.py:1283–1290`) liest **alle** `.py` unter `scripts/`, auch `test_*.py`. Gesucht wird case-insensitiv nach der Liste in `test_skill_text.py:915–918`, etwa `send_email`, `tickets.js`, `datei_suchen`, `fixture-ki`.
+- W3 beschränkt die Namensregel auf „Nicht-Test-Dateien“. Ein Regel-e- oder Regel-a-Test in `test_bericht.py` oder `test_kundenbericht.py` mit `tickets.js` oder `send_email` macht `test_skill_text.py` rot. Das merkt erst Task 4, und der darf die Testdateien von Task 1 bis 3 laut Files nicht ändern.
+- Die Temp-Repo-Tests (`test_auswertung.py:1056ff.`, `:2569ff.`, `:2596ff.`) hängen genauso an `kundenbericht.py` und `kundenbericht.html5` aus Task 2a und 3.
+- Task 1 ändert `bericht.pruefe_schema`, das `test_lieferkette_statisch.py:19/766/1098`, `evals/test_fixture.py:309` und `evals/test_auswertung.py` importieren. Der Monkeypatch in `test_lieferkette_statisch.py:1098` setzt die Signatur `_befund_fehler(b, w)` mit zwei Positionsargumenten voraus.
+- **Nachtrag:**
+  > „Die Namensregel aus W3 gilt auch für `scripts/test_*.py` (Liste `test_skill_text.py:915`).
+  >
+  > Je Task laufen:
+  > - Task 1: `test_bericht.py`, `test_lieferkette_statisch.py`, `test_skill_text.py -k ki_fixture` sowie `evals/test_fixture.py` und `evals/test_auswertung.py -k "schema or bericht_ok"`. `_befund_fehler` behält seine Signatur.
+  > - Task 2a, 2b und 3: `test_kundenbericht.py`, `test_skill_text.py -k ki_fixture` und `evals/test_auswertung.py -k temp_repo`.
+  > - Task 4: wie W3.
+  > - Task 5: `evals/test_auswertung.py` ganz.“
+
+### Klein
+
+- **K-1 Exit-2-Zeilen für fehlende Felder sowie Typ- und Längenfehler (Plan Z. 75, W1, K2):** Die `regel`-Liste in W1 deckt nur `kunden_verstoesse` ab.
+  > „Für eigene Prüfungen nutzt `kundenbericht.py` dasselbe Zeilenformat mit `regel` `fehlt` (Feld fehlt) und `schema` (Typ, Einzeiligkeit, unsichtbare Zeichen, Länge; Detail ist die Schemameldung ohne den Wert, z. B. `kürzer als 40 Zeichen`). Test `test_feld_fehlt_und_zu_kurz_exit2` in 2a.“
+- **K-2 `www.` und Du-Regex (W1, K1 Z. 237):** In W1 fehlt der `regel`-Wert für `\bwww\.`. K1 ordnet die Du-Liste dem casefold-Teilstringabgleich zu, W1 verlangt aber das Wort „wie im Text“. Nach casefold verschieben sich die Positionen, etwa bei `ß`.
+  > „`\bwww\.` meldet `url`. Die Du-Liste läuft als Regex mit den Grenzen aus B1 und `re.IGNORECASE` auf dem NFC-Text, nicht auf casefold; Detail ist `match.group()`.“
+- **K-3 Fehlende Felder in `kunden_verstoesse` (W1 Z. 190):** „überspringt sie“ lässt offen, ob der ganze Befund entfällt. Dann bliebe der Titel ungeprüft, und es bräuchte eine Korrekturrunde mehr.
+  > „Fehlende oder nicht-textuelle Felder werden einzeln übersprungen, die übrigen Felder des Befunds werden geprüft.“
+- **K-4 `ordner` (Task 1 Z. 52 gegen R2-K-4 und K9):**
+  > „Es gilt K9: Der Wert fehlt, ist `null` oder ein Text nach `[A-Za-z0-9._-]+` und nicht nur aus Punkten. In `kontext()` heißt die bestehende Variable `ordner` (`bericht.py:160–167`) bereits der Ausgabeordner. Der neue Wert bekommt einen eigenen Namen (z. B. `ordner_name`), damit nicht der Ausgabepfad im JSON landet. `bericht-format.md` führt `ordner` als optionales Feld außerhalb der Tabelle ‚Oberste Ebene (alles Pflicht)‘ (`bericht-format.md:11`).“
+- **K-5 W2 wörtlich (Z. 197):** „Alle Task-2-Tests mit der CLI erwarten Exit 3“ widerspricht TF4-D3/D4 (Exit 2) und den Ablage-Tests (Exit 5).
+  > „… alle Task-2-Tests, deren Lauf bis zur PDF-Stufe kommt, erwarten Exit 3 und `kunde-md:`.“
+- **K-6 Tests ohne Task (K2 Z. 239, K8 Z. 251):**
+  > „`test_unerwarteter_fehler_exit1_kategorie`, `test_meldung_hoechstens_30_zeilen` und `test_kunde_reserviert_kollision_exit5` gehören zu 2a.“
+- **K-7 `pagetitle` (Task 3 Z. 104):** Belegt durch die Probe oben.
+  > „`pagetitle` wird nur per `--metadata pagetitle=…` übergeben (pandoc escapt), nie per `-V`/`--variable` (dort landet der Wert roh im `<title>`). `test_pandoc_args` prüft das.“
+- **K-8 cwd von pandoc (Task 3 Z. 104):** Der cwd ist nur für weasyprint festgelegt (Spec Z. 92).
+  > „Beide Werkzeuge laufen mit `cwd` gleich dem eigenen Temp-Ordner aus `tempfile.mkdtemp`. Aufgeräumt wird per `shutil.rmtree` nur dieser zurückgegebene Pfad.“
+- **K-9 Festgelegter Satz in Grundregel 8:** `test_skill_budget_ki_und_modell` (`test_skill_text.py:1034–1036`) sucht die Zeile, die mit „- `poc.py`, `lieferkette.py` und `ki.py` immer als **einzelner einfacher Befehl**“ beginnt.
+  > „Task 4 lässt diese Zeile unverändert und nennt `kundenbericht.py` unter ‚Kurze Budgets‘ und ‚Bash sonst nur für‘. Muss sie doch geändert werden, darf Task 4 den Satz in diesem Test mitziehen.“
+- **K-10 Files von Task 4 und 5 nach W3:**
+  > „Task 4 ändert zusätzlich `security-audit/evals/run_eval.py` (`erlaubte_regeln`, Docstring) und `security-audit/evals/test_auswertung.py` (`test_regeln_passen_zu_skill`). In Task 5 entfallen die Punkte `erlaubte_regeln` (Z. 149) und `test_regeln_passen_zu_skill` (Z. 161).“
+- **K-11 Schlussmeldung nach 2 Runden (Spec Z. 104 „(Prüfung)“ gegen R2-K-2):**
+  > „Nach 2 gescheiterten Runden lautet sie ‚Kundenbericht nicht erstellt (inhalt)‘, im selben Muster wie bei Exit 5 und 1.“
+- **K-12 Eingeschränkt-Tabelle:** R1-W7 nennt „nicht geschwärzt“, R2-W-5 nicht.
+  > „Die Tabelle aus R2-W-5 ist abschließend. ‚nicht geschwärzt‘ entfällt, weil dieser Abbruch keinen Bericht erzeugt.“
+- **K-13 Mindestversion weasyprint (Task 4 Z. 135, K6):** Eine Versionsnummer steht nirgends. Ein Implementierer würde raten.
+  > „README und SKILL.md nennen ‚pandoc ≥ 2.15 (für `--sandbox`), weasyprint mit Option `--allowed-protocols` (geprüft mit 68.1)‘ und keine weitere Versionsnummer.“
+- **K-14 TF4-D6 im Detail (W4 Z. 209):** K10 erlaubt `_` im Projektnamen, die Escaping-Menge macht daraus `\_`. Ein Teilstringvergleich mit dem Rohnamen scheitert dann. Offen ist auch die Quelle für „vorhanden“.
+  > „TF4-D6 vergleicht die erste Markdown-Zeile mit `'# Manibase · Sicherheitsprüfung ' + kundenbericht.escape(projekt)`. ‚Vorhanden‘ heißt `kunde['md'] is not None` bzw. `kunde['pdf_anfang'] is not None`. `ausgabe_dateien` zählt nur für `pruefe_ablage`. Ist `bericht_pfad` `None`, übergibt `run_eval` `kunde=None`.“
+- **K-15 `run_eval` liest Kundendateien (W4):**
+  > „`run_eval` öffnet `-kunde.md`/`.pdf` mit `O_NOFOLLOW` und nur als reguläre Datei, sonst `None`. Die TF4-D6-Details zitieren nie Inhalt aus dem Markdown.“
+- **K-16 Regel a und Zahlen mit Punkten (R2-B-1):** Ein Token wie `10.000` (6 Zeichen, `\w\.\w`) aus einem PoC-Antworttext trifft „über 10.000 Datensätze“ in `zusammenfassung`.
+  > „Tokens, die nur aus Ziffern mit Tausenderpunkten bestehen (`\d{1,3}(\.\d{3})+(,\d+)?`), zählen für Regel a nicht.“
+- **K-17 `test_feste_texte_ohne_du_und_spuren` (W6) braucht eine Prüffunktion für Text:**
+  > „Task 1 stellt `bericht.text_verstoesse(text: str) -> list[tuple[str, str | None]]` bereit, mit den Regeln `du`, `d` ohne die Pfadteile, `url` und `email`, ohne Bezug zum JSON. `kunden_verstoesse` nutzt sie, und der Test in 2b ruft sie auf dem ganzen Markdown auf.“
+- **K-18 Beispiel in `bericht-format.md` (Task 4 Z. 134):**
+  > „Jeder Befund mit Status `bestätigt` oder `unbestätigt` im Beispiel trägt beide Felder (Längen nach Schema). Der Test prüft das zusätzlich zu `kunden_verstoesse == []`.“
+- **K-19 Titel im Kundenbericht:** Für `titel` gelten nur d, e und W11 (R2-W-2). Titel wie „… per GET /api/projects/:id“ oder „SSRF über /preview?url=“ bestehen die Prüfung und stehen dann im Kunden-PDF. Das ist kein Testfehler.
+  > „TF4-D7 (Durchklick) prüft ausdrücklich, ob Titel Routen oder Parameternamen enthalten. Ist das der Fall, wird Regel b in TF4-Härtung für `titel` übernommen.“
+
+### Widersprüche Task-Text, Nachtrag und Spec mit gültiger Auflösung
+
+| Stelle | Widerspruch | Es gilt |
+|---|---|---|
+| Task 1 Z. 53–54 | `list[dict]`, `token` | W1: Tupel `(id, feld, regel, detail)` |
+| Task 1 Z. 52 | `ordner` „wie repo“ / R2-K-4 „einzeiliger Text“ | K9 (+ K-4 hier) |
+| Task 1 Z. 55 | NFC + casefold für alles | K1 (Regex mit IGNORECASE), Du nach K-2 hier |
+| Spec R1-W4 (a) | Token-Nummer statt Token | R2-B-1: Token, `_t(…, 60)` |
+| Spec R1-W4 (e) | „außer eigener datei-Zeile“ | offen, W-1 hier |
+| Task 2 Z. 63–95 | ein Task | W7: 2a/2b |
+| Task 2 Z. 86 | Stub ohne Signatur | W2, ergänzt um W-3 hier |
+| Task 2 Z. 72–74 | nur `-kunde.json` | K8: dazu `-kunde.reserviert`, Endung `.json` |
+| Task 3 Z. 103 | Umgebung „ohne *_PROXY“ | K3: Whitelist |
+| Spec R1-W1 | `weasyprint --help`-Vorprüfung | R2-K-3: entfällt |
+| Task 3 Z. 109 | PATH-Shim „bzw.“ `SECURITY_AUDIT_OHNE` | K7: nur PATH-Shim |
+| Task 4 Z. 119 | Files `security-audit/README.md` | K10 + W3 + K-10 hier |
+| Task 4 Z. 125 | nur Felder korrigieren | W5: auch `titel`, vor 5b |
+| Task 5 Z. 149, 161 | `erlaubte_regeln`, `test_regeln_*` | W3: in Task 4 |
+| Task 5 Z. 157 | „feste Schlüsselmengen“ | W4 (DOD_WEB, `alles()`, Fake-claude) |
+| Spec Z. 40/101, Z. 92 | 120 s / weasyprint 90 s | R2-K-1: 90/20/60 s |
+| Spec Z. 88 | Symlink-Ziel Exit 2 | R1-K5/R2-K-2: Exit 5 |
+| Spec Z. 75 | `&lt;`/`&gt;` | R2-K-7: Backslash |
+| Spec Z. 43 | 2 MiB | R1-K4: `bericht.MAX_JSON_BYTES` |
+| Spec Z. 90 | `--metadata title`, `-H` | R1-K2: `--template`, `pagetitle` (per `--metadata`, K-7 hier) |
+| Spec Z. 104 | „(Prüfung)“ | K-11 hier: „(inhalt)“ |
+| Plan Z. 179 | 1 → 2 → 3 → 4 → 5 | W7: 1 → 2a → 2b → 3 → 4 → 5 |
+
+### TDD-Grünheit je Task
+
+- **Task 1:** Grün, wenn `_befund_fehler` seine Signatur behält. Keine Bestandstests prüfen die Schlüssel von `kontext` exakt (`test_kontext_cli_json` prüft nur, ob sie vorhanden sind) oder ein leeres stderr bei `rendern`. Die Laufliste steht in W-4.
+- **Task 2a, 2b:** Grün mit `SECURITY_AUDIT_OHNE` als Standard (W2) und K-5. Das Risiko liegt allein im Namensscan (W-4).
+- **Task 3:** Task-2-Tests bleiben über `SECURITY_AUDIT_OHNE` auf Exit 3, und es läuft kein echtes Werkzeug. Grün mit W-3.
+- **Task 4:** `_unterbefehle("kundenbericht")` braucht argparse-Unterbefehle aus 2a. `KUNDE_BUDGET` stammt aus Task 3 (K5), die Reihenfolge passt. Grün mit K-9 und K-10.
+- **Task 5:** Die Bruchstellen sind in W4 vollständig benannt. Geprüft: Kein Test listet exakt die fehlgeschlagenen Schlüssel. `:1868` und `:2502` gelten für fixture-deps ohne `kundenbericht`.
+
