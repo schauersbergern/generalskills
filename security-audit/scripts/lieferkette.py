@@ -143,15 +143,30 @@ STANDARD_AUSNAHMEN = (
             gross_klein=True),
     _klasse("gitleaks.toml", r"gitleaks\.toml", "gitleaks.toml", ".gitleaks.toml", "sub/gitleaks.toml", "old-gitleaks.toml",
             "gitleaks.toml.example"),
-    _klasse(".git-Ordner", r"(?:^|/)\.git/", "sub/.git/a.js", "x/.git/config", gross_klein=True),
+    _klasse(".git (Ordner oder Datei)", r"(?:^|/)\.git(?:/|$)", "sub/.git/a.js", "x/.git/config", ".git", "sub/.git", gross_klein=True),
+    _klasse("Python-Umgebungen (venv, site-packages, dist-info)",
+            r"(?:^|/)(?:v?env|virtualenv)/lib(?:64)?(?:/.*)?$"
+            r"|(?:^|/)(?:lib(?:64)?/python[23](?:\.\d{1,2})+|python/[23](?:\.\d{1,2})+/lib(?:64)?)(?:/.*)?$"
+            r"|(?:^|/)[a-z0-9_.]+-[0-9.]+\.dist-info(?:/.+)?$",
+            "venv/lib/python3.11/site-packages/a.py", "env/lib/python3.9/site-packages/a.py", "lib/python3.11/site-packages/a.py",
+            "python/3.11/lib/site-packages/a.py", "foo-1.0.dist-info/METADATA", "x/virtualenv/lib64/a.py", "venv/lib",
+            ".venv/lib/python3.12/a.py", "ENV/LIB/a.py", "a/lib64/python3.11/b.py", gross_klein=True),
+    _klasse("JavaScript-Bibliotheken (angular, bootstrap, jquery, plotly, swagger-ui) und javascript.json",
+            r"(?:^|/)(?:angular|bootstrap|jquery(?:-?ui)?|plotly|swagger-?ui)[a-zA-Z0-9.-]*(?:\.min)?\.js(?:\.map)?$"
+            r"|(?:^|/)javascript\.json$",
+            "static/jquery-3.6.0.min.js", "bootstrap.js", "web/angular.min.js.map", "plotly-latest.min.js", "swagger-ui-bundle.js",
+            "jquery-ui.js", "static/javascript.json", gross_klein=True),
+    _klasse("Sonstiges (Ruby-Gem, Gradle-Prüfsummen, Datenbank-Refaktorlog)",
+            r"\.gem$|verification-metadata\.xml|Database.refactorlog",
+            "a.gem", "gradle/verification-metadata.xml", "db/Database.refactorlog", "sub/verification-metadata.xml.bak"),
     _klasse("Bilder (bmp, gif, jpg, png, svg, tif)", r"\.(?:bmp|gif|jpe?g|png|svg|tiff?)$",
             "x.svg", "x.png", "x.jpg", "x.jpeg", "x.gif", "x.bmp", "x.tif", "x.tiff", "x.SVG", gross_klein=True),
     _klasse("Schriften (eot, otf, ttf, woff)", r"\.(?:eot|otf|ttf|woff2?)$",
             "x.eot", "x.otf", "x.ttf", "x.woff", "x.woff2", "x.TTF", gross_klein=True),
     _klasse("Office- und Binärformate (doc, xls, pdf, exe, gltf u. ä.)",
-            r"\.(?:docx?|xlsx?|pdf|bin|socket|vsidx|v2|suo|wsuo|pdb|exe|gltf)$",
+            r"\.(?:docx?|xlsx?|pdf|bin|socket|vsidx|v2|suo|wsuo|.dll|pdb|exe|gltf)$",      # `.dll` mit Punkt als Platzhalter, wie bei gitleaks
             "x.doc", "x.docx", "x.xls", "x.xlsx", "x.pdf", "x.bin", "x.socket", "x.vsidx", "x.v2", "x.suo", "x.wsuo", "x.pdb",
-            "x.exe", "x.gltf", "x.PDF", gross_klein=True),
+            "x.exe", "x.gltf", "x.PDF", "x.adll", gross_klein=True),
     _klasse("Archive (zip, tar, gz, bz2, xz, zst, lz4, 7z, rar)", r"\.(?:zip|tar|gz|bz2|xz|zst|lz4|7z|rar)",
             "x.zip", "x.tar", "x.gz", "x.bz2", "x.xz", "x.zst", "x.lz4", "x.7z", "x.rar", "x.tar.gz", "x.GZ", gross_klein=True),
 )

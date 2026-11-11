@@ -1610,3 +1610,90 @@ def test_nachpruefung_ignoriert_funde_ausserhalb_der_arbeitskopie_r1_1(umg, tmp_
     ausgabe(secrets(umg, v))
     assert aussen.read_bytes() == JS_ZEILE.encode()
     assert os.path.isfile(umg.marker())
+
+
+# ------------------------------------------------------------------------------------ Standardausnahmen gegen die Quelle (Review R1-2)
+
+# Die `paths` der Standard-Allowlist aus config/gitleaks.toml von gitleaks 8.30.1, wörtlich, je Regex ein Beispielpfad, den sie
+# erfasst. Weicht die eingebettete Config des installierten gitleaks ab, scheitert der Test: Liste und `STANDARD_AUSNAHMEN` prüfen.
+GITLEAKS_STANDARD_PFADE = (
+    ("gitleaks\\.toml", "gitleaks.toml"),
+    ("(?i)\\.(?:bmp|gif|jpe?g|png|svg|tiff?)$", "x.png"),
+    ("(?i)\\.(?:eot|[ot]tf|woff2?)$", "x.woff2"),
+    ("(?i)\\.(?:docx?|xlsx?|pdf|bin|socket|vsidx|v2|suo|wsuo|.dll|pdb|exe|gltf)$", "x.docx"),
+    ("go\\.(?:mod|sum|work(?:\\.sum)?)$", "go.mod"),
+    ("(?:^|/)vendor/modules\\.txt$", "vendor/modules.txt"),
+    ("(?:^|/)vendor/(?:github\\.com|golang\\.org/x|google\\.golang\\.org|gopkg\\.in|istio\\.io|k8s\\.io|sigs\\.k8s\\.io)(?:/.*)?$",
+     "vendor/github.com/a/b.go"),
+    ("(?:^|/)gradlew(?:\\.bat)?$", "gradlew"),
+    ("(?:^|/)gradle\\.lockfile$", "gradle.lockfile"),
+    ("(?:^|/)mvnw(?:\\.cmd)?$", "mvnw"),
+    ("(?:^|/)\\.mvn/wrapper/MavenWrapperDownloader\\.java$", ".mvn/wrapper/MavenWrapperDownloader.java"),
+    ("(?:^|/)node_modules(?:/.*)?$", "node_modules/x/a.js"),
+    ("(?:^|/)(?:deno\\.lock|npm-shrinkwrap\\.json|package-lock\\.json|pnpm-lock\\.yaml|yarn\\.lock)$", "package-lock.json"),
+    ("(?:^|/)bower_components(?:/.*)?$", "bower_components/a/b.js"),
+    ("(?:^|/)(?:angular|bootstrap|jquery(?:-?ui)?|plotly|swagger-?ui)[a-zA-Z0-9.-]*(?:\\.min)?\\.js(?:\\.map)?$",
+     "static/jquery-3.6.0.min.js"),
+    ("(?:^|/)javascript\\.json$", "static/javascript.json"),
+    ("(?:^|/)(?:Pipfile|poetry)\\.lock$", "poetry.lock"),
+    ("(?i)(?:^|/)(?:v?env|virtualenv)/lib(?:64)?(?:/.*)?$", "venv/lib/python3.11/site-packages/a.py"),
+    ("(?i)(?:^|/)(?:lib(?:64)?/python[23](?:\\.\\d{1,2})+|python/[23](?:\\.\\d{1,2})+/lib(?:64)?)(?:/.*)?$",
+     "lib/python3.11/site-packages/a.py"),
+    ("(?i)(?:^|/)[a-z0-9_.]+-[0-9.]+\\.dist-info(?:/.+)?$", "foo-1.0.dist-info/METADATA"),
+    ("(?:^|/)vendor/(?:bundle|ruby)(?:/.*?)?$", "vendor/bundle/a.rb"),
+    ("\\.gem$", "a.gem"),
+    ("verification-metadata\\.xml", "verification-metadata.xml"),
+    ("Database.refactorlog", "Database.refactorlog"),
+    ("(?:^|/)\\.git$", ".git"),
+)
+
+
+def _eingebettete_standard_pfade():
+    """Die `paths` der Standard-Allowlist aus der Config, die im gitleaks-Binary steckt (None, wenn nicht auffindbar)."""
+    with open(GITLEAKS, "rb") as f:
+        daten = f.read()
+    kopf = daten.find(b'description = "global allow lists"\npaths = [\n')
+    if kopf < 0:
+        return None
+    pfade = []
+    for zeile in daten[kopf:].split(b"\n")[2:]:
+        zeile = zeile.strip()
+        if not (zeile.startswith(b"'''") and zeile.endswith(b"''',")):
+            break
+        pfade.append(zeile[3:-4].decode())
+    return pfade
+
+
+@echt
+def test_standard_ausnahmen_decken_die_eingebettete_gitleaks_allowlist_ab_r1_2(umg, tmp_path):
+    """Jede Pfad-Regex der Standard-Allowlist von gitleaks hat einen Beispielpfad, den gitleaks tatsächlich überspringt und den
+    `_standard_ausnahme` einer Klasse zuordnet: eine unvollständige Liste (venv, site-packages, dist-info, …) fällt auf."""
+    eingebettet = _eingebettete_standard_pfade()
+    assert eingebettet is not None, "Allowlist im gitleaks-Binary nicht auffindbar: Format geändert, Test anpassen"
+    assert eingebettet == [r for r, _ in GITLEAKS_STANDARD_PFADE], \
+        "gitleaks hat eine andere Standard-Allowlist als 8.30.1: GITLEAKS_STANDARD_PFADE und STANDARD_AUSNAHMEN prüfen"
+    pfade = [p for _, p in GITLEAKS_STANDARD_PFADE]
+    wurzel = tmp_path / "ausn"
+    (tmp_path / "leer").mkdir()
+    for i, pfad in enumerate(pfade):
+        schreibe(str(wurzel / f"d{i}"), pfad, JS_ZEILE)
+    config = tmp_path / "cfg.toml"
+    config.write_text(lieferkette.GITLEAKS_TOML)
+    bericht = tmp_path / "bericht.json"
+    r = subprocess.run([GITLEAKS, "dir", str(wurzel), "--config", str(config), "--report-format", "json", "--report-path",
+                        str(bericht), "--exit-code", "0", "--no-banner", "--no-color", "--redact"],
+                       cwd=tmp_path / "leer", env=umg.env(), capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr
+    gefunden = {os.path.relpath(t["File"], wurzel).split(os.sep, 1)[1] for t in json.loads(bericht.read_text())}
+    for pfad in pfade:
+        assert pfad not in gefunden, f"gitleaks prüft {pfad} doch"
+        assert lieferkette._standard_ausnahme(pfad) is not None, f"{pfad}: keine Klasse in STANDARD_AUSNAHMEN"
+
+
+def test_standard_ausnahmen_hinweis_nennt_python_umgebungen_r1_2(umg):
+    v = vorbereiten(umg, [dict(MINI, **{"venv/lib/python3.11/site-packages/a.py": "x = 1\n",
+                                        "foo-1.0.dist-info/METADATA": "Name: foo\n"})])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    out = ausgabe(secrets(umg, v))
+    hinweis = next(h for h in out["hinweise"] if h.startswith("gitleaks-Standardausnahmen nicht geprüft"))
+    assert "venv/lib/python3.11/site-packages/a.py" in hinweis and "foo-1.0.dist-info/METADATA" in hinweis
