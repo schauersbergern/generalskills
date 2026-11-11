@@ -1915,7 +1915,7 @@ def test_kontext_ordner_ist_bereinigt_und_basename_der_wurzel(tmp_path):
     wt = tmp_path / "anderer-name"
     roh(haupt, "worktree", "add", "-q", str(wt), "-b", "feature")
     k = bericht.kontext(str(wt), None, JETZT)
-    assert k["ordner"] == "anderer-name" and k["repo"] == "haupt-repo"
+    assert k["ordner"] == "haupt-repo" and k["repo"] == "haupt-repo"        # R1-8: im Worktree der Hauptordner, nicht „anderer-name“
 
 
 def test_kontext_ordner_null_ohne_gueltigen_namen(tmp_path):
@@ -2258,3 +2258,16 @@ def test_regel_d_basename_ohne_punkt_aus_unterordner_r1_5():
     assert regeln(d, "massnahme") == []                                           # anderer Name: kein Treffer
     d = kd(massnahme=KD_VORSPANN + "Das Dockerfile wird ergänzt.", datei="docker/Dockerfile", poc="x", code_pfad=["x:1"])
     assert regeln(d, "massnahme") == []                                           # ohne Zeilenangabe ist der Name allein erlaubt
+
+
+# ------------------------------------------------------------------------------------ Review R1-8: ordner im Worktree
+
+def test_ordner_im_worktree_ist_der_hauptordner_r1_8(tmp_path):
+    """R1-8: `ordner` zieht der Kundenbericht ohne `projekt=` dem Repo-Namen vor; im Worktree darf er nicht der (zufällige) Worktree-Ordner sein."""
+    r = neues_repo(tmp_path / "kundenshop", origin="https://github.com/a/kundenshop.git")
+    wt = tmp_path / "wt-feature-xyz"
+    roh(r, "worktree", "add", "-q", str(wt), "-b", "feature")
+    k = bericht.kontext(str(wt), None, JETZT)
+    assert (k["repo"], k["ordner"]) == ("kundenshop", "kundenshop")
+    assert k["wurzel"] == os.path.realpath(wt)                                  # die Wurzel bleibt der Worktree
+    assert bericht.kontext(str(r), None, JETZT)["ordner"] == "kundenshop"

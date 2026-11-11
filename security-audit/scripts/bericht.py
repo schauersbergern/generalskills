@@ -63,6 +63,17 @@ def _bereinigen(name: str) -> str | None:
     return None if not name or re.fullmatch(r"\.+", name) else name
 
 
+def _hauptordner(wurzel: str) -> str:
+    """Ordner der Hauptkopie des Repos: in einem git-Worktree das Elternverzeichnis des gemeinsamen `.git`, sonst `wurzel` selbst."""
+    try:
+        gemeinsam = os.fsdecode(git(wurzel, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout).rstrip("\n")
+        if os.path.basename(gemeinsam) == ".git":
+            return os.path.dirname(gemeinsam)
+    except GitFehler:
+        pass
+    return wurzel
+
+
 def _repo_name(wurzel: str) -> str:
     try:
         url = git(wurzel, "config", "--get", "remote.origin.url").stdout.decode(errors="replace").strip()
@@ -75,15 +86,7 @@ def _repo_name(wurzel: str) -> str:
         name = _bereinigen(basis)
         if name:
             return name
-    ordner = wurzel
-    try:
-        gemeinsam = os.fsdecode(git(wurzel, "rev-parse", "--path-format=absolute", "--git-common-dir")
-                                .stdout).rstrip("\n")
-        if os.path.basename(gemeinsam) == ".git":
-            ordner = os.path.dirname(gemeinsam)
-    except GitFehler:
-        pass
-    return _bereinigen(os.path.basename(ordner)) or "repo"
+    return _bereinigen(os.path.basename(_hauptordner(wurzel))) or "repo"
 
 
 def _teilpfad(wurzel: str, teilpfad: str, sha: str = "HEAD") -> str:
@@ -145,7 +148,7 @@ def kontext(repo: str, teilpfad: str | None, jetzt: datetime | None = None) -> d
     except GitFehler as e:
         raise KontextFehler(f"Kein git-Repository mit HEAD unter {_t(repo)}: {_t(e)}") from e
     name = _repo_name(wurzel)
-    ordner_name = _bereinigen(os.path.basename(wurzel))         # `ordner` unten ist der Ausgabeordner, nicht dieser Name
+    ordner_name = _bereinigen(os.path.basename(_hauptordner(wurzel)))   # `ordner` unten ist der Ausgabeordner, nicht dieser Name; im Worktree der Hauptordner (R1-8)
     datum = jetzt.strftime("%Y-%m-%d")
     echt = _teilpfad(wurzel, teilpfad, sha) if teilpfad is not None else None
     slug = _slug(echt) if echt is not None else None

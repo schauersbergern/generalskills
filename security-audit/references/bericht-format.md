@@ -20,7 +20,7 @@ python3 -I <SKILL_DIR>/scripts/bericht.py rendern <ausgabe_ordner>/<basisname>.j
 | `hinweise` | Liste von Text | siehe „Hinweise“ |
 | `befunde` | Liste | siehe unten |
 
-Optional außerhalb dieser Tabelle: `ordner` (Text, `[A-Za-z0-9._-]` und nicht nur Punkte, oder `null`). Es ist der Ordnername der Repo-Wurzel aus `kontext` (`ordner`; der Wert ist nicht der Ausgabeordner). Der Kundenbericht nimmt ihn als Namen, wenn `projekt` fehlt. Fehlt `ordner` oder ist es `null`, fällt der Name auf `repo` zurück.
+Optional außerhalb dieser Tabelle: `ordner` (Text, `[A-Za-z0-9._-]` und nicht nur Punkte, oder `null`). Es ist der Ordnername der Hauptkopie des Repos aus `kontext` (`ordner`; in einem git-Worktree der Hauptordner, nicht der Worktree-Ordner; der Wert ist nicht der Ausgabeordner). Der Kundenbericht nimmt ihn als Namen, wenn `projekt` fehlt. Fehlt `ordner` oder ist es `null`, fällt der Name auf `repo` zurück.
 
 ## Befund
 
@@ -155,7 +155,7 @@ Für Befunde mit `werkzeug` `gitleaks` steht im Kundenbericht der feste Titel �
 | `zeitbudget` | einzelne Prüfungen konnten wegen des Zeitlimits nicht abgeschlossen werden |
 | `ki.py erkennen fehlgeschlagen`, `modell-mock nicht möglich` | die Prüfung der KI-Funktionen war nicht möglich |
 
-**Exit-Codes.** Bei Exit ≠ 0 ist die erste Zeile auf stdout `kategorie: <wert>`; danach folgt `kunde-md: <pfad>`, wenn das Markdown liegt: bei Exit 3 und 4 immer, bei Exit 1 und 5 nur, wenn der Fehler nach dem Schreiben des Markdown auftrat. Bei Exit 0 stehen `kunde-md:` und `kunde-pdf:` auf stdout. Die Meldungen stehen auf stdout (höchstens 30 Zeilen, danach eine Zeile „… und <n> weitere“); bei Exit 2 haben sie die Form `<id> <feld>: Regel <regel>[ (<detail>)]` und nennen nie den Treffertext.
+**Exit-Codes.** Bei Exit ≠ 0 ist die erste Zeile auf stdout `kategorie: <wert>`; danach folgt `kunde-md: <pfad>`, wenn das Markdown liegt: bei Exit 3 und 4 immer, bei Exit 1 und 5 nur, wenn der Fehler nach dem Schreiben des Markdown auftrat. Bei Exit 0 stehen `kunde-md:` und `kunde-pdf:` auf stdout; nur `--help` endet ebenfalls mit Exit 0, gibt die Hilfe aus und schreibt nichts (ohne die beiden Zeilen). Die Meldungen stehen auf stdout (höchstens 30 Zeilen, danach eine Zeile „… und <n> weitere“); bei Exit 2 haben sie die Form `<id> <feld>: Regel <regel>[ (<detail>)]` und nennen nie den Treffertext.
 
 | Exit | `kategorie` | Bedeutung | Folge in Schritt 7 |
 |---|---|---|---|
