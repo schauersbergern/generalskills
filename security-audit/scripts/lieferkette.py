@@ -8,7 +8,8 @@ Aufruf (immer als einzelner einfacher Befehl, siehe Netzregel):
 
 `secrets` (Budget 300 s; `gitleaks dir` zuerst höchstens 120 s ab Start, nach den Vorsuchen mindestens 60 s, die Schwärzung danach
 bis zum Gesamtbudget, ein Ablauf ist Exit 4) schwärzt zuerst jede von gitleaks erkannte Secret-Fundstelle der Arbeitskopie (gleiche
-Länge, Zeichen `*`, `\\n` und `\\r` bleiben), setzt dann den Marker `<zustand>/lieferkette/geschwaerzt` (mit der Kennung der Arbeitskopie
+Länge, Zeichen `*`, `\\n` und `\\r` bleiben) und prüft das mit einem zweiten `gitleaks dir`-Lauf nach (die Spalten von gitleaks stimmen bei
+sehr langen Zeilen nicht: Restfunde werden zeilenweise ganz geschwärzt, bleibt danach einer, ist es Exit 4), setzt dann den Marker `<zustand>/lieferkette/geschwaerzt` (mit der Kennung der Arbeitskopie
 aus `quelle.fertig`; wird die Kopie währenddessen neu erstellt, Exit 4 ohne Marker) und prüft danach die Historie in einem
 Spiegelklon des Repos. `secrets` und `abhaengigkeiten` teilen sich je Lauf eine Sperre (flock auf `<zustand>/lieferkette`): wer sie
 nicht bekommt, endet mit Exit 1, ohne etwas zu löschen. Ausgabe (JSON auf stdout): `befunde_roh` je (Regel, Datei) mit `regel`,
@@ -392,9 +393,12 @@ def _bytes_von(text: str) -> bytes:
     return text.encode("utf-8", "surrogateescape")
 
 
-def _schwaerze_treffer(orig: bytes, neu: bytearray, starts: list[int], t: dict, anzeige: str) -> list[str]:
+def _schwaerze_treffer(orig: bytes, neu: bytearray, starts: list[int], t: dict, anzeige: str,
+                       ganze_zeilen: bool = False) -> list[str]:
     """Eine Fundstelle in `neu` schwärzen (Koordinaten gegen das unveränderte `orig`). gitleaks 8.30 meldet Byte-Spalten,
-    1-basiert, Ende inklusiv; ab Zeile 2 sind Start- und Endspalte um 1 zu groß; `EndColumn` kann hinter dem Zeilenende liegen."""
+    1-basiert, Ende inklusiv; ab Zeile 2 sind Start- und Endspalte um 1 zu groß; `EndColumn` kann hinter dem Zeilenende liegen.
+    Die Spalten stimmen nicht immer (bei Zeilen ab etwa 120 KB zählt gitleaks ab einer internen Stückgrenze): `ganze_zeilen`
+    ignoriert sie und schwärzt die Zeilen `StartLine` bis `EndLine` ganz (nur die Zeilennummern müssen stimmen)."""
     sl, el = _ganzzahl(t.get("StartLine")), _ganzzahl(t.get("EndLine"))
     sc, ec = _ganzzahl(t.get("StartColumn")), _ganzzahl(t.get("EndColumn"))
     if not 1 <= sl <= el <= len(starts):
@@ -403,6 +407,10 @@ def _schwaerze_treffer(orig: bytes, neu: bytearray, starts: list[int], t: dict, 
     def zeilen_ende(zeile: int) -> int:           # Offset des Zeilenendes ohne `\n`
         return starts[zeile + 1] - 1 if zeile + 1 < len(starts) else len(orig)
 
+    if ganze_zeilen:
+        von, bis = starts[sl - 1], zeilen_ende(el - 1)
+        neu[von:bis] = re.sub(rb"[^\r\n]", b"*", bytes(orig[von:bis]))
+        return [f"Schwärzung unscharf: {anzeige}:{sl} (ganze Zeile)"]
     sc0 = max(sc - 1 if sl > 1 else sc, 1)
     ec0 = ec - 1 if el > 1 else ec
     beginn = starts[sl - 1] + sc0 - 1
@@ -435,11 +443,13 @@ def _schwaerze_treffer(orig: bytes, neu: bytearray, starts: list[int], t: dict, 
     return hinweise
 
 
-def schwaerzen(datei: str, treffer: list[dict], wurzel: str | None = None) -> list[str]:
+def schwaerzen(datei: str, treffer: list[dict], wurzel: str | None = None, ganze_zeilen: bool = False) -> list[str]:
     """Fundstellen (Einträge aus dem gitleaks-Bericht) in `datei` überschreiben: nur der Secret-Anteil, byteweise `*`, gleiche
     Länge, `\\n` und `\\r` bleiben. Die Datei wird an Ort und Stelle beschrieben (Rechte und Inode bleiben), nie über einen
     Symlink. Rückgabe: Hinweise („Schwärzung unscharf: <datei>:<zeile>“, wenn Präfix/Suffix nicht an der berechneten Stelle
-    stehen; dann wird die ganze Spanne ohne Zeilenumbrüche geschwärzt). Wirft SchwaerzFehler, wenn die Datei nicht lesbar oder
+    stehen; dann wird die ganze Spanne ohne Zeilenumbrüche geschwärzt). Ob die berechnete Stelle wirklich das Secret trifft,
+    weiß diese Funktion nicht (gitleaks meldet bei langen Zeilen falsche Spalten, `Match` ist mit `--redact` leer): das prüft
+    `_nachpruefen` mit einem zweiten gitleaks-Lauf; `ganze_zeilen` schwärzt die Zeilen ganz. Wirft SchwaerzFehler, wenn die Datei nicht lesbar oder
     beschreibbar ist oder eine Fundstelle nicht in der Datei liegt (dann bleibt die Datei unverändert)."""
     anzeige = _t(os.path.relpath(datei, wurzel) if wurzel else datei)
     try:
@@ -460,7 +470,7 @@ def schwaerzen(datei: str, treffer: list[dict], wurzel: str | None = None) -> li
         neu = bytearray(orig)
         hinweise: list[str] = []
         for t in treffer:
-            hinweise += _schwaerze_treffer(orig, neu, starts, t, anzeige)
+            hinweise += _schwaerze_treffer(orig, neu, starts, t, anzeige, ganze_zeilen)
         if bytes(neu) != orig:
             os.lseek(fd, 0, os.SEEK_SET)
             geschrieben = 0
@@ -474,7 +484,8 @@ def schwaerzen(datei: str, treffer: list[dict], wurzel: str | None = None) -> li
         os.close(fd)
 
 
-def _schwaerze_arbeitskopie(quelle: str, bericht: list[dict], ende: float | None = None) -> tuple[int, list[str]]:
+def _schwaerze_arbeitskopie(quelle: str, bericht: list[dict], ende: float | None = None,
+                             ganze_zeilen: bool = False) -> tuple[int, list[str]]:
     """Alle Fundstellen des `dir`-Berichts in der Arbeitskopie schwärzen. `File` wird aufgelöst (realpath) und muss innerhalb
     der Arbeitskopie liegen, sonst wird nichts geschrieben. Je Datei wird vorher die Frist `ende` (Wert von `time.monotonic()`)
     geprüft: ein Ablauf ist ein SchwaerzFehler (Teile der Arbeitskopie sind dann schon geschwärzt, es gibt keinen Marker).
@@ -496,13 +507,41 @@ def _schwaerze_arbeitskopie(quelle: str, bericht: list[dict], ende: float | None
     for nr, real in enumerate(sorted(je_datei)):
         if ende is not None and time.monotonic() >= ende:
             raise SchwaerzFehler(f"Zeitbudget für die Schwärzung erschöpft ({nr} von {len(je_datei)} Dateien geschwärzt)")
-        hinweise += schwaerzen(real, je_datei[real], quelle)
+        hinweise += schwaerzen(real, je_datei[real], quelle, ganze_zeilen)
         anzahl += len(je_datei[real])
     if draussen:
         hinweise.append(f"{draussen} Fundstellen außerhalb der Arbeitskopie ignoriert (nichts geschrieben)")
     if anzahl:
         hinweise.insert(0, f"{anzahl} Secret-Fundstellen in der Arbeitskopie geschwärzt")
     return anzahl, hinweise
+
+
+def _innerhalb(quelle: str, bericht: list[dict]) -> list[dict]:
+    """Die Fundstellen des Berichts, deren Datei (realpath) in der Arbeitskopie liegt; SchwaerzFehler bei ungültigem Pfad."""
+    innen = []
+    for t in bericht:
+        pfad = t.get("File")
+        if not isinstance(pfad, str) or not pfad or "\0" in pfad:
+            raise SchwaerzFehler("Fundstelle ohne gültigen Dateipfad")
+        real = os.path.realpath(pfad if os.path.isabs(pfad) else os.path.join(quelle, pfad))
+        if os.path.commonpath([real, quelle]) == quelle:
+            innen.append(t)
+    return innen
+
+
+def _nachpruefen(quelle: str, lk: str, ende: float) -> list[str]:
+    """Fail-closed nach der Schwärzung: ein zweiter `gitleaks dir`-Lauf auf der Arbeitskopie darf nichts mehr finden. Die
+    Spalten von gitleaks sind nicht verlässlich (lange Zeilen), die Schwärzung kann daneben liegen. Restfunde werden deshalb
+    zeilenweise ganz geschwärzt und noch einmal geprüft; bleibt dann ein Fund (oder läuft die Frist ab), ist das ein
+    SchwaerzFehler (Exit 4, kein Marker). Rückgabe: Hinweise."""
+    rest = _innerhalb(quelle, _gitleaks_dir(quelle, lk, ende))
+    if not rest:
+        return []
+    _, hinweise = _schwaerze_arbeitskopie(quelle, rest, ende, ganze_zeilen=True)
+    uebrig = _innerhalb(quelle, _gitleaks_dir(quelle, lk, ende))
+    if uebrig:
+        raise SchwaerzFehler(f"nach der Schwärzung bleiben {len(uebrig)} Secret-Fundstellen in der Arbeitskopie")
+    return hinweise
 
 
 def _gitleaks_dir(quelle: str, lk: str, ende: float) -> list[dict]:
@@ -735,6 +774,8 @@ def _secrets(a: argparse.Namespace, repo: str, quelle: str, lk: str, marker: str
         bericht = _gitleaks_dir(quelle, lk, ende_dir)
         _kopie_unveraendert(a.lauf, kopie)                # vor dem ersten Schreiben: der Bericht gilt dieser Kopie
         anzahl, schwaerz_hinweise = _schwaerze_arbeitskopie(quelle, bericht, ende)
+        if anzahl:
+            schwaerz_hinweise += _nachpruefen(quelle, lk, ende)
         _kopie_unveraendert(a.lauf, kopie)
     except SchwaerzFehler as e:
         return _schwaerzung_gescheitert(str(e))

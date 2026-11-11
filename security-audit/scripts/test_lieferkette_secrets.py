@@ -44,6 +44,12 @@ modus = args[0] if args else ""
 ziel = args[1] if len(args) > 1 else ""
 cfg = json.load(open(os.environ["FAKE_GL_CONFIG"]))
 verhalten = cfg.get(modus, {{}})
+frueher = 0
+if os.path.exists(os.environ["FAKE_GL_LOG"]):
+    frueher = sum(1 for z in open(os.environ["FAKE_GL_LOG"]) if z.strip() and json.loads(z)["modus"] == modus)
+if modus == "dir" and frueher > 0:                     # Prüfläufe nach der Schwärzung: `nach` je Lauf, danach findet er nichts mehr
+    nach = verhalten.get("nach", [])
+    verhalten = nach[frueher - 1] if frueher - 1 < len(nach) else {{}}
 
 
 def opt(name):
@@ -619,8 +625,9 @@ def test_marker_gesetzt_und_vor_historie(umg):
     v = vorbereiten(umg, [MINI])
     umg.fake_gitleaks(dir={"report": [dir_treffer(JS_ZEILE.encode())]}, git={"report": []})
     ausgabe(secrets(umg, v))
-    dir_aufruf, git_aufruf = umg.aufrufe()
-    assert dir_aufruf["marker"] is False and git_aufruf["marker"] is True        # test_marker_vor_historie
+    dir_aufruf, pruef_aufruf, git_aufruf = umg.aufrufe()                         # dir, Prüflauf nach der Schwärzung, git
+    assert [a["modus"] for a in (dir_aufruf, pruef_aufruf, git_aufruf)] == ["dir", "dir", "git"]
+    assert dir_aufruf["marker"] is False and pruef_aufruf["marker"] is False and git_aufruf["marker"] is True  # test_marker_vor_historie
     assert os.path.isfile(umg.marker()) and not os.path.islink(umg.marker())
 
 
@@ -1516,3 +1523,90 @@ def test_lese_report_verweigert_zu_grosse_berichte(tmp_path, monkeypatch):
     monkeypatch.setattr(lieferkette, "REPORT_MAX", 20)
     with pytest.raises(lieferkette.ReportFehler, match="zu groß"):
         lieferkette._lese_report(str(pfad))
+
+
+# ------------------------------------------------------------------------------------ lange Zeilen (Review R1-1)
+
+LANGE_ZEILE = b"var a=1;" * 20000                                                # 160 KB: gitleaks 8.30 meldet dahinter falsche Spalten
+
+
+def _lang_lauf(umg, inhalt):
+    v = vorbereiten(umg, [{"dist/bundle.min.js": inhalt, "package.json": "{}"}])
+    return secrets(umg, v), v
+
+
+@echt
+@pytest.mark.parametrize("variante", ["github-pat", "base64"])
+def test_schwaerzung_echt_lange_zeile_laesst_keinen_wert_stehen_r1_1(umg, variante):
+    pat = "ghp_" + geheimnis(20261111, 36)
+    if variante == "github-pat":
+        geheim = pat.encode()
+        inhalt = LANGE_ZEILE + b'var t="' + geheim + b'";\n'
+    else:
+        geheim = base64.b64encode(f'password = "{WERT}"'.encode())
+        inhalt = LANGE_ZEILE + b"var d='" + geheim + b"';\n"
+    r, v = _lang_lauf(umg, inhalt)
+    neu = lesen(os.path.join(v.quelle, "dist/bundle.min.js"))
+    assert geheim not in neu and WERT.encode() not in neu, "Secret-Wert steht nach der Schwärzung noch in der Arbeitskopie"
+    assert len(neu) == len(inhalt) and neu.count(b"\n") == 1
+    assert r.returncode in (0, 4), r.stdout + r.stderr
+    assert (r.returncode == 0) == os.path.isfile(umg.marker())                      # Marker nur bei geschwärzter Kopie
+    assert geheim.decode() not in r.stdout + r.stderr
+
+
+def _lang_treffer(inhalt, datei="src/a.js", zeile=1):
+    """Fundstelle mit unbrauchbaren Spalten (wie gitleaks bei langen Zeilen): Zeile stimmt, Spalten zeigen daneben."""
+    return treffer(datei="{ziel}/" + datei, zeile=zeile, von=3, bis=9, match="REDACTED", regel="github-pat")
+
+
+def test_nachpruefung_schwaerzt_restfunde_zeilenweise_und_prueft_erneut_r1_1(umg):
+    langer_wert = "ghp_" + geheimnis(7, 36)
+    inhalt = f'var a=1;var t="{langer_wert}";\nvar b=2;\n'
+    v = vorbereiten(umg, [{"src/a.js": inhalt, "package.json": "{}"}])
+    t = _lang_treffer(inhalt)
+    umg.fake_gitleaks(dir={"report": [t]}, git={"report": []})
+    cfg = json.loads(umg.config_datei.read_text())
+    cfg["dir"]["nach"] = [{"report": [t]}, {"report": []}]                        # Prüflauf 1 findet den Rest, Prüflauf 2 nicht
+    umg.config_datei.write_text(json.dumps(cfg))
+    out = ausgabe(secrets(umg, v))
+    neu = lesen(os.path.join(v.quelle, "src/a.js"))
+    assert langer_wert.encode() not in neu and neu.endswith(b"\nvar b=2;\n")        # Zeile 1 ganz, Zeile 2 unverändert
+    assert neu.split(b"\n")[0] == b"*" * len(inhalt.split("\n")[0])
+    assert "Schwärzung unscharf: src/a.js:1 (ganze Zeile)" in out["hinweise"]
+    assert [a["modus"] for a in umg.aufrufe()] == ["dir", "dir", "dir", "git"]
+    assert os.path.isfile(umg.marker())
+    assert langer_wert not in json.dumps(out)
+
+
+def test_nachpruefung_mit_bleibendem_restfund_ist_exit4_ohne_marker_r1_1(umg):
+    inhalt = 'var a=1;var t="geheim-geheim-geheim";\n'
+    v = vorbereiten(umg, [{"src/a.js": inhalt, "package.json": "{}"}])
+    t = _lang_treffer(inhalt)
+    umg.fake_gitleaks(dir={"report": [t], "nach": [{"report": [t]}, {"report": [t]}]}, git={"report": [treffer(commit=v.shas[0])]})
+    r = secrets(umg, v)
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "nicht geschwärzt" in r.stdout + r.stderr and "kategorie: schwaerzung-fehlgeschlagen" in r.stdout.splitlines()
+    assert not os.path.lexists(umg.marker())
+    assert [a["modus"] for a in umg.aufrufe()] == ["dir", "dir", "dir"]            # keine Historie
+    assert lieferkette_inhalt(umg) == []
+    for sentinel in SENTINELS:
+        assert sentinel not in r.stdout and sentinel not in r.stderr
+
+
+def test_nachpruefung_laeuft_nur_nach_einer_schwaerzung_r1_1(umg):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    ausgabe(secrets(umg, v))
+    assert [a["modus"] for a in umg.aufrufe()] == ["dir", "git"]
+
+
+def test_nachpruefung_ignoriert_funde_ausserhalb_der_arbeitskopie_r1_1(umg, tmp_path):
+    v = vorbereiten(umg, [MINI])
+    aussen = tmp_path / "aussen.js"
+    aussen.write_bytes(JS_ZEILE.encode())
+    t_innen = dir_treffer(JS_ZEILE.encode())
+    t_aussen = dir_treffer(JS_ZEILE.encode(), datei="a.js") | {"File": str(aussen)}
+    umg.fake_gitleaks(dir={"report": [t_innen], "nach": [{"report": [t_aussen]}]}, git={"report": []})
+    ausgabe(secrets(umg, v))
+    assert aussen.read_bytes() == JS_ZEILE.encode()
+    assert os.path.isfile(umg.marker())
