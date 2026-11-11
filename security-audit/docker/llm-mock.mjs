@@ -13,7 +13,7 @@
 //       erst danach wird jeder Body auf 8 KiB gekürzt. --suche sucht im maskierten Body und liefert je Eintrag zusätzlich
 //       `fundstelle`: der einzeilige Ausschnitt (höchstens 300 Zeichen) um das erste Vorkommen, auch hinter der Kürzung.
 //       `standard: true` heißt: kein Eintrag der Antwortliste passte, der Mock antwortete mit „ok“. `aelter` ist die Zahl der Requests, die der
-//       Ring (die letzten 50) schon verdrängt hat; `gekuerzt` zählt dagegen die wegen der Ausgabegrenze weggelassenen Einträge (zuerst die mit `standard: true`, dann die ältesten).
+//       Ring (die letzten 50) schon verdrängt hat; `gekuerzt` zählt dagegen die wegen der Ausgabegrenze weggelassenen Einträge (zuerst die, die keinen Antworteintrag verbraucht haben, ältester zuerst).
 // API-Endpunkte (mit oder ohne /v1): POST chat/completions, responses, messages, embeddings sowie GET models.
 // Exit-Codes: 0 = ok, 1 = Fehler (Steuerung nicht erreichbar, Port belegt, …), 2 = ungültige Argumente oder ungültiger stdin.
 
@@ -199,6 +199,7 @@ function naechsteAntwort(body, eintrag) {
     return { typ: "text", text: "ok" };
   }
   const [e] = zustand.warteschlange.splice(i, 1);
+  eintrag.verbraucht = true;                     // nur intern: die Kürzung der Protokollausgabe schützt diese Einträge zuletzt
   if (e.werkzeug) return { typ: "werkzeug", name: e.werkzeug.name, argumente: e.werkzeug.argumente };
   return { typ: "text", text: e.text };
 }
@@ -293,13 +294,15 @@ function protokollAusgabe(werte, suche) {
     pfad: maske(e.pfad).slice(0, PFAD_MAX), // erst maskieren, dann kürzen
     body: maske(e.body), // erst maskieren, dann kürzen
     ...(e.standard ? { standard: true } : {}),
+    verbraucht: e.verbraucht === true,           // wird vor der Ausgabe wieder entfernt
   }));
   const aelter = zustand.nr - zustand.ring.length; // Requests, die der Ring schon verdrängt hat (auch bei --suche der Gesamtstand)
   if (suche !== null) eintraege = eintraege.filter((e) => e.body.includes(suche));
   const strings = eintraege.map((e) => {
-    const ausgabe = { ...e, body: kuerzen(e.body) };
+    const { verbraucht, ...rest } = e;
+    const ausgabe = { ...rest, body: kuerzen(e.body) };
     if (suche !== null) ausgabe.fundstelle = fundstelle(e.body, suche);
-    return { text: jsonAscii(ausgabe), standard: e.standard === true };
+    return { text: jsonAscii(ausgabe), verbraucht };
   });
   let gekuerzt = 0;
   const gesamt = () => {
@@ -307,10 +310,10 @@ function protokollAusgabe(werte, suche) {
     const fuss = `],"gekuerzt":${gekuerzt},"aelter":${aelter}}`;
     return Buffer.byteLength(kopf) + Buffer.byteLength(fuss) + strings.reduce((s, x) => s + Buffer.byteLength(x.text), 0) + Math.max(0, strings.length - 1);
   };
-  // Erst fallen Rückfallantworten (`standard: true`) weg, die ältesten zuerst: Der Request, der einen Antworteintrag verbraucht hat,
-  // ist der Beleg und bleibt so lange wie möglich. Erst danach fallen die übrigen Einträge weg, wieder die ältesten zuerst.
+  // Der Request, der einen Antworteintrag verbraucht hat, ist der Beleg: Er fällt zuletzt weg. Zuerst fallen alle anderen Einträge weg
+  // (Rückfallantworten, Embeddings, models, 404, 413, …), die ältesten zuerst; erst danach die verbrauchenden, wieder die ältesten zuerst.
   while (strings.length > 0 && gesamt() > AUSGABE_MAX) {
-    const i = strings.findIndex((x) => x.standard);
+    const i = strings.findIndex((x) => !x.verbraucht);
     strings.splice(i < 0 ? 0 : i, 1);
     gekuerzt += 1;
   }

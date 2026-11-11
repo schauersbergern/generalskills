@@ -1918,6 +1918,37 @@ def test_mock_protokoll_kuerzung_behaelt_den_verbrauchenden_request(mock):
         assert all(e.get("standard") for e in p["eintraege"][1:]) and nrs == sorted(nrs)
 
 
+@pytest.mark.parametrize("pfad", ["/v1/embeddings", "/v1/nix", "/v1/models"])
+def test_mock_protokoll_kuerzung_behaelt_den_verbrauchenden_request_auch_gegen_andere_routen(mock, pfad):
+    """Nach dem Marker-Chat schickt eine App Embeddings oder trifft 404 und `GET /models`: Diese Requests tragen kein `standard`, verdrängen den
+    verbrauchenden Request aber nicht (Review R2, R1-1 Rest). Die Reihenfolge der übrigen bleibt: die ältesten fallen zuerst weg."""
+    marker = "POCMARKER-p1-rag"
+    setzen(mock, [{"werkzeug": {"name": "tool_a", "argumente": {}}, "wenn_enthaelt": marker}])
+    chat_json(mock, marker)                                                                    # nr 1: verbraucht
+    for i in range(9):
+        if pfad == "/v1/models":
+            anfrage(mock.api, "GET", "/v1/models", "x" * 9000 + str(i))
+        else:
+            anfrage(mock.api, "POST", pfad, json.dumps({"input": "x" * 9000 + str(i)}))
+    p = protokoll(mock)
+    nrs = [e["nr"] for e in p["eintraege"]]
+    assert p["gekuerzt"] > 0 and p["aelter"] == 0 and p["gekuerzt"] + len(nrs) == 10, p["gekuerzt"]
+    assert nrs[0] == 1 and nrs == sorted(nrs) and nrs[-1] == 10                                # nr 1 bleibt, die neuesten bleiben
+    assert nrs[1:] == list(range(10 - len(nrs) + 2, 11))                                       # dazwischen lückenlos bis zum Ende
+
+
+def test_mock_protokoll_kuerzung_verbrauchende_fallen_zuletzt_aelteste_zuerst(mock):
+    """Gibt es mehr verbrauchende Requests als hineinpassen, fallen erst die älteren verbrauchenden weg (nie ein Nicht-Verbrauchender vor ihnen)."""
+    setzen(mock, [{"text": "a"}] * 9)
+    for i in range(9):
+        chat_json(mock, f"{i} " + "v" * 9000)
+    anfrage(mock.api, "POST", "/v1/nix", "z" * 9000)                                           # nr 10, nicht verbrauchend
+    p = protokoll(mock)
+    nrs = [e["nr"] for e in p["eintraege"]]
+    assert p["gekuerzt"] > 0 and 10 not in nrs                                                 # der nicht verbrauchende nr 10 fällt zuerst weg
+    assert nrs == list(range(nrs[0], 10)) and nrs[0] > 1                                       # dann die ältesten verbrauchenden, lückenlos bis nr 9
+
+
 def _nicht_loopback_adresse():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
