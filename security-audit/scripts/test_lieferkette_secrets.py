@@ -1782,3 +1782,21 @@ def test_aufraeumfehler_ohne_marker_bleibt_exit_1_r1_9(umg, monkeypatch, capsys)
     monkeypatch.setattr(lieferkette, "_aufraeumen", kaputt)
     rc, aus = inproc_secrets(umg, v, monkeypatch, capsys)
     assert rc == 1 and not os.path.lexists(umg.marker())
+
+
+def test_spiegel_klont_ohne_hardlinks_mit_no_local_r1_10e(umg, tmp_path, monkeypatch):
+    """`git clone --mirror` bekommt `--no-local`: ohne den Schalter hängt ein lokaler Klon per Hardlink am Kundenrepo."""
+    repo, _ = repo_bauen(umg, [{"a.txt": "1"}])
+    aufrufe = []
+    echt = gitkopie.werkzeug_ausfuehren
+
+    def merken(args, *a, **k):
+        aufrufe.append(list(args))
+        return echt(args, *a, **k)
+    monkeypatch.setattr(gitkopie, "werkzeug_ausfuehren", merken)
+    ziel = str(tmp_path / "spiegel.git")
+    gitkopie.spiegel(repo, ziel, 60)
+    (klon,) = [a for a in aufrufe if "clone" in a]
+    assert "--no-local" in klon and "--mirror" in klon and klon.index("--no-local") < klon.index("--")
+    objekte = [os.path.join(d, f) for d, _, fs in os.walk(os.path.join(ziel, "objects")) for f in fs]
+    assert objekte and all(os.stat(o).st_nlink == 1 for o in objekte)             # keine Hardlinks auf das Kundenrepo

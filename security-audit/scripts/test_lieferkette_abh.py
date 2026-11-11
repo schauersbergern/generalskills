@@ -1438,3 +1438,24 @@ def test_pnpm_lockfile_ab_format_9_traegt_keine_dev_angabe_r1_8(umg):
     text = "lockfileVersion: '9.0'\n\npackages:\n\n  dev-pkg@2.0.0:\n    resolution: {integrity: x}\n    dev: true\n"
     pakete = _pnpm_dev_ausgabe(umg, text, ("dev-pkg", "2.0.0"))
     assert pakete[("dev-pkg", "2.0.0", "pnpm-lock.yaml")]["dev"] is False
+
+
+# ------------------------------------------------------------------------------------ überlebende Mutanten (Review R1-10 a, b)
+
+def test_behoben_in_nimmt_nur_bereiche_mit_der_installierten_version_wenn_es_solche_gibt_r1_10a():
+    """Überlappende Versionslinien: installiert 1.0.0 liegt nur in [0, 3.0.0); der Bereich [2.0.0, 2.5.0) darf nicht zählen."""
+    v = vuln("lib", bereiche=(("0", "3.0.0"), ("2.0.0", "2.5.0")))
+    assert lieferkette.behoben_in([v], "lib", "1.0.0") == "3.0.0"
+    v2 = vuln("lib", bereiche=(("2.0.0", "2.5.0"), ("0", "3.0.0")))
+    assert lieferkette.behoben_in([v2], "lib", "1.0.0") == "3.0.0"
+    assert lieferkette.behoben_in([v], "lib", "2.1.0") == "2.5.0"                  # in beiden: die kleinste Fix-Version
+
+
+def test_dev_gilt_nur_wenn_alle_vorkommen_dev_sind_unabhaengig_von_der_reihenfolge_r1_10b(umg):
+    """Dasselbe Paket in derselben Version einmal produktiv, einmal dev: `dev` ist false, egal welches Vorkommen zuerst steht."""
+    for name, pakete in (("prod-zuerst", (("node_modules/a", "1.0.0", False), ("node_modules/x/node_modules/a", "1.0.0", True))),
+                         ("dev-zuerst", (("node_modules/x/node_modules/a", "1.0.0", True), ("node_modules/a", "1.0.0", False)))):
+        text = npm_lock(*pakete)
+        assert lieferkette._npm_index(text).dev[("a", "1.0.0")] is False, name
+    assert lieferkette._npm_index(npm_lock(("node_modules/a", "1.0.0", True),
+                                           ("node_modules/x/node_modules/a", "1.0.0", True))).dev[("a", "1.0.0")] is True

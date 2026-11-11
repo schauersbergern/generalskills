@@ -2570,3 +2570,14 @@ def test_gitleaks_erkennt_stoppwort_wert_nicht():
     """Gemessener Fehlschlag (Stoppwort „fake“, Zufallswert ohne Bedeutung) vs. ein erkannter Wert."""
     assert run_eval._gitleaks_erkennt("ifAkeAplMhOAXoZW8qfDrVfz2bYsYGPX") is False
     assert run_eval._gitleaks_erkennt("Zq8Rk2Xw7Pv4Lm9Tn3Hb6Jc5Gd1Fs0Wy") is True
+
+
+def test_ungekoppelter_werkzeugbefund_zaehlt_nie_als_luecke_r1_10d(bericht, erwartung):
+    """Ein Werkzeugbefund (hier osv-scanner ohne `pakete`, also ungekoppelt) auf der Lücken-Datei mit passender Kategorie ist
+    keine Lücke: Lücken erkennt nur der Prüf-Ablauf, nie ein Werkzeug."""
+    s1 = next(b for b in bericht["befunde"] if b["id"] == "S-1")
+    assert not auswertung._gekoppelt(dict(s1, werkzeug="osv-scanner"))                 # Voraussetzung: wirklich ungekoppelt
+    extra = dict(copy.deepcopy(s1), id="S-99", werkzeug="osv-scanner")
+    bericht["befunde"].append(extra)
+    z = auswertung.befunde_zuordnen(bericht, erwartung)
+    assert [b["id"] for b in z["L1"]] == ["S-1"]

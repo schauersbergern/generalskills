@@ -566,7 +566,8 @@ def test_schema_commits_grenzen():
     [{"name": "x", "version": "1"}], [{"name": "x", "version": "1", "advisories": "GHSA-1"}],
     [{"name": "x", "version": "1", "advisories": [1]}], [{"name": "x", "version": "1", "advisories": ["a\nb"]}],
     [{"name": "", "version": "1", "advisories": []}], [{"name": "x", "version": 1, "advisories": []}],
-    [{"name": "x", "version": "1", "advisories": [], "kev": "ja"}],
+    [{"name": "x", "version": "1", "advisories": [], "kev": "ja"}], [{"name": "x", "version": "1", "advisories": [], "kev": 1}],
+    [{"name": "x", "version": "1", "advisories": [], "kev": 0}],
     [{"name": "x", "version": "1", "advisories": [], "behoben_in": 5}]])
 def test_schema_pakete_ungueltig(pakete):
     assert any("pakete" in f for f in bericht.pruefe_schema(mit(osv_befund(pakete=pakete))))
