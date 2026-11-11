@@ -1191,3 +1191,25 @@ def test_minor_oserror_aus_dem_verzeichnislauf_wird_hinweis(umg, monkeypatch, ca
     monkeypatch.setattr(os, "walk", kaputt)
     out = _inproc(umg, monkeypatch, capsys)
     assert any("Verzeichnissuche abgebrochen (OSError)" in h for h in out["hinweise"]) and out["entwuerfe"] == []
+
+
+def _sekunden_aufzeichnen(monkeypatch):
+    """`_sekunden` im Testprozess durch einen Aufzeichner ersetzen: Liste der (Name, Standard) der Aufrufstellen."""
+    aufrufe = []
+    echt = lieferkette._sekunden
+
+    def aufzeichner(name, standard):
+        aufrufe.append((name, standard))
+        return echt(name, standard)
+    monkeypatch.setattr(lieferkette, "_sekunden", aufzeichner)
+    return aufrufe
+
+
+def test_lieferkette_budget_laeuft_ueber_den_deckel_r1_4(umg, monkeypatch, capsys):
+    """Die Aufrufstelle in `cmd_lieferkette` nimmt `_sekunden` mit dem Standard 60 s (kein Rohwert der Variable)."""
+    monkeypatch.setattr(tempfile, "tempdir", str(umg.tmp))
+    monkeypatch.setenv("SECURITY_AUDIT_LK_BUDGET", "1e9")
+    aufrufe = _sekunden_aufzeichnen(monkeypatch)
+    rc = lieferkette.main(["lieferkette", "--lauf", LAUF, "--quelle", umg.quelle()])
+    capsys.readouterr()
+    assert rc == 0 and aufrufe == [("SECURITY_AUDIT_LK_BUDGET", 60)]

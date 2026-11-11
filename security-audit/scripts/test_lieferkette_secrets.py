@@ -1702,3 +1702,25 @@ def test_standard_ausnahmen_hinweis_nennt_python_umgebungen_r1_2(umg):
     out = ausgabe(secrets(umg, v))
     hinweis = next(h for h in out["hinweise"] if h.startswith("gitleaks-Standardausnahmen nicht geprüft"))
     assert "venv/lib/python3.11/site-packages/a.py" in hinweis and "foo-1.0.dist-info/METADATA" in hinweis
+
+
+def _sekunden_aufzeichnen(monkeypatch):
+    """`_sekunden` im Testprozess durch einen Aufzeichner ersetzen: Liste der (Name, Standard) der Aufrufstellen."""
+    aufrufe = []
+    echt = lieferkette._sekunden
+
+    def aufzeichner(name, standard):
+        aufrufe.append((name, standard))
+        return echt(name, standard)
+    monkeypatch.setattr(lieferkette, "_sekunden", aufzeichner)
+    return aufrufe
+
+
+def test_secrets_budgets_laufen_ueber_den_deckel_r1_4(umg, monkeypatch, capsys):
+    """Die Aufrufstelle in `_secrets_mit_sperre` nimmt `_sekunden` mit den Standards 300 s und 120 s (kein Rohwert der Variable)."""
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    aufrufe = _sekunden_aufzeichnen(monkeypatch)
+    rc, _ = inproc_secrets(umg, v, monkeypatch, capsys, SECURITY_AUDIT_SECRETS_BUDGET="1e9", SECURITY_AUDIT_SECRETS_DIR_BUDGET="1e9")
+    assert rc == 0
+    assert sorted(aufrufe) == [("SECURITY_AUDIT_SECRETS_BUDGET", 300), ("SECURITY_AUDIT_SECRETS_DIR_BUDGET", 120)]

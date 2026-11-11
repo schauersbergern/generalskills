@@ -1336,3 +1336,29 @@ def test_kev_treffer_ignoriert_gross_klein_und_leerraum():
 def test_advisory_listet_die_eigene_id_nicht_als_alias():
     a = lieferkette._advisory({"id": "GHSA-a", "aliases": ["GHSA-a", "CVE-1"], "summary": "s", "details": "d"})
     assert a["aliase"] == ["CVE-1"]
+
+
+def _sekunden_aufzeichnen(monkeypatch):
+    """`_sekunden` im Testprozess durch einen Aufzeichner ersetzen: Liste der (Name, Standard) der Aufrufstellen."""
+    aufrufe = []
+    echt = lieferkette._sekunden
+
+    def aufzeichner(name, standard):
+        aufrufe.append((name, standard))
+        return echt(name, standard)
+    monkeypatch.setattr(lieferkette, "_sekunden", aufzeichner)
+    return aufrufe
+
+
+def test_abhaengigkeiten_budget_laeuft_ueber_den_deckel_r1_4(umg, monkeypatch, capsys):
+    """Die Aufrufstelle in `cmd_abhaengigkeiten` nimmt `_sekunden` mit dem Standard 300 s (kein Rohwert der Variable)."""
+    umg.fake_osv()
+    monkeypatch.setattr(tempfile, "tempdir", str(umg.tmp))
+    monkeypatch.setenv("PATH", f"{umg.bin}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_OSV_LOG", str(umg.log))
+    monkeypatch.setenv("FAKE_OSV_CONFIG", str(umg.config))
+    monkeypatch.setenv("SECURITY_AUDIT_ABH_BUDGET", "1e9")
+    aufrufe = _sekunden_aufzeichnen(monkeypatch)
+    rc = lieferkette.main(["abhaengigkeiten", "--lauf", LAUF, "--quelle", umg.quelle()])
+    capsys.readouterr()
+    assert rc == 0 and aufrufe == [("SECURITY_AUDIT_ABH_BUDGET", 300)]
