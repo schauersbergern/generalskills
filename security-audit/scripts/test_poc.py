@@ -237,6 +237,92 @@ def test_lockfile_funding_urls_sind_kein_verstoss(tmp_path):
     assert poc.lockfile_pruefen(lock_in(tmp_path, inhalt)) is None
 
 
+LOCK_WURZEL_FREMD = [
+    "https://evil.test/x.tgz",       # gemessener Fall R1-2: URL-Spec im Wurzelpaket
+    "evil/repo",                     # gemessener Fall R1-2: GitHub-Kurzform
+    "evil/repo#semver:^1",
+    "git@github.com:a/b.git",
+    "http://registry.npmjs.org/a.tgz",
+    "npm:evil/repo",
+    "npm:@a/b@https://evil.test/x.tgz",
+    "workspace:*",
+]
+
+
+@pytest.mark.parametrize("feld", ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"])
+@pytest.mark.parametrize("spec", LOCK_WURZEL_FREMD)
+def test_lockfile_wurzel_spec_fremd(tmp_path, feld, spec):
+    inhalt = lockdatei({"node_modules/x": paket()}, root=None)
+    daten = json.loads(inhalt)
+    daten["packages"][""][feld] = {"x": spec}
+    assert poc.lockfile_pruefen(lock_in(tmp_path, json.dumps(daten))) == "lockfile-fremde-quelle"
+
+
+def test_lockfile_gemessener_fall_ohne_resolved(tmp_path):
+    """R1-2: URL-Spec im Wurzelpaket, Eintrag ohne resolved (vorher: None, Bau erlaubt)."""
+    daten = {"lockfileVersion": 3, "packages": {
+        "": {"dependencies": {"x": "https://evil.test/x.tgz"}}, "node_modules/x": {"version": "1.0.0"}}}
+    assert poc.lockfile_pruefen(lock_in(tmp_path, json.dumps(daten))) == "lockfile-fremde-quelle"
+
+
+@pytest.mark.parametrize("version", ["https://evil.test/x.tgz", "evil/repo", "^1.0.0", "", None])
+def test_lockfile_eintrag_unter_node_modules_ohne_resolved_und_ohne_reine_version(tmp_path, version):
+    inhalt = lockdatei({"node_modules/x": {"version": version, "integrity": "sha512-xx"}})
+    assert poc.lockfile_pruefen(lock_in(tmp_path, inhalt)) == "lockfile-fremde-quelle"
+
+
+def test_lockfile_eintrag_ohne_resolved_mit_reiner_version_ist_erlaubt(tmp_path):
+    """Echte Lockfiles (npm-dedupe) enthalten Einträge ohne resolved; npm holt name@version aus der Registry."""
+    inhalt = lockdatei({"node_modules/a/node_modules/semver": {"version": "7.6.3", "license": "ISC"}})
+    assert poc.lockfile_pruefen(lock_in(tmp_path, inhalt)) is None
+
+
+def test_lockfile_gebuendelter_eintrag_ohne_resolved_ist_erlaubt(tmp_path):
+    inhalt = lockdatei({"node_modules/a": paket(), "node_modules/a/node_modules/b": {"version": "1.0.0", "inBundle": True}})
+    assert poc.lockfile_pruefen(lock_in(tmp_path, inhalt)) is None
+
+
+@pytest.mark.parametrize("spec", ["^1.2.3", "~1.2", ">=1 <3", "1.x", "*", "", "latest", "next", "1.0.0 - 2.0.0",
+                                  "^1 || ^2", "1.2.3-beta.1+b", "npm:b@^1.0.0", "npm:@s/b@1.x", "npm:b", "$a"])
+def test_lockfile_registry_specs_sind_erlaubt(tmp_path, spec):
+    daten = json.loads(lockdatei({"node_modules/x": paket()}))
+    daten["packages"][""]["dependencies"] = {"x": spec}
+    daten["packages"]["node_modules/x"]["dependencies"] = {"y": spec}
+    assert poc.lockfile_pruefen(lock_in(tmp_path, json.dumps(daten))) is None
+
+
+def test_lockfile_alte_version_requires_mit_url(tmp_path):
+    inhalt = json.dumps({"lockfileVersion": 1, "dependencies": {
+        "a": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/a/-/a-1.0.0.tgz", "requires": {"b": "evil/repo"}}}})
+    assert poc.lockfile_pruefen(lock_in(tmp_path, inhalt)) == "lockfile-fremde-quelle"
+
+
+@pytest.mark.parametrize("feld,wert", [
+    ("dependencies", {"x": "https://evil.test/x.tgz"}),
+    ("devDependencies", {"x": "evil/repo"}),
+    ("optionalDependencies", {"x": "git+https://evil.test/x.git"}),
+    ("peerDependencies", {"x": "file:../x"}),
+    ("overrides", {"x": "https://evil.test/x.tgz"}),
+    ("overrides", {"a": {"b": "evil/repo"}}),
+    ("overrides", {"a": {".": "1.0.0", "b": "github:a/b"}}),
+])
+def test_package_json_fremde_spec(tmp_path, feld, wert):
+    q = lock_in(tmp_path, dateien={"package-lock.json": lockdatei({"node_modules/a": paket()}),
+                                   "package.json": json.dumps({"name": "m", feld: wert})})
+    assert poc.lockfile_pruefen(q) == "lockfile-fremde-quelle"
+
+
+def test_package_json_registry_specs_sind_erlaubt(tmp_path):
+    pj = {"name": "m", "dependencies": {"a": "^1.0.0", "b": "npm:c@2"}, "overrides": {"a": {".": "1.0.0", "d": "$b"}}}
+    q = lock_in(tmp_path, dateien={"package-lock.json": lockdatei({"node_modules/a": paket()}), "package.json": json.dumps(pj)})
+    assert poc.lockfile_pruefen(q) is None
+
+
+def test_package_json_nicht_lesbar_ist_keine_stille_freigabe(tmp_path):
+    q = lock_in(tmp_path, dateien={"package-lock.json": lockdatei({"node_modules/a": paket()}), "package.json": "{kaputt"})
+    assert poc.lockfile_pruefen(q) == "lockfile-fremde-quelle"
+
+
 def test_lockfile_hinweise(tmp_path):
     assert poc.lockfile_hinweise(lock_in(tmp_path, lockdatei({"node_modules/a": paket()}))) == []
     q = lock_in(tmp_path / "n", lockdatei({"node_modules/sharp": paket(hasInstallScript=True)}))

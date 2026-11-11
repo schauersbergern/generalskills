@@ -454,6 +454,34 @@ def _lock_laden(quelle: str) -> dict | None:
 
 
 FREMDE_PRAEFIXE = ("git+", "git://", "github:", "gitlab:", "bitbucket:", "gist:", "file:", "link:", "ssh://")
+SPEC_FELDER = frozenset({"dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "requires", "overrides"})
+# Registry-Spec: Semver-Range oder dist-Tag (kein `:`, `/` oder `@`), optional `$name` (overrides) oder `npm:<name>[@<range>]`.
+_REGISTRY_RANGE = re.compile(r"[A-Za-z0-9._+*^~<>=|, -]*")
+_REGISTRY_ALIAS = re.compile(r"npm:(?:@[a-z0-9~][a-z0-9._~-]*/)?[a-z0-9~][a-z0-9._~-]*(?:@[A-Za-z0-9._+*^~<>=|, -]*)?")
+_REGISTRY_REF = re.compile(r"\$[A-Za-z0-9._~@/-]+")
+
+
+def _registry_spec(spec: object) -> bool:
+    """Spec-String zeigt nur auf die npm-Registry (Range, Tag, `npm:`-Alias, overrides-Verweis `$name`)."""
+    if not isinstance(spec, str):
+        return False
+    s = spec.strip()
+    return bool(_REGISTRY_RANGE.fullmatch(s) or _REGISTRY_ALIAS.fullmatch(s) or _REGISTRY_REF.fullmatch(s))
+
+
+def _specs_fremd(feld: dict) -> bool:
+    """Eine Spec-Map (name → Spec, bei overrides verschachtelt) enthält etwas außerhalb der Registry. Karten alter
+    Lockfiles (`dependencies` name → Objekt) werden vom Aufrufer weiter durchsucht, hier nur Strings geprüft."""
+    stapel: list[object] = [feld]
+    while stapel:
+        wert = stapel.pop()
+        if isinstance(wert, dict):
+            stapel.extend(wert.values())
+        elif isinstance(wert, list):
+            return True
+        elif isinstance(wert, str) and not _registry_spec(wert):
+            return True
+    return False
 
 
 def _fremde_quelle(daten: object) -> bool:
@@ -467,6 +495,17 @@ def _fremde_quelle(daten: object) -> bool:
                     return True
                 if k == "link" and v is True:
                     return True
+                if k in SPEC_FELDER and isinstance(v, dict):
+                    for name, spec in v.items():
+                        if isinstance(spec, dict):
+                            if k == "overrides":
+                                if _specs_fremd(spec):
+                                    return True
+                            else:
+                                stapel.append((name, spec))     # v1-Lockfile: dependencies name → Eintrag
+                        elif not _registry_spec(spec):
+                            return True
+                    continue
                 stapel.append((k, v))
         elif isinstance(wert, list):
             stapel.extend((schluessel, v) for v in wert)
@@ -479,6 +518,34 @@ def _fremde_quelle(daten: object) -> bool:
     return False
 
 
+_SEMVER = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?")
+
+
+def _ohne_resolved(daten: dict) -> bool:
+    """Ein Paket unter `node_modules/` hat kein `resolved` und keine reine Semver-`version` (gebündelte Pakete
+    ausgenommen): npm ginge dann nach einer Spec statt nach Registry-Name und -Version los. Einträge ohne `resolved`
+    mit reiner Version kommen in echten Lockfiles vor (dedupe) und holen `name@version` aus der Registry."""
+    pakete = daten.get("packages")
+    if not isinstance(pakete, dict):
+        return False
+    return any(isinstance(e, dict) and "node_modules/" in pfad and "resolved" not in e and e.get("inBundle") is not True
+               and not (isinstance(e.get("version"), str) and _SEMVER.fullmatch(e["version"]))
+               for pfad, e in pakete.items())
+
+
+def _package_json_fremd(quelle: str) -> bool:
+    pfad = os.path.join(quelle, "package.json")
+    if not os.path.isfile(pfad):
+        return False
+    try:
+        daten = _json_datei(pfad)
+    except (OSError, ValueError, RecursionError):
+        return True       # nicht lesbar: nicht bauen (kein stilles Durchwinken)
+    if not isinstance(daten, dict):
+        return True
+    return _fremde_quelle({k: v for k, v in daten.items() if k in SPEC_FELDER})
+
+
 def lockfile_pruefen(quelle: str) -> str | None:
     """Kategorie, wenn die Quelle nicht gebaut werden darf, sonst None."""
     lock = os.path.join(quelle, "package-lock.json")
@@ -489,7 +556,7 @@ def lockfile_pruefen(quelle: str) -> str | None:
     daten = _lock_laden(quelle)
     if daten is None:
         return "lockfile-fehlt"
-    if _fremde_quelle(daten):
+    if _fremde_quelle(daten) or _ohne_resolved(daten) or _package_json_fremd(quelle):
         return "lockfile-fremde-quelle"
     return None
 
