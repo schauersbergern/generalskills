@@ -98,3 +98,12 @@ Task 1 → Task 2.
 - **K3:** Die Kopfzeile im Vertragstest stammt aus `_bloecke(bericht.markdown(_beispiel_json()))[0][1].split("\n")[0]` — nie per Suche mit dem Muster aus fix-findings.
 - **K4:** Durchklick-Setup: danach den Link `~/.claude/skills/security-audit` wieder entfernen und `fix-findings` auf den Hauptcheckout zurücksetzen; parallel laufende Sessions nutzen in der Zeit das TF5-`fix-findings`.
 - **K5:** Geschwisterpfad zu `fix-findings/SKILL.md` in `test_skill_text.py` über `os.path.realpath`.
+
+## Nachtrag Review R1 (PR #9)
+
+Die Plan-Stellen verweisen auf die Spec-Schritte; die Änderungen stehen dort (Schritte 1, 5, 7, 9–11) und in `fix-findings/SKILL.md`.
+- **R1-1:** Jeder `gh repo view` auf dem Audit-Weg zielt auf `origin` (`"$(git remote get-url origin)"`); Test `test_fix_findings_audit_weg_zielt_gh_explizit_auf_origin`.
+- **R1-2:** `test_audit_kopfzeile_vertrag_schemaraender` prüft Kopfzeilen an den Schemarändern (Großbuchstaben, `.`, `_`, SHA mit 7 und 64 Stellen).
+- **R1-3:** Ablauf 1 „Basis hereinholen“ nutzt `git merge --ff-only origin/<basis>`, kein Konfliktzweig (Schritt 7).
+- **R1-4:** Ablauf 5 „Audit-Liste“: Wird nicht gepusht, gilt das Repo als ohne CI (Schritt 9).
+- **R1-5:** Erkennung: `PR #[0-9]+ · `-Kopfzeile hat Vorrang (Schritt 1).
