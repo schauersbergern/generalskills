@@ -241,8 +241,11 @@ def test_ki_node_modules_und_symlink_uebersprungen(umg, tmp_path):
 def test_ki_datei_zu_gross(umg):
     kopf = b'{"dependencies": {"openai": "1"}, "pad": "'
     umg.schreibe("package.json", kopf + b"x" * (1024 * 1024) + b'"}')
-    out = umg.ergebnis()
-    assert out["anwendbar"] is False
+    r = umg.lauf()                                  # Review R1-3: nicht gelesen, also kein „nicht anwendbar“
+    assert r.returncode == 1 and r.stdout == "" and "unvollständig" in r.stderr and "nicht anwendbar" not in r.stderr
+    umg.pkg("b/package.json", dependencies=["openai"])
+    out = umg.ergebnis()                            # mit Fund in einer anderen Datei bleibt es bei Exit 0
+    assert out["anwendbar"] is True
     assert any("package.json" in h and "zu groß" in h for h in out["hinweise"])
 
 
@@ -265,11 +268,12 @@ def test_ki_kaputtes_json_hinweis(umg):
     assert "das ist kein json" not in json.dumps(out)
 
 
-def test_ki_kaputtes_json_allein_ist_nicht_anwendbar(umg):
-    umg.schreibe("package.json", b"\xff\xfe{")
-    out = umg.ergebnis()
-    assert out["anwendbar"] is False
-    assert out["hinweise"][0] == NICHT_ANWENDBAR and len(out["hinweise"]) == 2
+@pytest.mark.parametrize("inhalt", [b"\xff\xfe{", b"{ kein json", b"[1, 2]", b"null"])
+def test_ki_kaputtes_json_allein_ist_kein_nicht_anwendbar(umg, inhalt):
+    """Review R1-3: Eine nicht auswertbare package.json ohne Fund anderswo endet mit Exit 1, nicht mit „nicht anwendbar“."""
+    umg.schreibe("package.json", inhalt)
+    r = umg.lauf()
+    assert r.returncode == 1 and r.stdout == "" and "unvollständig" in r.stderr and "nicht anwendbar" not in r.stderr
 
 
 def test_ki_ungueltige_namen_gezaehlt(umg):
@@ -294,16 +298,22 @@ def test_ki_ungueltige_namen_zu_lang_exakt_214(umg):
 def test_ki_pfade_mit_backtick_oder_zeilenangabe_uebersprungen(umg):
     umg.pkg("a`b/package.json", dependencies=["openai"])
     umg.pkg("ordner\x07/package.json", dependencies=["openai"])
+    r = umg.lauf()                                  # Review R1-3: auch ein übersprungener Pfad ist keine Entwarnung
+    assert r.returncode == 1 and r.stdout == "" and "unvollständig" in r.stderr
+    umg.pkg(dependencies=["openai"])
     out = umg.ergebnis()
-    assert out["anwendbar"] is False and out["sdks"] == []
+    assert out["anwendbar"] is True and out["sdks"] == [{"paket": "openai", "datei": "package.json"}]
     assert any("übersprungen" in h for h in out["hinweise"])
 
 
 def test_ki_lange_pfade_werden_uebersprungen(umg):
     tief = "/".join(["d" * 40] * 8)         # > 300 Zeichen
     umg.pkg(f"{tief}/package.json", dependencies=["openai"])
+    r = umg.lauf()                                  # Review R1-3
+    assert r.returncode == 1 and "unvollständig" in r.stderr
+    umg.pkg(dependencies=["openai"])
     out = umg.ergebnis()
-    assert out["anwendbar"] is False
+    assert out["anwendbar"] is True
     assert any("überlange Pfade" in h for h in out["hinweise"])
 
 

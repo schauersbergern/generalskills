@@ -16,8 +16,10 @@ Erkennungshinweis steht immer an erster Stelle und wird von der Hauptsession wö
   „KI-Prüfpunkte: nicht anwendbar (kein LLM- oder Agenten-SDK in package.json)“
   „KI-Prüfpunkte: angewendet (<bis zu 5 Paketnamen, sortiert, eindeutig, mit `, ` getrennt>)“
 
-Exit-Codes: 0 ok, 2 ungültige Argumente (auch `--quelle` ≠ Arbeitskopie des Laufs, `quelle.fertig` fehlt), 1 das Zeitbudget ist
-abgelaufen, bevor ein SDK gefunden wurde (Meldung auf stderr; die Hauptsession schreibt „ki.py erkennen fehlgeschlagen (Exit 1)“).
+Exit-Codes: 0 ok, 2 ungültige Argumente (auch `--quelle` ≠ Arbeitskopie des Laufs, `quelle.fertig` fehlt), 1 ohne gefundenes SDK
+und unvollständig geprüft: das Zeitbudget ist abgelaufen, die Verzeichnissuche wurde abgebrochen, eine `package.json` war zu groß
+oder kein JSON-Objekt, oder ein Pfad wurde übersprungen (Meldung auf stderr; die Hauptsession schreibt „ki.py erkennen
+fehlgeschlagen (Exit 1)“).
 Ist beim Ablauf schon ein SDK gefunden, endet der Befehl mit Exit 0, `anwendbar: true` und dem Zusatzhinweis „KI-Erkennung
 abgebrochen (Zeitbudget)“.
 
@@ -77,6 +79,7 @@ class _Funde:
     def __init__(self) -> None:
         self.paare: set[tuple[str, str]] = set()      # (Paket, Datei)
         self.ungueltig = 0                            # Namen, die die npm-Namensregel ablehnt
+        self.uebersprungen = 0                        # nicht ausgewertete package.json und übersprungene Pfade (Review R1-3)
 
     def datei(self, rel: str, daten: dict) -> None:
         for feld in ABHAENGIGKEIT_FELDER:
@@ -92,19 +95,22 @@ class _Funde:
 
 def _auswerten(quelle: str, ende: float, s: _Sammler, f: _Funde) -> None:
     baum = _baum_suchen(quelle, ende, s)
+    f.uebersprungen += baum.pfade_uebersprungen
     for rel, groesse in baum.pakete:
         _zeitcheck(ende)
 
-        def lesen(rel=rel, groesse=groesse) -> None:
+        def lesen(rel=rel, groesse=groesse) -> bool:
             text = _lese_text(quelle, rel, groesse, s)
             if text is None:
-                return
-            daten = json.loads(text.lstrip("\ufeff"))   # UTF-8-BOM (Task-2-Review Minor 1)
+                return False                                 # zu groß (Hinweis von `_lese_text`)
+            daten = json.loads(text.lstrip("\ufeff"))        # UTF-8-BOM (Task-2-Review Minor 1)
             if not isinstance(daten, dict):
                 raise TypeError(type(daten).__name__)
             f.datei(rel, daten)
+            return True
 
-        _je_datei(s, rel, lesen)
+        if _je_datei(s, rel, lesen) is not True:             # nicht ausgewertet: zu groß, kein JSON-Objekt, Lesefehler
+            f.uebersprungen += 1
 
 
 def cmd_erkennen(a: argparse.Namespace) -> int:
@@ -119,10 +125,11 @@ def cmd_erkennen(a: argparse.Namespace) -> int:
         abgebrochen = True
     if abgebrochen and not f.paare:
         raise PocFehler("KI-Erkennung abgebrochen (Zeitbudget), bevor ein SDK gefunden wurde; kein Ergebnis", code=1)
-    # Task-2-Review Minor 2: unvollständige Suche (Kappung, Fehler im Verzeichnislauf) ohne Fund ist kein „nicht anwendbar“
-    if not f.paare and any(h.endswith("weitere Dateien nicht geprüft") for h in s.hinweise):
-        raise PocFehler("KI-Erkennung unvollständig (Verzeichnissuche abgebrochen), bevor ein SDK gefunden wurde; kein Ergebnis",
-                        code=1)
+    # Task-2-Review Minor 2: unvollständige Suche (Kappung, Fehler im Verzeichnislauf) ohne Fund ist kein „nicht anwendbar“;
+    # Review R1-3: ebenso jede package.json, die nicht ausgewertet wurde (zu groß, kein JSON-Objekt) oder deren Pfad übersprungen wurde
+    if not f.paare and (f.uebersprungen or any(h.endswith("weitere Dateien nicht geprüft") for h in s.hinweise)):
+        raise PocFehler("KI-Erkennung unvollständig (Verzeichnissuche abgebrochen oder package.json nicht ausgewertet), bevor ein SDK "
+                        "gefunden wurde; kein Ergebnis", code=1)
     sdks = sorted(f.paare)
     if sdks:
         namen = sorted({p for p, _ in sdks})[:MAX_NAMEN_IM_HINWEIS]
