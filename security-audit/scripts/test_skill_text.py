@@ -28,12 +28,13 @@ FIX_FINDINGS_MD = os.path.join(os.path.dirname(os.path.realpath(SKILL_DIR)), "fi
 
 sys.path.insert(0, HIER)
 import bericht  # noqa: E402
+import ki  # noqa: E402
 import lieferkette  # noqa: E402
 import poc  # noqa: E402
 
 PRAEFIX_SKILL = ("python3 -I ${CLAUDE_SKILL_DIR}/scripts/", "python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py")
 PRAEFIX_REFERENZ = ("python3 -I <SKILL_DIR>/scripts/",)
-SKRIPTE = ("poc", "bericht", "lieferkette")
+SKRIPTE = ("poc", "bericht", "lieferkette", "ki")
 
 
 def _lies(pfad: str) -> str:
@@ -108,11 +109,11 @@ def _unterbefehle(skript: str) -> set[str]:
 
 def _aufrufe(text: str) -> list[tuple[str, str, str]]:
     """(skript, unterbefehl, ganze Zeile) für jede Aufrufzeile (`python3 …` in Blöcken) und jeden Inline-Span, in dem
-    `poc.py <wort>`, `bericht.py <wort>` oder `lieferkette.py <wort>` steht. Fließtext in Codeblöcken (Briefing-Vorlagen) zählt nicht."""
+    `poc.py <wort>`, `bericht.py <wort>`, `lieferkette.py <wort>` oder `ki.py <wort>` steht. Fließtext in Codeblöcken (Briefing-Vorlagen) zählt nicht."""
     zeilen = [z for z in _code_zeilen(text) if z.startswith("python3")] + _code_zeilen(text, bloecke=False)
     gefunden = []
     for zeile in zeilen:
-        for m in re.finditer(r"\b(poc|bericht|lieferkette)\.py\s+([A-Za-zÄÖÜäöüß][\w-]*)", zeile):
+        for m in re.finditer(r"\b(poc|bericht|lieferkette|ki)\.py\s+([A-Za-zÄÖÜäöüß][\w-]*)", zeile):
             gefunden.append((m.group(1), m.group(2), zeile))
     return gefunden
 
@@ -166,9 +167,9 @@ def test_briefings_haben_aufrufzeilen_mit_platzhalter():
     assert _aufrufzeilen(_lies(BRIEFINGS)), "agenten-briefings.md enthält keine Aufrufzeilen"
 
 
-def test_alle_drei_references_vorhanden():
+def test_alle_vier_references_vorhanden():
     namen = {os.path.basename(p) for p in _referenzen()}
-    assert {"agenten-briefings.md", "bericht-format.md", "pruefpunkte-web.md"} <= namen
+    assert {"agenten-briefings.md", "bericht-format.md", "pruefpunkte-web.md", "pruefpunkte-ki.md"} <= namen
 
 
 # ------------------------------------------------------------------------------------ Unterbefehle und Optionen
@@ -197,7 +198,7 @@ def test_optionen_existieren(pfad):
 
 
 def test_skill_md_nennt_jeden_poc_unterbefehl():
-    """Der Ablauf braucht alle Unterbefehle von poc.py, bericht.py und lieferkette.py."""
+    """Der Ablauf braucht alle Unterbefehle von poc.py, bericht.py, lieferkette.py und ki.py."""
     gesehen = {(s, u) for s, u, _z in _aufrufe(_lies(SKILL_MD))}
     fehlt = [(s, u) for s in SKRIPTE for u in sorted(_unterbefehle(s)) if (s, u) not in gesehen]
     assert not fehlt, fehlt
@@ -887,3 +888,415 @@ def test_fix_findings_oeffentliches_repo_kein_push():
     assert "Nicht gepusht: öffentliches Repo — Branch, Commits und Tests würden die Lücken vor dem Deploy offenlegen." in text
     assert "Vor dem Push die Sichtbarkeit" in text
     assert "Öffentliches Repo: Branch, Commits und Tests beschreiben die Lücken" not in text
+
+
+# ------------------------------------------------------------------------------------ TF3: KI-Prüfpunkte und Modell-Mock
+
+PRUEFPUNKTE_KI = os.path.join(REFERENCES, "pruefpunkte-ki.md")
+PRUEFPUNKTE_WEB = os.path.join(REFERENCES, "pruefpunkte-web.md")
+README = os.path.join(os.path.dirname(os.path.realpath(SKILL_DIR)), "README.md")
+API_HOSTS = ("api.openai.com", "api.anthropic.com")
+D3_SATZ = "`api.openai.com` und `api.anthropic.com` stehen in keinem Befehl, auch nicht als Suchmuster."
+# Plan-Nachtrag R2 W2-neu, wörtlich
+ENV_EXIT2_SATZ = ("Endet `starten` mit Exit 2 und der Meldung `--env <NAME>: nicht erlaubter Host <host>`, lässt du diese Variable weg und "
+                  "rufst `starten` erneut auf. Das zählt nicht als der eine korrigierte Versuch. Die Meldung nennt Name und Host, nie den Wert.")
+# Plan-Nachtrag R1 W10 (W1 der Spec), wörtlich; der Satz „liest … gegen das Protokoll“ steht nirgends
+W1_SATZ = ("Der Prüfer übernimmt Nummer, Pfad und die maskierte Markerzeile (≤ 300 Zeichen) in `poc`; die Hauptsession prüft beim Gegenlesen "
+           "nur, ob Marker, Nummer und Wirkung zusammenpassen.")
+RESERVIERTE_NAMEN = ("OPENAI_BASE_URL", "OPENAI_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY")
+
+
+# R2 B1-neu: feste Liste der Namen der Test-App der KI-Prüfpunkte. Die Namen stehen hier mit `|` mitten im Wort und werden erst beim
+# Laden zusammengesetzt, damit kein Name in `scripts/` als Wort vorkommt (R2 K9). Die API-Hosts sind ausgenommen: SKILL.md und
+# agenten-briefings.md nennen sie im Satz von TF3-D3.
+VERBOTENE_NAMEN_TF3 = tuple(n.replace("|", "") for n in (
+    "CRM_|API_KEY", "datei_|suchen", "send_|email", "antwort-|sicher", "tick|ets.js", "assis|tent.js", "fixt|ure-ki", "aus|gang.jsonl",
+    "sr|c/ag|ent/prom|pt.js", "sr|c/ro|utes/ant|wort.js", "sr|c/ro|utes/antwort-|sicher.js", "sr|c/ag|ent/tick|ets.js",
+    "sr|c/ag|ent/assis|tent.js"))
+
+
+def _zeile(text: str, anfang: str) -> str:
+    zeile = next((z for z in text.splitlines() if z.startswith(anfang)), "")
+    assert zeile, f"Zeile mit Anfang {anfang!r} fehlt"
+    return zeile
+
+
+def test_skill_description_nennt_ki_und_agenten_apps():
+    beschreibung = _frontmatter(_lies(SKILL_MD))["description"]
+    assert "LLM" in beschreibung and "agent" in beschreibung.lower()
+    assert ": " not in beschreibung and " #" not in beschreibung                      # YAML-Plain-Scalar
+
+
+def test_skill_regel_3_nennt_den_host_llm():
+    regel = _zeile(_lies(SKILL_MD), "3. **Kein Netzverkehr")
+    assert "`app`, `db`, `llm`, `localhost`" in regel
+    import netzregel
+    assert "llm" in netzregel.ERLAUBTE_HOSTS
+    assert netzregel.verstoesse_poc("Antwort von http://llm:4010/v1/chat/completions") == []
+
+
+def test_skill_schritt_1b_ruft_ki_erkennen_als_vierten_befehl_auf():
+    """TF3: `ki.py erkennen` ist der vierte Aufruf von Schritt 1b, ein einzelner einfacher Befehl, mit `--lauf` und `--quelle`."""
+    b1 = _abschnitt(_lies(SKILL_MD), "1b.")
+    zeilen = [z for z in _aufrufzeilen(b1) if "/scripts/" in z]
+    assert [z.split("/scripts/")[1].split()[0] + " " + z.split("/scripts/")[1].split()[1] for z in zeilen] == [
+        "lieferkette.py secrets", "lieferkette.py abhaengigkeiten", "lieferkette.py lieferkette", "ki.py erkennen"]
+    assert zeilen[-1] == "python3 -I ${CLAUDE_SKILL_DIR}/scripts/ki.py erkennen --lauf <id> --quelle <arbeitskopie>"
+    assert all(not re.search(r"&&|\||;|2>&1|\$\(", z) for z in zeilen)
+    hilfe = _hilfe("ki", "erkennen")
+    assert "--lauf" in hilfe and "--quelle" in hilfe
+
+
+def test_skill_ki_hinweise_unveraendert():
+    """TF3-D4: Der Erkennungshinweis und der Zusatzhinweis stehen wörtlich in Schritt 1b und gehen unverändert in `bericht.hinweise`;
+    die Texte erzeugt `ki.py`, nie das Modell."""
+    b1 = _abschnitt(_lies(SKILL_MD), "1b.")
+    zeile = _zeile(b1, "- **`ki.py erkennen`")
+    assert f"„{ki.HINWEIS_NICHT_ANWENDBAR}“" in zeile
+    assert "„KI-Prüfpunkte: angewendet (<bis zu 5 Paketnamen>)“" in zeile and ki.MAX_NAMEN_IM_HINWEIS == 5
+    assert f"„{ki.ZEIT_HINWEIS}“" in zeile
+    assert "unverändert in `bericht.hinweise`" in zeile and "nie vom Modell" in zeile
+    assert "Erkennungshinweis" in zeile and "an erster Stelle" in zeile
+    assert "`anwendbar`" in zeile and "`sdks`" in zeile and "`hinweise`" in zeile
+    quelle = _lies(os.path.join(HIER, "ki.py"))
+    assert 'f"KI-Prüfpunkte: angewendet (' in quelle
+    assert "KI-Prüfpunkte: nicht anwendbar (kein LLM- oder Agenten-SDK in package.json)" in zeile
+    assert "KI-Prüfpunkte: nicht anwendbar" in _lies(BERICHT_FORMAT) and "KI-Prüfpunkte: angewendet" in _lies(BERICHT_FORMAT)
+
+
+def test_skill_ki_exit_ungleich_null_ist_kein_abbruch_und_ergibt_keine_ki_flaeche():
+    b1 = _abschnitt(_lies(SKILL_MD), "1b.")
+    zeile = _zeile(b1, "- **Exit ≠ 0 bei `ki.py erkennen`")
+    assert "„ki.py erkennen fehlgeschlagen (Exit <n>)“" in zeile and "`bericht.hinweise`" in zeile
+    assert "keine KI-Fläche" in zeile and "kein Abbruch" in zeile
+    assert "stderr kommt nicht wörtlich in den Bericht" in zeile
+    quelle = _lies(os.path.join(HIER, "ki.py"))
+    assert 'print(f"ki.py: {e}", file=sys.stderr)' in quelle                           # Exit ≠ 0: nur stderr, keine Ausgabe auf stdout
+
+
+def test_skill_schritt_2_karte_mit_ki_flaeche():
+    s2 = _abschnitt(_lies(SKILL_MD), "2. Karte")
+    assert "`anwendbar: true`" in s2 and "Modellaufrufe" in s2 and "Tools" in s2 and "Quellen" in s2 and "Senken" in s2
+    assert "„KI/Agent“" in s2 and "innerhalb der 6 Reviewer" in s2
+    assert "references/pruefpunkte-ki.md" in s2
+    assert "keine KI-Fläche" in s2                                                      # Fehlerpfad von 1b
+
+
+def test_skill_schritt_3_mock_entscheidung_und_reservierte_namen():
+    s3 = _abschnitt(_lies(SKILL_MD), "3. Docker-Vorbereitung")
+    assert "--modell-mock" in s3 and "[--modell-mock openai,anthropic]" in s3
+    for name in RESERVIERTE_NAMEN:
+        assert f"`{name}`" in s3, name
+    assert set(RESERVIERTE_NAMEN) == set(poc.MOCK_RESERVIERT)
+    assert "`.env.example`" in s3 and "nie übernommen" in s3
+    assert "Host `llm`" in s3 and "`--env '<VAR>=http://llm:4010" in s3
+    assert "„Modell-Mock nicht möglich: <grund>“" in s3
+    assert "`modell-mock: http://llm:4010 (openai, anthropic)`" in s3 and "<MODELL_MOCK>" in s3
+    assert "Mock-Tabelle" in s3 and "references/pruefpunkte-ki.md" in s3
+    quelle = _lies(os.path.join(HIER, "poc.py"))
+    assert 'print(f"modell-mock: {MOCK_URL} ({\', \'.join(p[\'modell_mock\'])})")' in quelle
+    assert poc.MOCK_URL == "http://llm:4010"
+    assert "http://llm:4010/v1" in s3 or "`/v1`" in s3                                  # OpenAI-Pfad mit, Anthropic ohne `/v1`
+
+
+def test_skill_env_exit2_variable_weglassen():
+    """R2 W2-neu: Der Satz steht wörtlich in Schritt 3; die Meldungen kommen von `poc.py` und nennen nie den Wert."""
+    s3 = _abschnitt(_lies(SKILL_MD), "3. Docker-Vorbereitung")
+    assert ENV_EXIT2_SATZ in s3
+    assert "--env <NAME>: nicht erlaubter Host" in s3
+    quelle = _lies(os.path.join(HIER, "poc.py"))
+    assert 'f"--env {name}: nicht erlaubter Host ' in quelle and 'f"--env {name}: reservierter Name bei --modell-mock"' in quelle
+    assert "reservierter Name bei --modell-mock" in s3
+
+
+def test_skill_budget_ki_und_modell():
+    """W2: `ki.py erkennen` 30 s und `poc.py modell` 60 s stehen in Grundregel 8 (außerhalb der Zeile mit dem langen Timeout) und
+    entsprechen den Skripten; beide sind einzelne einfache Befehle und Teil von „Bash sonst nur für …“."""
+    text = _lies(SKILL_MD)
+    regel8 = text[text.index("8. **Skript-Aufrufe**"):text.index("9. **Die Netzregel")]
+    ohne_langen = "\n".join(z for z in regel8.splitlines() if BASH_TIMEOUT not in z)
+    assert ki.KI_BUDGET == 30 and poc.MODELL_BUDGET == 60
+    assert re.search(rf"`ki\.py erkennen`[^`]*?{ki.KI_BUDGET} s", ohne_langen)
+    assert re.search(rf"`poc\.py modell`[^`]*?{poc.MODELL_BUDGET} s", ohne_langen)
+    assert "SECURITY_AUDIT_KI_BUDGET" in ohne_langen and "SECURITY_AUDIT_MODELL_BUDGET" in ohne_langen
+    assert "SECURITY_AUDIT_KI_BUDGET" in _lies(os.path.join(HIER, "ki.py")) and "SECURITY_AUDIT_MODELL_BUDGET" in _lies(os.path.join(HIER, "poc.py"))
+    einzeln = _zeile(regel8.replace("\n   - ", "\n- "), "- `poc.py`, `lieferkette.py` und `ki.py` immer als **einzelner einfacher Befehl**")
+    assert "kein `&&`" in einzeln
+    assert "`ki.py`" in _zeile(regel8.replace("\n   - ", "\n- "), "- Bash sonst nur für")
+    assert BASH_TIMEOUT not in "\n".join(z for z in regel8.splitlines() if "ki.py erkennen" in z)
+
+
+def test_skill_schritt_4_platzhalter_modell_mock_und_pruefpunkte_ki():
+    s4 = _abschnitt(_lies(SKILL_MD), "4. Reviewer")
+    assert "`<MODELL_MOCK>`" in s4 and "„läuft (openai, anthropic)“" in s4 and "„nein: <grund>“" in s4
+    assert "`modell-mock:`" in s4
+    assert "references/pruefpunkte-ki.md" in s4 and "`owasp_ki`" in s4
+
+
+def test_skill_schritt_6_aufrufzeilen_modell_und_kein_platzhalter():
+    s6 = _abschnitt(_lies(SKILL_MD), "6. Prüfer")
+    assert "Details folgen" not in s6 and "Task 5" not in s6
+    zeilen = [z for z in _aufrufzeilen(s6) if "poc.py modell" in z]
+    assert zeilen == [
+        "python3 -I ${CLAUDE_SKILL_DIR}/scripts/poc.py modell --lauf <id> --rolle <rolle> --antworten-datei <datei>",
+        "python3 -I ${CLAUDE_SKILL_DIR}/scripts/poc.py modell --lauf <id> --rolle <rolle> --protokoll --suche <marker>"]
+    assert all(not re.search(r"&&|\||;|2>&1|\$\(", z) for z in zeilen)
+    hilfe = _hilfe("poc", "modell")
+    assert all(o in hilfe for o in ("--lauf", "--rolle", "--antworten-datei", "--protokoll", "--suche"))
+    assert "`<MODELL_MOCK>`" in s6
+
+
+def test_skill_marker_regel_und_belege_im_poc():
+    """Marker `POCMARKER-<rolle>-<8 hex>`; Belege im `poc`: Marker, Request-Nr., Pfad, `fundstelle`, Wirkung, bei K1 Zugang A und B."""
+    s6 = _abschnitt(_lies(SKILL_MD), "6. Prüfer")
+    assert "`POCMARKER-<rolle>-<8 hex>`" in s6
+    assert poc.MARKER_RE.fullmatch("POCMARKER-p1-0a1b2c3d") and poc.MARKER_RE.fullmatch("POCMARKER-p2-ffffffff")
+    zeile = _zeile(s6, "- **Belege im `poc`")
+    for wort in ("Marker", "Request-Nr.", "Pfad", "`fundstelle`", "Wirkung", "Zugang A", "Zugang B", "K1"):
+        assert wort in zeile, wort
+    assert "`wenn_enthaelt`" in s6 and "`neustart`" in s6
+    assert "K1, K2 oder K4" in s6 and "K5" in s6 and "<ENV:NAME>" in s6
+
+
+def test_skill_w1_satz_und_keine_gegenlesen_formel():
+    """Spec R2 W1: Der Prüfer übernimmt Nummer, Pfad und Markerzeile in den `poc`; die Hauptsession prüft nur das Zusammenpassen.
+    Der Satz „liest … gegen das Protokoll“ steht nirgends (`neustart` löscht den Mock-Zustand)."""
+    s6 = _abschnitt(_lies(SKILL_MD), "6. Prüfer")
+    assert W1_SATZ in s6
+    assert "`nr`, `pfad` und `fundstelle`" in s6
+    for pfad in [SKILL_MD] + _referenzen():
+        assert not re.search(r"liest[^.\n]*gegen das Protokoll", _lies(pfad)), pfad
+        assert "gegen das Protokoll" not in _lies(pfad), pfad
+    assert "`fundstelle`" in _lies(os.path.join(HIER, "..", "docker", "llm-mock.mjs"))
+    assert "fundstelle" in _lies(os.path.join(HIER, "..", "docker", "llm-mock.mjs"))
+
+
+def test_skill_annahme_modell_setzt_die_hauptsession():
+    s6 = _abschnitt(_lies(SKILL_MD), "6. Prüfer")
+    zeile = _zeile(s6, "- **`annahme_modell`")
+    assert "setzt die Hauptsession" in zeile and "`true`" in zeile
+    assert "`bestätigt`" in zeile and "`marker`" in zeile and "K1, K2 oder K4" in zeile
+    assert "bestätigt (Modell-Mock, Annahme: Modell folgt)" in zeile
+    assert "Prüfer setzt es nie" in zeile or "nie der Prüfer" in zeile
+
+
+def test_skill_tf3_d3_satz():
+    """TF3-D3: Der Satz steht in Schritt 6 und im Prüfer-Briefing. Die API-Hosts stehen nur dort (und nur in diesem Satz) in Skill-Text
+    und references; kein Befehl der Aufrufzeilen nennt sie."""
+    s6 = _abschnitt(_lies(SKILL_MD), "6. Prüfer")
+    assert D3_SATZ in s6
+    pruefer = _abschnitt(_lies(BRIEFINGS), "Prüfer")
+    assert "api.openai.com und api.anthropic.com stehen in keinem Befehl, auch nicht als Suchmuster." in pruefer
+    for pfad in [SKILL_MD] + _referenzen():
+        text = _lies(pfad)
+        treffer = [z for z in text.splitlines() if any(h in z for h in API_HOSTS)]
+        if os.path.basename(pfad) in ("SKILL.md", "agenten-briefings.md"):
+            assert all("in keinem Befehl, auch nicht als Suchmuster" in z for z in treffer), (pfad, treffer)
+            assert treffer, pfad
+        else:
+            assert not treffer, (pfad, treffer)
+        assert not [z for z in _aufrufzeilen(text) if any(h in z for h in API_HOSTS)], pfad
+
+
+def test_skill_typische_fehler_ki():
+    fehler = _abschnitt(_lies(SKILL_MD), "Typische Fehler")
+    for stichwort in ("`ki.py`", "`OPENAI_BASE_URL`", "`wenn_enthaelt`", "`annahme_modell`", "`neustart`", "`<MODELL_MOCK>`"):
+        assert stichwort in fehler, stichwort
+    assert "api.openai.com" not in fehler and "api.anthropic.com" not in fehler
+
+
+def test_skill_schritt_7_owasp_ki_und_statusanzeige():
+    s7 = _abschnitt(_lies(SKILL_MD), "7. Bericht")
+    assert "`owasp_ki`" in s7 and "`annahme_modell`" in s7
+    assert "bestätigt (Modell-Mock, Annahme: Modell folgt)" in s7 and "OWASP KI:" in s7
+    assert "`kategorie`" in s7 and "A01" in s7
+
+
+def test_briefings_platzhalter_modell_mock():
+    """R1 W10: `<MODELL_MOCK>` steht in der Platzhalterliste und im Vorlagentext beider Briefings und wird je Rolle aus der Zeile
+    `modell-mock:` von `starten` befüllt."""
+    text = _lies(BRIEFINGS)
+    for abschnitt in ("Reviewer", "Prüfer"):
+        a = _abschnitt(text, abschnitt)
+        liste = _zeile(a, "Ein Reviewer je Fläche" if abschnitt == "Reviewer" else "Je Prüfer ein Briefing")
+        assert "`<MODELL_MOCK>`" in liste, abschnitt
+        assert "„läuft (openai, anthropic)“" in liste and "„nein: <grund>“" in liste and "`modell-mock:`" in liste, abschnitt
+        vorlage = next(b for info, b in _bloecke(a) if info.startswith("text"))
+        assert "<MODELL_MOCK>" in vorlage, abschnitt
+    assert "je Rolle" in _zeile(_abschnitt(text, "Prüfer"), "Je Prüfer ein Briefing")
+    assert "`modell-mock:`" in _abschnitt(_lies(SKILL_MD), "4. Reviewer")
+
+
+def _pruefer_vorlage() -> str:
+    return next(b for info, b in _bloecke(_abschnitt(_lies(BRIEFINGS), "Prüfer")) if info.startswith("text"))
+
+
+def test_briefings_pruefer_abschnitt_modell_mock_hoechstens_20_zeilen():
+    vorlage = _pruefer_vorlage().split("\n")
+    start = vorlage.index("MODELL-MOCK")
+    ende = next(i for i in range(start + 1, len(vorlage)) if re.fullmatch(r"[A-ZÄÖÜ][A-ZÄÖÜ -]+", vorlage[i]))
+    zeilen = [z for z in vorlage[start + 1:ende] if z.strip()]
+    assert 8 <= len(zeilen) <= 20, len(zeilen)
+    abschnitt = "\n".join(zeilen)
+    assert "<MODELL_MOCK>" in abschnitt
+    assert "POCMARKER-<ROLLE>-" in abschnitt and "wenn_enthaelt" in abschnitt
+    assert "poc.py modell" in abschnitt and "--antworten-datei" in abschnitt and "--protokoll --suche" in abschnitt
+    assert "@example.invalid" in abschnitt and "app, db oder llm" in abschnitt
+    assert "in keinem Befehl, auch nicht als Suchmuster" in abschnitt
+    assert "Dummy" in abschnitt and "Anfrage-Budget" in abschnitt
+    assert "modell-<ROLLE>-<n>.json" in abschnitt and "<DATEIORDNER>" in abschnitt
+    assert "pruefpunkte-ki.md" in abschnitt
+
+
+def test_briefings_aufrufzeilen_modell_in_der_vorlage():
+    zeilen = [z for z in _aufrufzeilen(_lies(BRIEFINGS)) if "poc.py modell" in z]
+    assert zeilen == [
+        "python3 -I <SKILL_DIR>/scripts/poc.py modell --lauf <LAUF> --rolle <ROLLE> --antworten-datei <DATEIORDNER>/modell-<ROLLE>-1.json",
+        "python3 -I <SKILL_DIR>/scripts/poc.py modell --lauf <LAUF> --rolle <ROLLE> --protokoll --suche POCMARKER-<ROLLE>-<hex>"]
+
+
+def test_briefings_ergebnisformate_owasp_ki_und_marker():
+    text = _lies(BRIEFINGS)
+    reviewer = next(b for info, b in _bloecke(_abschnitt(text, "Reviewer")) if info.startswith("text"))
+    assert '"owasp_ki": ["ASI01", "ASI02"]' in reviewer and "owasp_ki" in reviewer.split("kategorie: A01 bis A10")[1]
+    pruefer = _pruefer_vorlage()
+    assert '"marker": null' in pruefer and "marker" in pruefer.split("- ergebnis:")[1]
+    assert "references/pruefpunkte-ki.md" in reviewer
+    # die Beispiel-JSONs bleiben gültiges JSON
+    for info, inhalt in _bloecke(text):
+        if info.startswith("json") or inhalt.lstrip().startswith("["):
+            json.loads(inhalt)
+
+
+def test_briefings_hostlisten_nennen_llm_und_beispiele_nur_example_invalid():
+    text = _lies(BRIEFINGS)
+    zeile = _zeile(_pruefer_vorlage().replace("\n", "\n"), "3. Keine Netzwerkwerkzeuge")
+    assert "Erlaubte Hosts: app, db, llm, localhost" in zeile
+    poc_regel = _zeile(_pruefer_vorlage(), "- bestätigt: poc ist Pflicht")
+    assert "app, db, llm, localhost" in poc_regel
+    for m in re.finditer(r"[\w.+-]+@([\w.-]+)", text):
+        assert m.group(1).rstrip(".") in ("example.invalid",), m.group(0)
+
+
+def test_bericht_format_ki_felder_und_hostliste():
+    text = _lies(BERICHT_FORMAT)
+    abschnitt = _abschnitt(text, "KI-Befunde")
+    for stichwort in ("`owasp_ki`", "`annahme_modell`", "ASI01", "LLM10", "1 bis 3", "`status: bestätigt`", "OWASP KI:",
+                      "bestätigt (Modell-Mock, Annahme: Modell folgt)", "`kategorie` bleibt"):
+        assert stichwort in abschnitt, stichwort
+    assert "`app`, `db`, `llm`, `localhost`" in text
+    assert not any(h in text for h in API_HOSTS)
+    assert bericht.MAX_OWASP_KI == 3
+
+
+def test_beispiel_json_ki_befund_besteht_das_schema():
+    daten = _beispiel_json()
+    ki_befunde = [b for b in daten["befunde"] if "owasp_ki" in b]
+    assert len(ki_befunde) == 1
+    b = ki_befunde[0]
+    assert b["status"] == "bestätigt" and b["annahme_modell"] is True and b["owasp_ki"] == ["ASI01", "ASI02"]
+    assert bericht.pruefe_schema(daten) == []
+    for stichwort in ("POCMARKER-p1-", "nr ", "fundstelle", "Zugang A", "Zugang B"):
+        assert stichwort in b["poc"], stichwort
+    assert not any(h in b["poc"] for h in API_HOSTS)
+    md = bericht.markdown(daten)
+    assert "bestätigt (Modell-Mock, Annahme: Modell folgt)" in md and "OWASP KI: ASI01, ASI02" in md
+    kaputt = json.loads(json.dumps(daten))
+    kb = next(x for x in kaputt["befunde"] if "owasp_ki" in x)
+    kb["status"], kb["code_pfad"] = "unbestätigt", ["a.js:1", "b.js:2"]
+    assert bericht.pruefe_schema(kaputt), "annahme_modell ohne bestätigt muss ein Schemafehler sein"
+    assert any(h.startswith("KI-Prüfpunkte: angewendet (") for h in daten["hinweise"])
+
+
+def test_pruefpunkte_ki_punkte_stufen_und_fremd_befuellbar():
+    text = _lies(PRUEFPUNKTE_KI)
+    assert text.startswith("# Prüfpunkte KI")
+    for k in ("K1", "K2", "K3", "K4", "K5", "K6", "K7"):
+        assert re.search(rf"(?m)^\| {k} ", text), k
+    for owasp in ("ASI01", "ASI02", "ASI03", "ASI04", "ASI05", "ASI06", "ASI07", "LLM02", "LLM05", "LLM07"):
+        assert owasp in text, owasp
+    assert "fremd befüllbar" in text.lower() and "Das Modell ist keine Rechtegrenze" in text
+    for stufe in ("P1", "P2", "P3"):
+        assert stufe in text
+    assert "Ohne Quelle höchstens P3" in text
+    assert "Der Befund nennt nie einen Wert" in text
+    # jede ID der Tabelle besteht das Schema (kein Tippfehler)
+    for owasp in set(re.findall(r"\b(?:ASI|LLM)\d{2}\b", text)):
+        assert bericht._OWASP_KI.fullmatch(owasp), owasp
+
+
+def test_pruefpunkte_ki_beleg_regeln():
+    text = _lies(PRUEFPUNKTE_KI)
+    assert "K1, K2 und K4" in text and "`annahme_modell: true`" in text and "`wenn_enthaelt`" in text
+    assert "K3, K5, K6 und K7" in text and "<ENV:NAME>" in text
+    assert "ab 6 Zeichen" in text                                                      # `--env`-Wert muss maskierbar sein
+    assert "POCMARKER-<rolle>-<8 hex>" in text
+
+
+def test_pruefpunkte_ki_grenzen():
+    text = _abschnitt(_lies(PRUEFPUNKTE_KI), "Grenzen")
+    for stichwort in ("`fetch`", "`llm`", "Azure", "Bedrock", "Vertex", "Gemini", "dreifach", "URL-kodiert", "Base64", "Node < 22", "`ki.py`"):
+        assert stichwort in text, stichwort
+
+
+def test_pruefpunkte_ki_mock_tabelle_nur_aus_dem_vertragsergebnis():
+    """R2 W4-neu: Die Mock-Tabelle nennt nur das als geprüft, was der Vertragstest grün hatte; der Rest ist „ungeprüft“."""
+    abschnitt = _abschnitt(_lies(PRUEFPUNKTE_KI), "Modell-Mock")
+    zeilen = [[c.strip() for c in z.strip().strip("|").split("|")] for z in abschnitt.splitlines() if z.startswith("| ") and "---" not in z]
+    kopf, zeilen = zeilen[0], zeilen[1:]
+    assert kopf[0] == "Paket" and kopf[-1] == "Stand"
+    stand = {z[0]: z[-1] for z in zeilen}
+    geprueft = {"`openai`", "`@anthropic-ai/sdk`", "`@ai-sdk/openai`", "`@ai-sdk/anthropic`"}
+    ungeprueft = {"`@openai/agents`", "`@langchain/openai`, `@langchain/anthropic`"}
+    assert {k.split(" (")[0] for k, v in stand.items() if v == "geprüft"} == geprueft, stand
+    assert {k.split(" (")[0] for k, v in stand.items() if v == "ungeprüft"} == ungeprueft, stand
+    for version in ("7.49.0", "1.4.0", "7.0.162", "4.0.108", "4.0.96", "Node 22"):
+        assert version in abschnitt, version
+    assert "OPENAI_BASE_URL" in abschnitt and "ANTHROPIC_BASE_URL" in abschnitt and "ohne `/v1`" in abschnitt
+
+
+def test_pruefpunkte_web_a05_html_senke():
+    a05 = _abschnitt(_lies(PRUEFPUNKTE_WEB), "A05")
+    assert "HTML" in a05 and "XSS" in a05 and "innerHTML" in a05 and "dangerouslySetInnerHTML" in a05
+    assert "unabhängig von KI" in a05
+
+
+@pytest.mark.parametrize("pfad", [SKILL_MD] + (_referenzen() if os.path.isdir(REFERENCES) else []), ids=os.path.basename)
+def test_keine_namen_der_ki_fixture(pfad):
+    """R2 B1-neu (Plan R1 W7): weder Dateien noch Tools noch Variablen der Test-App der KI-Prüfpunkte im Skill-Text. Ausgenommen sind die
+    API-Hosts im Satz von TF3-D3."""
+    text = _lies(pfad)
+    treffer = [n for n in VERBOTENE_NAMEN_TF3 if re.search(r"(?<![A-Za-z0-9_])" + re.escape(n), text, re.I)]
+    assert not treffer, treffer
+
+
+def test_keine_namen_der_ki_fixture_in_scripts_und_docker():
+    """R2 K9: auch nicht in Kommentaren oder Beispielen von `scripts/` und `docker/`; die Tests bauen die Namen aus Teilen."""
+    dateien = [os.path.join(HIER, n) for n in os.listdir(HIER) if n.endswith(".py")]
+    docker = os.path.join(SKILL_DIR, "docker")
+    dateien += [os.path.join(docker, n) for n in os.listdir(docker) if os.path.isfile(os.path.join(docker, n))]
+    assert len(dateien) >= 15
+    schlecht = [(os.path.basename(d), n) for d in dateien for n in VERBOTENE_NAMEN_TF3 if n.lower() in _lies(d).lower()]
+    assert not schlecht, schlecht
+
+
+def test_verbotsliste_tf3_ist_vollstaendig_und_aus_teilen_gebaut():
+    """Die 13 Namen sind genau die feste Liste aus R2 B1-neu, und diese Datei (in `scripts/`) nennt keinen davon als Wort."""
+    assert len(VERBOTENE_NAMEN_TF3) == 13 and len(set(VERBOTENE_NAMEN_TF3)) == 13
+    assert VERBOTENE_NAMEN_TF3[0].startswith("CRM_") and VERBOTENE_NAMEN_TF3[-1].endswith("tent.js")
+    quelle = _lies(os.path.join(HIER, "test_skill_text.py")).lower()
+    assert not [n for n in VERBOTENE_NAMEN_TF3 if n.lower() in quelle]
+
+
+def test_readme_nennt_ki_pruefpunkte_dateien_und_sdk_vertrag():
+    """TF3-D5: Die Zeile `security-audit` nennt die KI-Prüfpunkte; die Dateiliste kennt `ki.py` und `llm-mock.mjs`; die Testhinweise
+    nennen den opt-in Vertragstest und die Node-Binärdatei (kein Versions-Manager-Shim)."""
+    text = _lies(README)
+    zeile = next(z for z in text.splitlines() if z.startswith("| `security-audit` |"))
+    assert "KI" in zeile and "Modell-Mock" in zeile and "`security-audit/scripts/ki.py`" in zeile
+    assert "`security-audit/references/*`" in zeile
+    baum = text[text.index("  security-audit/\n"):text.index("## Skill-Details")]
+    assert "      ki.py\n" in baum and "      llm-mock.mjs\n" in baum and "      pruefpunkte-ki.md\n" in baum
+    assert "SECURITY_AUDIT_SDK_VERTRAG=1" in text and "SECURITY_AUDIT_SDK_NODE=" in text
+    assert "Versions-Manager-Shim" in text and "Exit 4" in text
+    assert "≥ 22" in text

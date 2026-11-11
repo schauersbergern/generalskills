@@ -878,7 +878,7 @@ def test_regeln_passen_zu_skill():
     regeln = run_eval.erlaubte_regeln(skill, aus, home)
     bash = [r for r in regeln if r.startswith("Bash(")]
     zeilen = _aufrufzeilen()
-    gesehen = {"poc": 0, "kontext": 0, "repo": 0, "rendern": 0, "add": 0, "lieferkette": 0}
+    gesehen = {"poc": 0, "kontext": 0, "repo": 0, "rendern": 0, "add": 0, "lieferkette": 0, "ki": 0}
     assert len(zeilen) >= 5
     for z in zeilen:
         z = z.replace("${CLAUDE_SKILL_DIR}", skill).replace("<SKILL_DIR>", skill)
@@ -887,11 +887,12 @@ def test_regeln_passen_zu_skill():
             continue
         assert any(_regel_passt(r, z) for r in bash), f"keine Regel für: {z}"
         for schluessel, marke in (("poc", "/poc.py "), ("kontext", "bericht.py kontext"), ("repo", "bericht.py repo"), ("rendern", "bericht.py rendern "),
-                                  ("add", "agent-stats.py add "), ("lieferkette", "/lieferkette.py ")):
+                                  ("add", "agent-stats.py add "), ("lieferkette", "/lieferkette.py "), ("ki", "/ki.py ")):
             gesehen[schluessel] += marke in z
     assert all(gesehen.values()), gesehen                                # jede Form kommt im Skill-Text vor
     assert f"Bash(python3 -I {skill}/scripts/poc.py *)" in regeln
     assert f"Bash(python3 -I {skill}/scripts/lieferkette.py *)" in regeln
+    assert f"Bash(python3 -I {skill}/scripts/ki.py *)" in regeln
     assert f"Bash(python3 -I {skill}/scripts/bericht.py kontext)" in regeln
     assert f"Bash(python3 -I {skill}/scripts/bericht.py kontext *)" in regeln
     assert f"Bash(python3 -I {skill}/scripts/bericht.py repo)" in regeln
@@ -946,6 +947,31 @@ def test_regeln_lieferkette_tf2():
                      f"python3 -I {skill}/scripts/gitkopie.py spiegel",                    # anderes Skript
                      f"python3 -I {skill}/scripts/lieferkette.pyx secrets",
                      f"python3 -I {skill}scripts/lieferkette.py secrets"):
+        assert not any(_regel_passt(r, schlecht) for r in bash), schlecht
+
+
+def test_regeln_ki_tf3():
+    """TF3: `ki.py erkennen` ist erlaubt (kopierter Skill, `-I`), jede Form aus SKILL.md und jede andere Skript-Datei nicht; `poc.py modell`
+    fällt unter die bestehende `poc.py`-Regel."""
+    skill, home, aus = "/tmp/x/.claude/skills/security-audit-eval", "/Users/test", "/tmp/x/ausgabe"
+    regeln = run_eval.erlaubte_regeln(skill, aus, home)
+    bash = [r for r in regeln if r.startswith("Bash(")]
+    assert regeln.count(f"Bash(python3 -I {skill}/scripts/ki.py *)") == 1
+    aufrufe = [z.replace("${CLAUDE_SKILL_DIR}", skill) for z in _aufrufzeilen() if "/ki.py" in z and "<skript>" not in z]
+    assert aufrufe and {z.split("ki.py ")[1].split()[0] for z in aufrufe} == {"erkennen"}
+    for z in aufrufe:
+        assert any(_regel_passt(r, z) for r in bash), z
+    assert any(_regel_passt(r, f"python3 -I {skill}/scripts/ki.py erkennen --lauf ab12cd34 --quelle /tmp/security-audit-ab12cd34/quelle")
+               for r in bash)
+    modell = [z.replace("${CLAUDE_SKILL_DIR}", skill).replace("<SKILL_DIR>", skill) for z in _aufrufzeilen() if "poc.py modell" in z]
+    assert modell
+    for z in modell:
+        assert any(_regel_passt(r, z) for r in bash), z
+    for schlecht in (f"python3 {skill}/scripts/ki.py erkennen --lauf a --quelle /q",                 # ohne -I
+                     f"python3 -I /etc/scripts/ki.py erkennen --lauf a --quelle /q",                 # fremder Skill-Ordner
+                     f"python3 -I {skill}/scripts/ki.pyx erkennen",
+                     f"python3 -I {skill}scripts/ki.py erkennen",
+                     f"python3 -I {skill}/scripts/llm.py erkennen"):
         assert not any(_regel_passt(r, schlecht) for r in bash), schlecht
 
 
