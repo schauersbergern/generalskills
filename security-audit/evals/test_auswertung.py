@@ -32,6 +32,10 @@ MUSTER = ["fixture.invalid"]
 DOD_WEB = {f"TF1-D{i}" for i in range(1, 8)} | {"TF3-D4"}
 # W6: Namen der Test-App `fixture-deps` dürfen im Skill-Text, in den references und im kopierten Skill nicht stehen
 VERBOTENE_NAMEN_TF2 = ("config/keys.js", "src/routes/vorlage.js", "_.template", "variable:", "lodash", "minimist")
+# R2 B1-neu: Namen und Marker der Test-App `fixture-ki` (dazu alle `dateien` der Erwartung außer generischen Namen) dürfen im
+# kopierten Skill nicht stehen
+VERBOTENE_NAMEN_TF3 = ("CRM_API_KEY", "datei_suchen", "send_email", "antwort-sicher", "tickets.js", "assistent.js", "fixture-ki",
+                       "ausgang.jsonl", "tok-mitarbeiter", "poc-dummy-crm", "poc-l2", "POCMARKER-ki-", "x@example.invalid")
 
 
 def _json(pfad):
@@ -1345,6 +1349,16 @@ def test_eval_fixture_web(capsys):
     assert all(d["ok"] for d in ergebnis["dod"].values()), ergebnis["dod"]
 
 
+@pytest.mark.skipif(os.environ.get("SECURITY_AUDIT_EVAL") != "1", reason="echter Eval-Lauf nur mit SECURITY_AUDIT_EVAL=1")
+def test_eval_fixture_ki(capsys):
+    """K6: `run_eval.py` bleibt unverändert; `start.modell_mock` der Erwartung ist Dokumentation und Vorgabe für `test_fixture.py`.
+    Genau TF1-D3 bis D7 und TF3-D1 bis D4 (Plan W3)."""
+    assert run_eval.main(["--fixture", "fixture-ki"]) == 0
+    ergebnis = json.loads(capsys.readouterr().out)
+    assert set(ergebnis["dod"]) == {f"TF1-D{i}" for i in range(3, 8)} | {f"TF3-D{i}" for i in range(1, 5)}
+    assert all(d["ok"] for d in ergebnis["dod"].values()), ergebnis["dod"]
+
+
 # ------------------------------------------------------------------------------------ Härtung TF1-A5
 
 TEILSTRING_KOEDER = ["src/routes/invoices.js:42-50", "`src/routes/invoices.js`", "src/routes/invoices.js (Zeile 42)",
@@ -2575,6 +2589,39 @@ def test_temp_repo_deps_skill_ohne_erwartung(tmp_path, monkeypatch):
         # kopiert werden SKILL.md, references/, scripts/ (ohne test_*.py) und docker/; `evals/` nie
         assert sorted(n for n in os.listdir(skill)) == sorted(n for n in os.listdir(SKILL) if n not in ("evals", "__pycache__")
                                                               and not n.startswith("."))
+    finally:
+        shutil.rmtree(wurzel, ignore_errors=True)
+
+
+def test_temp_repo_ki_skill_ohne_erwartung(tmp_path, monkeypatch):
+    """R2 B1-neu/W10: Der kopierte Skill kennt weder `evals/` noch Namen, Pfade oder Marker der Test-App `fixture-ki` (sonst sähe
+    das Modell die Erwartung). Generische Namen (package.json, package-lock.json, Dockerfile) bleiben erlaubt. Die API-Hosts sind
+    ausgenommen: SKILL.md und agenten-briefings.md nennen sie im Satz von TF3-D3."""
+    wurzel, repo = _temp_repo(tmp_path, monkeypatch, "fixture-ki")
+    try:
+        skill = os.path.join(repo, ".claude", "skills", "security-audit-eval")
+        assert not os.path.exists(os.path.join(skill, "evals")) and not os.path.exists(os.path.join(repo, "expected"))
+        assert os.path.isfile(os.path.join(repo, "package.json")) and os.path.isfile(os.path.join(repo, "package-lock.json"))
+        assert not [n for _, _, ns in os.walk(repo) for n in ns if n.endswith(".tmpl")]
+        erw = _json(os.path.join(HIER, "expected", "fixture-ki.json"))
+        generisch = {"package.json", "package-lock.json", "Dockerfile"}
+        verboten = {d for e in erw["eintraege"] for d in e["dateien"]} - generisch
+        verboten |= {"fixture.invalid"} | set(VERBOTENE_NAMEN_TF3)
+        assert verboten >= {"src/agent/tickets.js", "src/agent/assistent.js", "src/agent/prompt.js", "src/routes/antwort.js",
+                            "src/routes/antwort-sicher.js", "CRM_API_KEY", "POCMARKER-ki-"}
+        dateien = [os.path.join(d, n) for d, _, ns in os.walk(skill) for n in ns]
+        assert dateien
+        for p in dateien:
+            with open(p, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+            for v in verboten:
+                assert v not in text, f"{v} in {p}"
+        assert sorted(os.listdir(skill)) == sorted(n for n in os.listdir(SKILL) if n not in ("evals", "__pycache__")
+                                                   and not n.startswith("."))
+        # die Test-App selbst ist im Temp-Repo vollständig (Quelle der Erwartung)
+        for e in erw["eintraege"]:
+            for d in e["dateien"]:
+                assert os.path.isfile(os.path.join(repo, d)), d
     finally:
         shutil.rmtree(wurzel, ignore_errors=True)
 
