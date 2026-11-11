@@ -2135,7 +2135,7 @@ def test_kopf_verstoesse_regeln_a_und_b_fuer_projekt_und_teilpfad_haertung():
     """Kopfangaben (Projektname, Teilpfad) stehen im Kundenbericht, ohne durch `kunden_verstoesse` zu laufen: ein poc-Token (Regel a) oder
     ein Request (Regel b) darin ist ein Verstoß; gewöhnliche Namen und Pfade nicht. Das Detail ist fest, nie Wert oder Token."""
     d = kd()
-    A, B = ("a", "Text aus einem poc"), ("b", "Request oder Pfad mit Schrägstrich")
+    A, B = ("a", "Text aus einem poc"), ("b", "Request oder Pfad mit führendem Schrägstrich")
     assert bericht.kopf_verstoesse(d, {"projekt": "Portal 2.0", "teilpfad": "apps/web/src"}) == []
     assert bericht.kopf_verstoesse(d, {"projekt": "Kundenportal Müller & Söhne", "teilpfad": "apps/api_v2"}) == []
     assert bericht.kopf_verstoesse(d, {"projekt": "/api/orders/9"}) == [("projekt", *A)]
@@ -2235,7 +2235,7 @@ def test_regel_b_funktionsname_ist_keine_maschinelle_regel_r1_1():
 def test_kopf_verstoesse_pruefen_den_ganzen_wert_r1_3():
     """R1-3: `projekt` hat keine Längengrenze; ein Token aus dem `poc` hinter dem 5000. Zeichen steht sonst ungeprüft im Kopf."""
     d = kd(poc="x /api/orders/9")
-    A, B = ("a", "Text aus einem poc"), ("b", "Request oder Pfad mit Schrägstrich")
+    A, B = ("a", "Text aus einem poc"), ("b", "Request oder Pfad mit führendem Schrägstrich")
     lang = "Portal" + " " * 4995
     assert bericht.kopf_verstoesse(d, {"projekt": lang + "x /api/orders/9"}) == [("projekt", *A)]
     assert bericht.kopf_verstoesse(d, {"projekt": lang + "GET /status"}) == [("projekt", "b", B[1])]
@@ -2329,3 +2329,51 @@ def test_arbeitsbudget_ist_auch_fuer_d_gemeinsam_mit_a_r1_10(monkeypatch):
     assert {(t[2], t[3]) for t in bericht.kunden_verstoesse(d) if t[:2] == ("S-1", "zusammenfassung")} == {("a", "zu viele Token zum Prüfen")}
     monkeypatch.setattr(bericht, "_MAX_SCHRITTE", 25)
     assert [t for t in bericht.kunden_verstoesse(d) if t[:2] == ("S-1", "zusammenfassung")] == []
+
+
+# ------------------------------------------------------------------------------------ Review R2-2: Regel b, Lücken und Fehlalarme
+
+@pytest.mark.parametrize("satz", [
+    "Der Endpunkt:/api/orders liefert fremde Daten aus.", "Der Aufruf //api/orders ist offen.", "Die Datei C:/Users/admin ist lesbar.",
+    "Der Endpunkt ∕api∕orders liefert fremde Daten aus.", "Der Endpunkt ⁄api liefert fremde Daten aus.",
+    "Die Datei /.env ist erreichbar.", "Der Ordner /.git/config ist erreichbar.", "Das Paket /@scope/x ist betroffen.",
+    "Das Heimverzeichnis /~admin ist erreichbar.", "Die Adresse /%2e%2e ist erreichbar.", "Der Pfad /-/api ist erreichbar.",
+    "Die Datei /etc/hosts ist lesbar.", "Der Pfad ist (/admin) offen.", "Der Pfad \"/admin\" ist offen.",
+])
+def test_regel_b_luecken_geschlossen_r2_2(satz):
+    """R2-2: `:` steht nicht im Lookbehind (`x:/api`, `C:/Users`), `//pfad` zählt, die Lookahead-Zeichen `. ~ % @ -` und die
+    Schrägstrich-Varianten U+2215/U+2044 auch."""
+    assert "b" in regeln(kd(massnahme=KD_VORSPANN + satz, poc="x")), satz
+    assert "b" in [r for r, _ in bericht.text_verstoesse(satz)], satz
+
+
+@pytest.mark.parametrize("satz,erwartet", [
+    ("Siehe https://beispiel.de im Netz.", ["url"]), ("Siehe http://beispiel.de im Netz.", ["url"]),
+    ("Die Auslieferung erfolgt von file:///etc aus.", []),                              # `://` und `///` bleiben frei (Grenze, kein Pfad nach einem Wort)
+    ("Wir empfehlen und/oder die Rechte zu begrenzen.", []), ("Der Dienst läuft rund um die Uhr (24/7).", []),
+    ("Die Lese-/Schreibrechte sind zu eng.", []), ("Der Endpunkt-/api liefert fremde Daten aus.", []),     # bekannte Grenze (Spec-Nachtrag R2-2)
+])
+def test_regel_b_bleibt_frei_r2_2(satz, erwartet):
+    assert regeln(kd(massnahme=KD_VORSPANN + satz, poc="x")) == erwartet, satz
+
+
+@pytest.mark.parametrize("satz", ["Das kostet 500 €/Monat.", "Die Frist läuft vom 01.01./31.12. des Jahres.", "Es gilt 5 %/Jahr als Grenze.",
+                                  "Der Aufwand gilt bzw./oder für alle.", "Der Wert gilt ca./etwa für alle.", "Der Benutzer(innen)/Admin ist betroffen."])
+def test_regel_b_bekannte_fehlalarme_bleiben_fail_closed_r2_2(satz):
+    """Diese Schreibweisen trifft Regel b (fail-closed); SKILL.md Schritt 7 nennt sie und die Umformulierung („pro Monat“, „bzw.“)."""
+    assert regeln(kd(massnahme=KD_VORSPANN + satz, poc="x")) == ["b"], satz
+    skill = open(os.path.join(SKRIPTE, "..", "SKILL.md"), encoding="utf-8").read()
+    assert "500 €/Monat" in skill and "schreibe „pro Monat“, „bzw.“, „oder“" in skill
+
+
+# ------------------------------------------------------------------------------------ Review R2-5: Kopfangaben begrenzen
+
+@pytest.mark.parametrize("feld,grenze", [("projekt", 200), ("repo", 100), ("ordner", 100), ("teilpfad", 4096)])
+def test_kopfangaben_haben_eine_laengengrenze_r2_5(feld, grenze):
+    """R2-5: Kopfangaben werden vollständig geprüft (R1-3); damit die Prüfung begrenzt bleibt, sind sie im Schema begrenzt."""
+    d = kd()
+    d[feld] = "a" * grenze
+    assert not any(feld in f and "länger" in f for f in bericht.pruefe_schema(d)), bericht.pruefe_schema(d)
+    d[feld] = "a" * (grenze + 1)
+    assert f"{feld} länger als {grenze} Zeichen" in bericht.pruefe_schema(d)
+    assert bericht.KOPF_MAX[feld] == grenze

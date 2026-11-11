@@ -15,7 +15,7 @@ python3 -I <SKILL_DIR>/scripts/bericht.py rendern <ausgabe_ordner>/<basisname>.j
 | `sha` | Text | vollständiger `sha` aus `kontext` |
 | `datum` | Text | `YYYY-MM-DD`, `datum` aus `kontext` |
 | `teilpfad` | Text oder `null` | `teilpfad` aus `kontext` |
-| `projekt` | Text oder `null` | Wert von `projekt="…"`; nie `""`, ohne Angabe `null` |
+| `projekt` | Text oder `null` | Wert von `projekt="…"`; nie `""`, ohne Angabe `null`; höchstens 200 Zeichen (`repo` und `ordner` 100, `teilpfad` 4096), sonst Schemafehler |
 | `karte` | Liste | `[{ "flaeche": Text, "dateien": [Text] }]` |
 | `hinweise` | Liste von Text | siehe „Hinweise“ |
 | `befunde` | Liste | siehe unten |

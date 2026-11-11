@@ -202,7 +202,7 @@ Das Skript schreibt `<basisname>-kunde.md` und `<basisname>-kunde.pdf` neben das
   - Legende der `regel`-Werte:
     - `du`: Du-Form, Detail ist das Wort (prüft `titel` nicht)
     - `a`: Text aus einem `poc`, Detail ist das Token
-    - `b`: Request oder Pfad mit Schrägstrich
+    - `b`: Request oder Pfad mit führendem Schrägstrich
     - `c`: Zeichen `{ } < > =` oder Backtick (im `titel` nur Backtick, `{ }` und `=`)
     - `d`: Datei mit Zeile, `#L…` oder „Zeile n“
     - `e`: Dateipfad oder Code-Pfad eines Befunds, auch der eigene
@@ -217,7 +217,7 @@ Das Skript schreibt `<basisname>-kunde.md` und `<basisname>-kunde.pdf` neben das
 
 - Sie-Form mit festem Satzmuster: „Aktualisieren Sie …“, „Lassen Sie …“ oder „Wir empfehlen, …“. Die Du-Form (auch Imperative wie „Aktualisiere …“) ist verboten.
 - Das Risiko als Geschäftsfolge formulieren: Datenabfluss, fremder Zugriff, Ausfall, Kosten, Vertrauensverlust. Die Maßnahme konkret, ohne Code.
-- Keine Datei- und Pfadnamen (die betroffene Datei zeigt der Bericht selbst), keine Zeilenangaben, keine Requests, kein Code und keine Bezeichner aus dem Code, keine Backticks und keines der Zeichen `{ } < > =`.
+- Keine Datei- und Pfadnamen (die betroffene Datei zeigt der Bericht selbst), keine Zeilenangaben, keine Requests, kein Code und keine Bezeichner aus dem Code, keine Backticks und keines der Zeichen `{ } < > =`. Auch kein Schrägstrich vor einem Wort: Regel `b` meldet jeden Pfad mit führendem Schrägstrich, also auch „500 €/Monat“, „01.01./31.12.“, „5 %/Jahr“ und „bzw./oder“; schreibe „pro Monat“, „bzw.“, „oder“.
 - Keine URL- oder E-Mail-Adressen.
 - Nichts aus `advisories[].zusammenfassung` übernehmen (der OSV-Text enthält Technik und Links); die Kundensprache schreibst du selbst.
 - Längen und Form: `zusammenfassung` 40 bis 600 Zeichen, `massnahme` 20 bis 400 Zeichen; beide Felder sind einzeilig.
@@ -266,5 +266,5 @@ Pfade von `.md` und `.json`, die Pfade der Kundendateien `-kunde.md` und `-kunde
 - `neustart` nach `modell --antworten-datei` oder nach dem Befüllen der Quelle: Er leert Warteschlange und Protokoll und setzt die App auf den Seed zurück, Antwort und Quelle sind weg (Ablauf in Schritt 6).
 - `annahme_modell` für K3, K5, K6 oder K7 gesetzt, vom Prüfer statt von der Hauptsession, oder bei einem anderen Status als `bestätigt` (das Schema lehnt es ab).
 - Eine Modell-API als Ziel in einem Befehl oder Suchmuster: nie, als Modellziel gilt nur `llm`.
-- Kundenfelder mit Dateinamen, Backticks, Bezeichnern, URLs oder Du-Form geschrieben, den `titel` mit Pfad aus 5b unverändert gelassen oder `kundenbericht.py` mit Korrekturen an anderen Feldern als `zusammenfassung`, `massnahme` und `titel` wiederholt: Es gibt dann keinen Kundenbericht (Schritt 7).
+- Kundenfelder mit Dateinamen, Backticks, Bezeichnern, URLs oder Du-Form geschrieben oder `kundenbericht.py` mit Korrekturen an anderen Feldern als `zusammenfassung`, `massnahme` und `titel` wiederholt: Es gibt dann keinen Kundenbericht (Schritt 7).
 - Aufräumen vergessen, wenn der Lauf vorher scheiterte.

@@ -126,7 +126,7 @@ def test_5100_poc_token_mit_leck_exit2(tmp_path):
     p = lauf(pfad)
     assert p.returncode == 2, p.stdout + p.stderr
     assert zeilen(p) == ["kategorie: inhalt", "S-1 massnahme: Regel a (/api/orders/9)",
-                         "S-1 massnahme: Regel b (Request oder Pfad mit Schrägstrich)"] and p.stderr == ""
+                         "S-1 massnahme: Regel b (Request oder Pfad mit führendem Schrägstrich)"] and p.stderr == ""
     assert inhalt(tmp_path / "out") == [BASIS + ".json"]
 
 
@@ -2106,6 +2106,17 @@ def test_eingabe_namens_nur_endung_exit5_nichts_geschrieben_r1_6(tmp_path):
     assert inhalt(tmp_path / "out") == [".json"]
 
 
+def test_projekt_ueber_200_zeichen_exit5_nichts_geschrieben_r2_5(tmp_path):
+    """R2-5: Ein überlanger Projektname ist ein Schemafehler außerhalb der Kundenfelder (Exit 5, ohne den Wert), keine Prüfung über Megabytes."""
+    pfad = schreibe(tmp_path / "out", bericht_daten(projekt="P" * 201))
+    p = lauf(pfad)
+    assert p.returncode == 5, p.stdout + p.stderr
+    assert zeilen(p) == ["kategorie: eingabe", "Schemafehler außerhalb der Kundenfelder (1):", "- projekt"]
+    assert inhalt(tmp_path / "out") == [BASIS + ".json"]
+    pfad = schreibe(tmp_path / "ok", bericht_daten(projekt="P" * 200))
+    assert lauf(pfad).returncode == 3
+
+
 # ------------------------------------------------------------------------------------ TF4 Härtung: Mutationsproben (Lücken geschlossen)
 
 @pytest.mark.parametrize("abkuerzung", ["--js", "--jso"])
@@ -2288,7 +2299,7 @@ def test_pdf_echt(tmp_path):
 @nur_echt
 def test_pdf_echt_ohne_dateizugriff(tmp_path):
     """Escapte Ladeversuche im Titel bleiben Text: das PDF entsteht ohne Ladefehler, und /etc/hosts wird nicht gelesen."""
-    titel = "Probe url(file:///etc/hosts) und ![x](/etc/hosts) und <img src:file:///etc/hosts>"     # ohne `=`: Titelregel c lässt es sonst nicht durch
+    titel = "Probe url(file:///etc/hosts) und ![x](file:///etc/hosts) und <img src:file:///etc/hosts>"     # ohne `=`: Titelregel c lässt es sonst nicht durch
     pfad = schreibe(tmp_path / "out", bericht_daten(befund(1, titel=titel)))
     p = lauf(pfad, env={"SECURITY_AUDIT_OHNE": ""})
     assert p.returncode == 0, p.stdout + p.stderr

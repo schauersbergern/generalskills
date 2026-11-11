@@ -47,6 +47,7 @@ _KLASSE_MODELL_MOCK = re.compile(r"K[124] ")     # `klasse` von K1, K2 und K4: d
 MAX_OWASP_KI = 3
 _COMMIT = re.compile(r"[0-9a-f]{7,64}")
 _CODE_PFAD = re.compile(r"(.+):([1-9][0-9]*)", re.DOTALL)
+KOPF_MAX = {"projekt": 200, "repo": 100, "ordner": 100, "teilpfad": 4096}       # Zeichen; `kontext` kürzt repo und ordner selbst auf 100
 KUNDENFELDER = {"zusammenfassung": (40, 600), "massnahme": (20, 400)}       # optional; Länge in Zeichen (min, max)
 KUNDEN_REGELN = ("du", "a", "b", "c", "d", "e", "url", "email")         # Werte von `regel` in kunden_verstoesse
 
@@ -431,6 +432,9 @@ def pruefe_schema(daten: object) -> list[str]:
     for feld in ("teilpfad", "projekt"):
         if daten.get(feld) is not None and (msg := _text_fehler(daten[feld], True)):
             f.append(f"{feld} {msg}")
+    for feld, grenze in KOPF_MAX.items():            # R2-5: Kopfangaben werden vollständig geprüft, also müssen sie begrenzt sein
+        if isinstance(daten.get(feld), str) and len(daten[feld]) > grenze:
+            f.append(f"{feld} länger als {grenze} Zeichen")
     if daten.get("ordner") is not None:         # optional (fehlt oder null erlaubt); sonst wie `repo`
         o = daten["ordner"]
         if not (isinstance(o, str) and re.fullmatch(r"[A-Za-z0-9._-]+", o)):
@@ -487,10 +491,15 @@ _DU_FORMEN = ("du", "dich", "dir", "dein", "deine", "deinen", "deinem", "deiner"
               "euch", "euer", "eure", "euren", "eurem", "eurer", "eures")
 # Grenzen nach Spec B1; am Ende darf ein Satzpunkt folgen (`dir.` am Satzende), nicht aber `.<Wortzeichen>` (`dir.json`)
 _DU = re.compile(r"(?<![\w./@-])(?:" + "|".join(_DU_FORMEN) + r")(?![\w/@-])(?!\.\w)", re.IGNORECASE)
-# Request: HTTP-Methode vor einem Pfad (auch `POST-/api`) oder irgendein Pfad mit führendem Schrägstrich (R1-1; unabhängig vom `poc`).
-# `und/oder`, `24/7`, `TCP/IP`, `Lese-/Schreibrechte` und ` / ` haben ein Wortzeichen oder `-` vor dem Strich bzw. ein Leerzeichen danach.
+# Request: HTTP-Methode vor einem Pfad (auch `POST-/api`) oder irgendein Pfad mit führendem Schrägstrich (R1-1; unabhängig vom `poc`),
+# auch `//pfad` (nicht `://`), `Endpunkt:/api` und `C:/Users` (R2-2); Schrägstrich auch als U+2215, U+2044, U+29F8 (NFKC bildet sie nicht ab).
+# Frei bleiben `und/oder`, `24/7`, `TCP/IP`, `Lese-/Schreibrechte`, ` / ` und `https://` (Wortzeichen oder `-` vor dem Strich, bzw. kein Pfadzeichen danach).
+# Bekannte Fehlalarme (fail-closed, Legende in SKILL.md Schritt 7): `500 €/Monat`, `01.01./31.12.`, `5 %/Jahr`, `bzw./oder`; bekannte Grenze: `Endpunkt-/api`.
+_SCHRAEGE = "/\u2215\u2044\u29f8"
+_PFADANFANG = r"(?=[\w.~%@-])"
 _REGEL_B_METHODE = r"\b(?:GET|POST|PUT|PATCH|DELETE)[\s-]+/"
-_REGEL_B = re.compile(_REGEL_B_METHODE + r"|(?<![\w/:-])/(?=[\w.~%@-])", re.IGNORECASE)
+_REGEL_B = re.compile(_REGEL_B_METHODE + rf"|(?<![\w{_SCHRAEGE}-])[{_SCHRAEGE}]{_PFADANFANG}|(?<![\w{_SCHRAEGE}:-])[{_SCHRAEGE}]{{2}}{_PFADANFANG}",
+                      re.IGNORECASE)
 _REGEL_B_KOPF = re.compile(_REGEL_B_METHODE, re.IGNORECASE)    # Kopfangaben (vom Nutzer benannt): nur der Request; ein Pfad darin ist Regel a oder frei
 _REGEL_C = re.compile(r"[{}<>=`]")
 _REGEL_C_TITEL = re.compile(r"[{}=`]")                  # im Titel sind `<` und `>` erlaubt (`name@1.2.3`, Vergleiche in Werkzeugtiteln)
@@ -509,7 +518,7 @@ _MAX_POC = 10**6         # Zeichen je `poc`; ein längerer `poc` zählt wie zu v
 _MAX_SCHRITTE = 5_000_000  # Teilstring-Prüfungen der Regeln a, d und e je Bericht (~1 s); danach wie zu viele Token (fail-closed)
 ZU_VIELE_TOKEN = "zu viele Token zum Prüfen"
 _KUNDEN_DETAIL = {                                   # fester Text je Regel (außer `du` und `a` der Befundfelder), nie Treffertext
-    "a": "Text aus einem poc", "b": "Request oder Pfad mit Schrägstrich", "c": "Sonderzeichen oder Backtick", "d": "Datei mit Zeilenangabe",
+    "a": "Text aus einem poc", "b": "Request oder Pfad mit führendem Schrägstrich", "c": "Sonderzeichen oder Backtick", "d": "Datei mit Zeilenangabe",
     "e": "Dateipfad aus einem Befund", "url": "Webadresse", "email": "E-Mail-Adresse",
 }
 _KUNDEN_FELDER = (("zusammenfassung", KUNDEN_REGELN), ("massnahme", KUNDEN_REGELN),
@@ -702,7 +711,7 @@ def kunden_verstoesse(daten: object) -> list[tuple[str, str, str, str]]:
     `zusammenfassung`, `massnahme` (alle Regeln) und `titel` (alle außer `du`; bei `c` ohne `<` und `>`). Fehlende Felder meldet erst
     kundenbericht.py.
     Regeln (Werte von KUNDEN_REGELN): `du` Du-Form (detail: das Wort), `a` Token aus einem `poc` (detail: das Token, höchstens 60
-    Zeichen), `b` Request (HTTP-Methode vor einem Pfad) oder Pfad mit führendem Schrägstrich, `c` `{ } < > =` oder Backtick, `d` Datei mit Zeile (auch `Dockerfile:6`), `#L<n>`,
+    Zeichen), `b` Request (HTTP-Methode vor einem Pfad) oder Pfad mit führendem Schrägstrich (auch `//pfad`, `x:/pfad`), `c` `{ } < > =` oder Backtick, `d` Datei mit Zeile (auch `Dockerfile:6`), `#L<n>`,
     `Zeile <n>`, `e` Dateipfad oder `code_pfad`-Eintrag eines Befunds (ohne Ausnahme, auch die eigene `datei`), `url` Webadresse,
     `email` E-Mail-Adresse. Quellen für a, d und e sind alle Befunde unabhängig vom Status.
     `detail` ist bei b, c, d, e, url und email ein fester Text ohne Treffertext (die Exit-2-Zeile von kundenbericht.py darf ihn
