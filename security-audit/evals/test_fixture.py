@@ -12,6 +12,7 @@ Wächter des SDK-Vertragstests (`node --import`, Treffer in `<wurzel>/waechter-t
 127.0.0.1 wird abgewiesen und festgehalten (nie eine echte Modell-API; der Wächter schützt vor Fehlkonfiguration, nicht vor bösartigem
 Code). Node >= 22 verlangt das SDK; ein anderes node wählt SECURITY_AUDIT_SDK_NODE=<pfad>.
 """
+import inspect
 import json
 import os
 import pathlib
@@ -904,8 +905,9 @@ def test_ki_start_mock_und_app_nur_loopback(tmp_path):
     assert _start_kommando("node", wurzel, False) == ["node", "src/server.js"]          # fixture-web und fixture-deps starten wie bisher
     env = _start_umgebung(wurzel, 3999, {"OPENAI_BASE_URL": "http://127.0.0.1:4242/v1", **KI_DUMMY})
     assert "NODE_OPTIONS" not in env and re.fullmatch(r"http://127\.0\.0\.1:\d+/v1", env["OPENAI_BASE_URL"])
-    quelle = open(os.path.abspath(__file__), encoding="utf-8").read()
+    quelle = inspect.getsource(_app_starten)                                           # nur die Funktion, nicht der Test selbst
     assert "kommando = _start_kommando(node, wurzel, umgebung is not None)" in quelle      # `_app_starten` benutzt sie auch
+    assert "Popen(kommando," in quelle
 
 
 def _node_fuer_waechter():

@@ -1058,7 +1058,8 @@ def test_start_befehl_syntaxformen_reservierter_namen_exit2(umg, tmp_path, befeh
 
 @pytest.mark.parametrize("befehl", ["unset NODE_OPTIONS && node server.js", "node server.js -u poc", "env -u NODE_OPTIONS node server.js",
                                     "NEXT_PUBLIC_OPENAI_BASE_URL+=x npm start", "echo OPENAI_BASE_URL gesetzt; node server.js",
-                                    "unset FOO; node server.js --modell OPENAI_API_KEY", "node server.js --unsetzen OPENAI_API_KEY"])
+                                    "unset FOO; node server.js --modell OPENAI_API_KEY", "node server.js --unsetzen OPENAI_API_KEY",
+                                    "node server.js --u OPENAI_API_KEY"])      # `--u` ist keine Kurzoption `-u` (Wortgrenze davor)
 def test_start_befehl_syntaxformen_legitim_erlaubt(umg, tmp_path, befehl):
     """Gegenprobe zu den Syntaxformen: Wortgrenzen, Befehlsgrenzen (`;`, `&&`) und `-u` ohne reservierten Namen bleiben erlaubt."""
     vorbereitet(umg, tmp_path)

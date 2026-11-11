@@ -727,6 +727,13 @@ def test_schema_bestaetigt_ohne_k1_k2_k4_praefix_braucht_keine_annahme_haertung(
     assert bericht.pruefe_schema(mit(befund(klasse=klasse))) == [], klasse
 
 
+@pytest.mark.parametrize("wert", ["true", 1, None])
+def test_schema_k1_annahme_modell_kein_bool_meldet_nur_den_typfehler_haertung(wert):
+    """Ein `annahme_modell`, das kein Wahrheitswert ist, ergibt bei K1 nur den Typfehler, nicht zusätzlich den Fehler „braucht annahme_modell true“."""
+    f = [x for x in bericht.pruefe_schema(mit(befund(klasse="K1 x", annahme_modell=wert))) if "annahme_modell" in x]
+    assert len(f) == 1 and "muss true oder false sein" in f[0], f
+
+
 @pytest.mark.parametrize("status", ["unbestätigt", "verworfen", "verdacht"])
 def test_schema_k1_ohne_bestaetigt_braucht_keine_annahme_haertung(status):
     b = befund(status=status, klasse="K1 Tool mit Wirkung nach fremd befülltem Kontext", code_pfad=["src/a.js:1", "src/b.js:2"], grund="g")
