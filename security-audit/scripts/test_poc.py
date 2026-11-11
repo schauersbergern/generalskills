@@ -1015,7 +1015,10 @@ def test_start_befehl_fremder_host_exit2(umg, tmp_path, mock):
 
 @pytest.mark.parametrize("mock", [[], ["--modell-mock", "openai"]])
 @pytest.mark.parametrize("befehl", ["node src/server.js", "npm start", "PORT=3000 node server.js",
-                                    "node server.js --db postgres://poc:poc@db:5432/poc --llm http://llm:4010/v1"])
+                                    "node server.js --db postgres://poc:poc@db:5432/poc --llm http://llm:4010/v1",
+                                    # Re-Review 4: Wortgrenze vor dem reservierten Namen, Shell-Optionen sind keine Hosts
+                                    "NEXT_PUBLIC_OPENAI_BASE_URL=http://llm:4010 npm start", "sh -x ./start.sh",
+                                    "bash -x start.sh", "node s.js --label host: foo"])
 def test_start_befehl_legitim_erlaubt(umg, tmp_path, mock, befehl):
     vorbereitet(umg, tmp_path)
     r = starten_mit_befehl(umg, befehl, *mock)

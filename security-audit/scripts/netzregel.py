@@ -179,6 +179,15 @@ def hosts_extrahieren(text: str) -> list[str]:
     return list(dict.fromkeys(hosts))
 
 
+def url_verstoesse(text: str) -> list[str]:
+    """Nicht erlaubte Hosts nur aus URLs (ohne die curl-Optionen-Heuristik `-x`/`--resolve`/`Host:`): für Start-Befehle von
+    Apps, in denen `sh -x` oder `--label host: …` keine Netzziele sind."""
+    hosts: list[str] = []
+    for _, h in _urls(text):
+        hosts.extend(h)
+    return [h for h in dict.fromkeys(hosts) if h not in ERLAUBTE_HOSTS]
+
+
 def verstoesse_poc(text: str) -> list[str]:
     """Hosts im Text, die nicht erlaubt sind."""
     return [h for h in hosts_extrahieren(text) if h not in ERLAUBTE_HOSTS]

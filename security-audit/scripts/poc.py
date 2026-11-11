@@ -1020,7 +1020,7 @@ def _start_befehl_pruefen(befehl: str, modell_mock: list[str]) -> None:
         m = MOCK_RESERVIERT_RE.search(befehl)
         if m:
             raise PocFehler(f"--start-befehl: reservierter Name {m.group(1)} bei --modell-mock")
-    fremd = netzregel.verstoesse_poc(befehl)
+    fremd = netzregel.url_verstoesse(befehl)
     if fremd:
         raise PocFehler(f"--start-befehl: nicht erlaubter Host {_entschaerfen(fremd[0])[:100]}")
 
