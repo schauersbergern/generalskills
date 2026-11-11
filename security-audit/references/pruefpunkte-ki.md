@@ -22,6 +22,7 @@ Für K2 und K4 zählt auch die **eigene Eingabe** des Nutzers als Quelle. **Das 
 | K6 Speicher und Kontext | ASI06 | A01 | Verlauf, Vektor-Index oder Cache wird mandantenübergreifend geteilt. | P1 mit Beleg, sonst P2 |
 | K7 MCP und Tool-Herkunft | ASI04, ASI07 | A08 | MCP-Server oder Tools aus nicht vertrauenswürdiger Quelle werden ohne Pinning geladen, oder Tool-Beschreibungen sind fremd befüllt. | P2 |
 
+- **Nummer im Befund:** `klasse` beginnt mit der Prüfpunkt-Nummer und einem Leerzeichen (`K1 Injection → Tool mit Wirkung`, einzeilig). Daran erkennt die Hauptsession, ob `annahme_modell` gilt (nur K1, K2 und K4).
 - **Vorrang:** Ein Befund braucht den Weg von einer fremd befüllbaren Quelle (bei K2 und K4 auch von der eigenen Eingabe) bis zur Wirkung. Ohne Quelle höchstens P3.
 - **Gegenprüfung (zusätzlich zu `pruefpunkte-web.md`):** Suche eine Bestätigung durch den Nutzer vor dem Tool-Aufruf, eine Allowlist oder Parametrisierung der Argumente, eine Rechteprüfung gegen den Auslöser (nicht gegen das Modell) und Escaping vor der Senke. Findest du eine wirksame, ist es kein Befund.
 - **Wo der Befund steht:** `datei:zeile` ist die Stelle des Fehlers (die Senke, das Tool oder die Stelle, an der das Geheimnis in den Prompt gelangt). Der `code_pfad` führt von der Quelle über den Modellaufruf bis zur Wirkung und nennt bei K5 auch die Stelle, an der der Prompt benutzt wird.
@@ -29,9 +30,9 @@ Für K2 und K4 zählt auch die **eigene Eingabe** des Nutzers als Quelle. **Das 
 
 ## Belege
 
-- **K1, K2 und K4** hängen an einer Modellentscheidung. Sie sind `bestätigt` nur mit Marker-Beleg gegen den Modell-Mock (Briefing „Modell-Mock“ und Schritt 6 in `SKILL.md`): ein Marker `POCMARKER-<rolle>-<8 hex>` in der Quelle bzw. der eigenen Eingabe, ein Antwort-Eintrag mit `wenn_enthaelt`, der Request im Protokoll (`--suche`) und die beobachtete Wirkung. Die Hauptsession setzt dann `annahme_modell: true`; das Markdown nennt die Annahme („bestätigt (Modell-Mock, Annahme: Modell folgt)“). Ohne Mock oder ohne vollständigen Beleg bleibt der Befund `unbestätigt` mit eigenem `code_pfad`.
-- **K3, K5, K6 und K7** hängen nicht an einer Modellentscheidung. Es gelten die Belegstufen von `pruefpunkte-web.md`. K5 ist `bestätigt`, wenn `--protokoll --suche <marker>` im Prompt den Platzhalter `<ENV:NAME>` (NAME ist der Variablenname) zeigt; das setzt voraus, dass die Variable beim Start als `--env` mit einem Dummy-Wert ab 6 Zeichen gesetzt war, sonst ersetzt der Mock nichts. K3, K6 und K7 belegt ein Request mit zwei Zugängen oder der Code-Pfad.
-- **Marker:** `POCMARKER-<rolle>-<8 hex>`, je Befund neu, nie aus Repo-Inhalt oder Testdaten übernommen.
+- **K1, K2 und K4** hängen an einer Modellentscheidung. Sie sind `bestätigt` nur mit Marker-Beleg gegen den Modell-Mock (Briefing „Modell-Mock“ und Schritt 6 in `SKILL.md`): ein Marker `POCMARKER-<rolle>-<8 hex>` in der Quelle bzw. der eigenen Eingabe, ein Antwort-Eintrag mit `wenn_enthaelt`, der Request im Protokoll (`--suche`) und die beobachtete Wirkung. Die Hauptsession setzt dann `annahme_modell: true`; das Markdown nennt die Annahme („bestätigt (Modell-Mock, Annahme: Modell folgt)“). Ohne Mock in der Rolle (`<MODELL_MOCK>` „nein: …“) wird ein K1-, K2- oder K4-Befund nie `bestätigt`; ohne vollständigen Beleg bleibt er `unbestätigt` mit eigenem `code_pfad`.
+- **K3, K5, K6 und K7** hängen nicht an einer Modellentscheidung. Es gelten die Belegstufen von `pruefpunkte-web.md`. K5 ist `bestätigt`, wenn `--protokoll --suche <marker>` im `body` des Requests (dem Prompt) den Platzhalter `<ENV:NAME>` (NAME ist der Variablenname) zeigt; der Beleg stammt aus dem `body`, nicht aus der `fundstelle` (fehlt der Platzhalter dort, gilt `body` als Beleg); das setzt voraus, dass die Variable beim Start als `--env` mit einem Dummy-Wert ab 6 Zeichen gesetzt war, sonst ersetzt der Mock nichts. K3, K6 und K7 belegt ein Request mit zwei Zugängen oder der Code-Pfad.
+- **Marker:** `POCMARKER-<rolle>-<8 hex>` (8 neu gewählte Hex-Zeichen), je Befund neu, nie aus Repo-Inhalt oder Testdaten übernommen.
 - **Der Mock ersetzt nur die Modellentscheidung,** nicht den Weg in der App: Ob eine echte Modellantwort dieselbe Tool-Wahl träfe, belegt er nicht. Das ist die Annahme in `annahme_modell`.
 
 ## Modell-Mock
@@ -54,7 +55,7 @@ Die Tabelle nennt als geprüft nur, was der Vertragstest gegen die echten SDKs g
 
 ## Grenzen
 
-- **Direkte HTTP-Aufrufe** an Modell-APIs per `fetch` erkennt `ki.py` nicht: Ohne SDK in `package.json` meldet es „nicht anwendbar“. Der Reviewer findet sie über die Karte (Modellaufrufe), der Mock deckt sie nicht ab.
+- **Direkte HTTP-Aufrufe** an Modell-APIs per `fetch` erkennt `ki.py` nicht: Ohne SDK in `package.json` meldet es „nicht anwendbar“. Der Reviewer findet sie über die Karte (Modellaufrufe), der Mock deckt sie nicht ab. Bei `anwendbar: false` bleibt es beim Hinweis „nicht anwendbar“: Es gibt keinen Mock (`<MODELL_MOCK>` „nein: nicht anwendbar“, bei Exit ≠ 0 von `ki.py` „nein: KI-Erkennung fehlgeschlagen“), und K1, K2 und K4 bleiben `unbestätigt`.
 - **Dienst namens `llm`:** Heißt ein Dienst in der Repo-Konfiguration `llm`, zeigt er im Container auf den Mock.
 - **Anbieter:** Azure, Bedrock, Vertex und Gemini laufen nicht über den Mock.
 - **Maskierung im Protokoll:** Der Mock ersetzt Werte roh sowie einfach und doppelt JSON-escaped durch `<ENV:NAME>`. Nicht erfasst sind Werte, die dreifach escaped, URL-kodiert oder Base64-kodiert sind, und Teilstücke über Feldgrenzen. Ein solcher Wert kann im Protokoll stehen; niemand nennt ihn.
