@@ -7,11 +7,14 @@ Code, kein Kundencode). test_deps_osv_scanner_echt braucht zusätzlich SECURITY_
 Lockfiles mit verwundbaren Versionen liegen im öffentlichen Repo nur als `.tmpl`; die Tests kopieren sie unter dem echten
 Namen in Temp-Ordner.
 test_ki_*_start laufen ebenfalls nur mit SECURITY_AUDIT_FIXTURE_START=1: Die App fixture-ki spricht ausschließlich mit dem
-lokalen Modell-Mock (docker/llm-mock.mjs auf 127.0.0.1, eigene Prozessgruppe), ihre Umgebung ist eine Whitelist (nie eine echte
-Modell-API). Node >= 22 verlangt das SDK; ein anderes node wählt SECURITY_AUDIT_SDK_NODE=<pfad>.
+lokalen Modell-Mock (docker/llm-mock.mjs auf 127.0.0.1, eigene Prozessgruppe), ihre Umgebung ist eine Whitelist und davor liegt der
+Wächter des SDK-Vertragstests (`node --import`, Treffer in `<wurzel>/waechter-treffer.jsonl`): jede Verbindung zu einem anderen Ziel als
+127.0.0.1 wird abgewiesen und festgehalten (nie eine echte Modell-API; der Wächter schützt vor Fehlkonfiguration, nicht vor bösartigem
+Code). Node >= 22 verlangt das SDK; ein anderes node wählt SECURITY_AUDIT_SDK_NODE=<pfad>.
 """
 import json
 import os
+import pathlib
 import re
 import shutil
 import signal
@@ -571,11 +574,39 @@ def _start_umgebung(wurzel, port, umgebung=None):
             "HOST": "127.0.0.1", "PORT": str(port), **umgebung}
 
 
+WAECHTER = os.path.join(HIER, "sdk-vertrag", "waechter.mjs")
+
+
+def _waechter_vorschalt(wurzel):
+    """Schreibt `<wurzel>/waechter-vorschalt.mjs` und gibt (Pfad des Moduls, Pfad der Trefferdatei) zurück. Das Modul lädt den Wächter
+    des SDK-Vertragstests (er ersetzt fetch, http(s), net und tls: nur 127.0.0.1 ist erlaubt) und schreibt jeden Treffer (`{art, ziel}`,
+    nie einen Request-Inhalt) sofort als eine JSON-Zeile in die Trefferdatei, auch wenn die App den Fehler fängt."""
+    vorschalt = os.path.join(wurzel, "waechter-vorschalt.mjs")
+    treffer = os.path.join(wurzel, "waechter-treffer.jsonl")
+    with open(vorschalt, "w", encoding="utf-8") as f:
+        f.write(f'import {{ treffer }} from {json.dumps(pathlib.Path(WAECHTER).as_uri())};\n'
+                'import { appendFileSync } from "node:fs";\n'
+                f'const ziel = {json.dumps(treffer)};\n'
+                'const eintragen = treffer.push.bind(treffer);\n'
+                'treffer.push = (...t) => { for (const x of t) appendFileSync(ziel, JSON.stringify(x) + "\\n"); return eintragen(...t); };\n')
+    return vorschalt, treffer
+
+
+def _start_kommando(node, wurzel, mit_waechter):
+    """Kommandozeile der App: `[node, src/server.js]`; mit Wächter `[node, --import, <Vorschalt>, src/server.js]`. Der Wächter gilt für
+    die Apps mit eigener Umgebung (fixture-ki: sie darf nur den lokalen Mock erreichen)."""
+    if not mit_waechter:
+        return [node, "src/server.js"]
+    vorschalt, _treffer = _waechter_vorschalt(wurzel)
+    return [node, "--import", vorschalt, "src/server.js"]
+
+
 def _app_starten(fixture, praefix, bereit_pfad="/health", umgebung=None, info=None):
     """Kopiert die Test-App in einen Temp-Ordner (alle `.tmpl` verlieren die Endung), installiert mit `npm ci
     --ignore-scripts` und startet Node in eigener Sitzung; gibt den Port zurück und beendet am Ende nur diese eigene
     Gruppe. `bereit_pfad` ist der Pfad, der mit 200 antworten muss, bevor der Port zurückgegeben wird. `umgebung` ersetzt
-    die Umgebung des Node-Prozesses (siehe `_start_umgebung`); `npm ci` erbt wie bisher. `info` (dict) bekommt `wurzel`."""
+    die Umgebung des Node-Prozesses (siehe `_start_umgebung`) und schaltet den Wächter vor (`_start_kommando`); `npm ci` erbt wie
+    bisher. `info` (dict) bekommt `wurzel`."""
     wurzel = os.path.realpath(tempfile.mkdtemp(prefix=praefix))
     if info is not None:
         info["wurzel"] = wurzel
@@ -590,7 +621,8 @@ def _app_starten(fixture, praefix, bereit_pfad="/health", umgebung=None, info=No
         port = freier_port()
         env = _start_umgebung(wurzel, port, umgebung)
         node = _node() if umgebung is not None else "node"
-        prozess = subprocess.Popen([node, "src/server.js"], cwd=kopie, env=env, start_new_session=True,
+        kommando = _start_kommando(node, wurzel, umgebung is not None)
+        prozess = subprocess.Popen(kommando, cwd=kopie, env=env, start_new_session=True,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         ende = time.time() + 30
         while True:
@@ -853,12 +885,54 @@ def test_start_umgebung_ohne_zusatz_erbt_wie_bisher(monkeypatch, tmp_path):
     assert env["TMPDIR"] == str(tmp_path) and env["PATH"] == os.environ["PATH"]
 
 
-def test_ki_start_mock_und_app_nur_loopback():
-    """Die Start-Fixture gibt dem Kind nur den lokalen Mock als Modell-Ziel; die Dummy-Werte sind die der Spezifikation."""
-    quelle = open(os.path.abspath(__file__), encoding="utf-8").read()
-    assert 'f"http://127.0.0.1:{mock.api}/v1"' in quelle
+def test_ki_start_mock_und_app_nur_loopback(tmp_path):
+    """Härtung (Review 6a/6b M3): Die Start-Fixture gibt dem Kind nur den lokalen Mock als Modell-Ziel, und davor liegt der Wächter. Statt den
+    eigenen Quelltext zu lesen, prüft der Test die Kommandozeile, die Vorschaltdatei und die Umgebung, die `_app_starten` benutzt."""
     assert KI_DUMMY == {"OPENAI_API_KEY": "poc-dummy-openai", "CRM_API_KEY": "poc-dummy-crm"}
     assert ki_text(".env.example").strip() == "CRM_API_KEY=" + KI_DUMMY["CRM_API_KEY"]
+    wurzel = str(tmp_path)
+    kommando = _start_kommando("/pfad/zu/node", wurzel, True)
+    vorschalt = os.path.join(wurzel, "waechter-vorschalt.mjs")
+    assert kommando == ["/pfad/zu/node", "--import", vorschalt, "src/server.js"]
+    text = open(vorschalt, encoding="utf-8").read()
+    assert pathlib.Path(WAECHTER).as_uri() in text and os.path.join(wurzel, "waechter-treffer.jsonl") in text
+    assert os.path.isfile(WAECHTER)
+    assert _start_kommando("node", wurzel, False) == ["node", "src/server.js"]          # fixture-web und fixture-deps starten wie bisher
+    env = _start_umgebung(wurzel, 3999, {"OPENAI_BASE_URL": "http://127.0.0.1:4242/v1", **KI_DUMMY})
+    assert "NODE_OPTIONS" not in env and re.fullmatch(r"http://127\.0\.0\.1:\d+/v1", env["OPENAI_BASE_URL"])
+    quelle = open(os.path.abspath(__file__), encoding="utf-8").read()
+    assert "kommando = _start_kommando(node, wurzel, umgebung is not None)" in quelle      # `_app_starten` benutzt sie auch
+
+
+def _node_fuer_waechter():
+    node = _node()
+    if node is None:
+        pytest.skip("node fehlt")
+    return node
+
+
+def test_ki_waechter_vorschalt_weist_fremden_host_ab_und_haelt_ihn_fest(tmp_path):
+    """Härtung (M3): Mit dem Vorschaltmodul weist ein Prozess jede Verbindung zu einem anderen Ziel als 127.0.0.1 ab (fetch und http), noch
+    bevor ein Namensaufruf oder eine Verbindung entsteht (Ziele: `poc-fremd.invalid`, `192.0.2.1`), und schreibt sie in die Trefferdatei,
+    auch wenn der Aufrufer den Fehler fängt. 127.0.0.1 bleibt erlaubt (kein Treffer). Kein Netz."""
+    node = _node_fuer_waechter()
+    wurzel = str(tmp_path)
+    vorschalt, treffer = _waechter_vorschalt(wurzel)
+    skript = ("const aus = [];\n"
+              "for (const u of ['http://poc-fremd.invalid/v1', 'https://192.0.2.1/x']) {\n"
+              "  try { await fetch(u); aus.push('offen'); } catch (e) { aus.push(e.code === 'EWAECHTER' ? 'abgewiesen' : String(e.code ?? e.message)); }\n"
+              "}\n"
+              "const http = await import('node:http');\n"
+              "try { http.request({ host: 'poc-fremd.invalid', port: 80 }); aus.push('offen'); } catch (e) { aus.push(e.code); }\n"
+              "try { await fetch('http://127.0.0.1:1/'); } catch (e) { aus.push(e.code === 'EWAECHTER' ? 'abgewiesen' : 'lokal'); }\n"
+              "console.log(JSON.stringify(aus));\n")
+    r = subprocess.run([node, "--import", vorschalt, "--input-type=module", "-e", skript], cwd=wurzel, capture_output=True, text=True, timeout=60,
+                       env={"PATH": os.environ.get("PATH") or "/usr/bin:/bin", "HOME": wurzel, "LANG": "C.UTF-8"})
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout.strip().splitlines()[-1]) == ["abgewiesen", "abgewiesen", "EWAECHTER", "lokal"], r.stdout
+    zeilen = [json.loads(z) for z in open(treffer, encoding="utf-8").read().splitlines()]
+    assert [z["ziel"] for z in zeilen] == ["poc-fremd.invalid", "192.0.2.1", "poc-fremd.invalid"], zeilen
+    assert all(set(z) == {"art", "ziel"} for z in zeilen)
 
 
 @pytest_start
@@ -939,3 +1013,17 @@ def test_ki_fixture_auth_ohne_prototyp_umgehung():
     with open(os.path.join(FIXTURE_KI, "src", "auth.js"), encoding="utf-8") as f:
         quelle = f.read()
     assert "Object.hasOwn(" in quelle
+
+
+@pytest_start
+def test_ki_nur_der_mock_sah_requests(app_ki):
+    """Härtung (M3): Nach einem Aufruf, der ein Modell braucht, steht der Request im Protokoll des Mocks (Positivkontrolle: der Weg
+    zum Mock funktioniert), und der Wächter vor der App hat keine Verbindung zu einem anderen Ziel als 127.0.0.1 abgewiesen."""
+    marker = "POCMARKER-ki-nur-mock"
+    app_ki.mock.setzen([])
+    status, body = anfrage(app_ki.port, "/assistent", TOKEN_A, "POST", {"frage": f"Hallo {marker}"})
+    assert status == 200, body
+    eintraege = json.loads(app_ki.mock.protokoll(marker))["eintraege"]
+    assert eintraege and all(e["methode"] == "POST" and e["pfad"].endswith("/chat/completions") for e in eintraege), eintraege
+    treffer = os.path.join(app_ki.wurzel, "waechter-treffer.jsonl")
+    assert not os.path.exists(treffer) or open(treffer, encoding="utf-8").read() == "", open(treffer, encoding="utf-8").read()
