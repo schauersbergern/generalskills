@@ -4,6 +4,7 @@ Aufruf: python3 -m pytest security-audit/scripts/test_poc.py -q
 Der Fake protokolliert jeden Aufruf (Argumente, stdin) als JSON-Zeile und liefert Ausgaben aus einer
 Konfigurationsdatei (Schlüssel: die ersten zwei Argumente, sonst das erste). Alles liegt in tmp_path.
 """
+import argparse
 import json
 import os
 import re
@@ -566,9 +567,8 @@ def test_vorbereiten_kein_git_repo(umg, tmp_path):
 def test_vorbereiten_unvollstaendig(temp_ordner, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(poc.gitkopie, "arbeitskopie", lambda repo, ziel, rev="HEAD": [
         "Namenskollision: a", "Arbeitskopie unvollständig: git cat-file abgebrochen bei x (boom)"])
-    repo = tmp_path / "r"
-    repo.mkdir()
-    assert poc.main(["vorbereiten", "--lauf", LAUF, "--repo", str(repo)]) == 4
+    repo = repo_mit(tmp_path, MINI, name="r")          # echtes Repo: der Commit wird vor dem Kopieren aufgelöst (R1-17)
+    assert poc.main(["vorbereiten", "--lauf", LAUF, "--repo", repo]) == 4
     aus = capsys.readouterr()
     assert aus.out.splitlines()[0] == "kategorie: arbeitskopie-unvollstaendig"
     assert "Arbeitskopie unvollständig" in aus.err
@@ -578,9 +578,8 @@ def test_vorbereiten_git_fehler(temp_ordner, tmp_path, monkeypatch, capsys):
     def kaputt(repo, ziel, rev="HEAD"):
         raise gitkopie.GitFehler("git ls-tree fehlgeschlagen (Exit 128): kein HEAD")
     monkeypatch.setattr(poc.gitkopie, "arbeitskopie", kaputt)
-    repo = tmp_path / "r"
-    repo.mkdir()
-    assert poc.main(["vorbereiten", "--lauf", LAUF, "--repo", str(repo)]) == 4
+    repo = repo_mit(tmp_path, MINI, name="r")          # echtes Repo: der Commit wird vor dem Kopieren aufgelöst (R1-17)
+    assert poc.main(["vorbereiten", "--lauf", LAUF, "--repo", repo]) == 4
     aus = capsys.readouterr()
     assert aus.out.splitlines()[0] == "kategorie: git-fehler"
     assert "kein HEAD" in aus.err
@@ -588,9 +587,8 @@ def test_vorbereiten_git_fehler(temp_ordner, tmp_path, monkeypatch, capsys):
 
 def test_vorbereiten_meldungen_nur_auf_stderr(temp_ordner, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(poc.gitkopie, "arbeitskopie", lambda repo, ziel, rev="HEAD": ["Symlink übersprungen: x"])
-    repo = tmp_path / "r"
-    repo.mkdir()
-    assert poc.main(["vorbereiten", "--lauf", LAUF, "--repo", str(repo)]) == 0
+    repo = repo_mit(tmp_path, MINI, name="r")          # echtes Repo: der Commit wird vor dem Kopieren aufgelöst (R1-17)
+    assert poc.main(["vorbereiten", "--lauf", LAUF, "--repo", repo]) == 0
     aus = capsys.readouterr()
     assert aus.out.strip() == os.path.join(poc.zustand_ordner(LAUF), "quelle")
     assert "Symlink übersprungen" in aus.err
@@ -1635,6 +1633,38 @@ def test_vorbereiten_kopiert_den_uebergebenen_sha_haertung_b3(umg, tmp_path):
         assert json.load(f)["sha"] == sha1                                  # der Marker hält fest, was kopiert wurde
     r = umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo)               # ohne --sha: HEAD (Rückwärtskompatibilität)
     assert open(os.path.join(r.stdout.strip(), "stand.txt")).read() == "zwei\n"
+
+
+def test_vorbereiten_loest_den_commit_vor_dem_kopieren_auf_r1_17(tmp_path, monkeypatch):
+    """R1-17: Ohne `--sha` wird HEAD einmal zum vollen Hash aufgelöst, genau dieser Hash kopiert und im Marker festgehalten
+    (kein stiller Ersatzwert "HEAD", kein Wandern zwischen Kopie und rev-parse)."""
+    repo = repo_mit(tmp_path, MINI, name="kunde-r117")
+    head = git(repo, "rev-parse", "HEAD").strip()
+    monkeypatch.setattr(tempfile, "tempdir", os.path.realpath(tmp_path / "zustand"))
+    os.makedirs(tempfile.tempdir)
+    gesehen = []
+    echt = poc.gitkopie.arbeitskopie
+
+    def spion(r, ziel, rev="HEAD"):
+        gesehen.append(rev)
+        return echt(r, ziel, rev)
+
+    monkeypatch.setattr(poc.gitkopie, "arbeitskopie", spion)
+    assert poc.cmd_vorbereiten(argparse.Namespace(repo=repo, lauf=LAUF, sha=None)) == 0
+    assert gesehen == [head]
+    with open(os.path.join(poc.zustand_ordner(LAUF), "quelle.fertig")) as f:
+        assert json.load(f)["sha"] == head
+
+
+def test_vorbereiten_ohne_aufloesbaren_commit_ist_git_fehler_r1_17(tmp_path, monkeypatch, capsys):
+    """Leeres Repo (HEAD nicht auflösbar): kein Marker mit "HEAD", Kategorie git-fehler."""
+    repo = tmp_path / "leer"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    monkeypatch.setattr(tempfile, "tempdir", os.path.realpath(tmp_path / "zustand"))
+    os.makedirs(tempfile.tempdir)
+    assert poc.cmd_vorbereiten(argparse.Namespace(repo=str(repo), lauf=LAUF, sha=None)) == 4
+    assert capsys.readouterr().out.splitlines()[0] == "kategorie: git-fehler"
+    assert not os.path.exists(os.path.join(poc.zustand_ordner(LAUF), "quelle.fertig"))
 
 
 @pytest.mark.parametrize("sha", ["HEAD", "abc", "--output=x", "A" * 40, "0" * 39, "g" * 40])

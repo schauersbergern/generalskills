@@ -775,9 +775,11 @@ def cmd_vorbereiten(a: argparse.Namespace) -> int:
 def _vorbereiten(a: argparse.Namespace, repo: str, ordner: str, quelle: str, marker: str) -> int:
     _entferne(marker, ordner)          # erst der Marker, dann die Kopie: ein Absturz dazwischen hinterlässt keine „fertige“ Kopie
     _entferne(quelle, ordner)          # lokale Dateioperation: wird nicht unterbrochen, zählt aber gegen das Budget
-    sha = a.sha or "HEAD"
     try:
-        meldungen = gitkopie.arbeitskopie(repo, quelle, sha)
+        # Der Commit wird einmal aufgelöst und genau dieser Hash kopiert und im Marker festgehalten: weder ein stiller
+        # Ersatzwert „HEAD“ noch ein Wandern von HEAD zwischen Kopie und rev-parse.
+        kopiert = gitkopie.git(repo, "rev-parse", "--verify", f"{a.sha or 'HEAD'}^{{commit}}").stdout.decode().strip()
+        meldungen = gitkopie.arbeitskopie(repo, quelle, kopiert)
     except gitkopie.GitFehler as e:
         print("kategorie: git-fehler")
         print(f"git-Fehler: {e}", file=sys.stderr)
@@ -791,14 +793,6 @@ def _vorbereiten(a: argparse.Namespace, repo: str, ordner: str, quelle: str, mar
     if any("Arbeitskopie unvollständig" in m for m in meldungen):
         print("kategorie: arbeitskopie-unvollstaendig")
         return 4
-    try:
-        kopiert = gitkopie.git(repo, "rev-parse", "--verify", f"{sha}^{{commit}}").stdout.decode().strip()
-    except gitkopie.ZeitbudgetFehler as e:         # keine „fertige“ Kopie ohne geklärten Commit nach Ablauf des Budgets
-        print("kategorie: git-fehler")
-        print(f"git-Fehler: {e}", file=sys.stderr)
-        return 4
-    except gitkopie.GitFehler:
-        kopiert = sha
     _schreibe_atomar(marker, {"fertig": True, "sha": kopiert})
     print(quelle)
     return 0
