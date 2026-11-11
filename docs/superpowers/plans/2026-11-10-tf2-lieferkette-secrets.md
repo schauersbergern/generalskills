@@ -182,3 +182,13 @@ Task 4 → 1 → 2 → 3 → 5 → 6 → 7 (Schema zuerst, weil die Entwürfe au
 
 - `install-skripte-offen`: Schutzmaßnahmen gelten **je Lockfile-Typ** — npm-Lockfile: `.npmrc` `ignore-scripts=true` oder alle npm-Installationszeilen mit `--ignore-scripts`; pnpm-Lockfile: `.npmrc` `ignore-scripts=true`, `onlyBuiltDependencies`/`neverBuiltDependencies`, `packageManager: pnpm@>=10` oder alle pnpm-Installationszeilen mit `--ignore-scripts`. yarn-Lockfiles tragen kein Install-Skript-Merkmal und werden nicht geprüft; yarn berry `enableScripts: false` ist deshalb **keine** Schutzmaßnahme mehr (abweichend von Spec Abschnitt 3 und Task 3 oben). SKILL.md/references (Task 5) nennen `enableScripts` nicht als Schutz.
 - Bekannte Erkennungsgrenzen (für references, Task 5): `su … -c`, `gosu`, `su-exec`, `runuser`, `busybox sh -c`, `/usr/bin/env bash -c`, `corepack pnpm install`, Befehlssubstitution in Anführungszeichen/Backticks, `sh -c` tiefer als 3 Ebenen.
+
+## Nachtrag nach Review PR #12 Runde 1 (Vorrang)
+
+- **R1-1 (Schwärzung fail-closed):** gitleaks 8.30.1 meldet bei Zeilen ab etwa 120 KB falsche Spalten. Nach der Schwärzung läuft deshalb ein zweiter `gitleaks dir` auf der Arbeitskopie (nur wenn etwas geschwärzt wurde, im Budget `ende`). Restfunde werden zeilenweise ganz geschwärzt („Schwärzung unscharf: <datei>:<zeile> (ganze Zeile)“) und ein dritter Lauf prüft erneut; bleibt ein Fund oder läuft die Frist ab, ist es Exit 4 ohne Marker. Funde, die per realpath außerhalb der Arbeitskopie liegen, zählen nicht.
+- **R1-2:** `STANDARD_AUSNAHMEN` deckt alle `paths` der Standard-Allowlist von gitleaks 8.30.1 ab (Test gegen die im Binary eingebettete Config).
+- **R1-5:** `installation-ohne-lockfile-treue` erkennt die npm-Aliasse von `install` (`add`, `it`, `install-test`, `in` … `isntall`), `npx [-y] <pm>` und `pnpm recursive|multi|m <befehl>`.
+- **R1-6:** Pfade in `befunde_roh` und `pakete[].lockfile` werden nie gekappt; unbrauchbare (Steuerzeichen, Zeilenangabe am Ende, nicht normalisiert, über 300 Zeichen) werden ausgelassen und als Hinweis gezählt.
+- **R1-7:** Die Hinweise zur Repo-Konfiguration sind je Werkzeug verteilt: `secrets` meldet `.gitleaks.toml`, `.gitleaksignore` und `gitleaks:allow`, `abhaengigkeiten` meldet `osv-scanner.toml`.
+- **R1-8:** `dev` wird auch aus pnpm-Lockfiles bis Format 6.0 gelesen (ab Format 9 gibt es die Angabe nicht).
+- **R1-9:** Scheitert das Aufräumen nach gesetztem Marker, endet `secrets` mit Exit 0 und einem Hinweis; ohne Marker bleibt es Exit 1.
