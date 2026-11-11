@@ -135,7 +135,8 @@ def test_zu_viele_poc_token_fail_closed_exit2(tmp_path, monkeypatch, capsys):
     assert kundenbericht.main(["erstellen", "--json", str(pfad)]) == 2
     aus = capsys.readouterr()
     assert aus.out.splitlines() == ["kategorie: inhalt", "S-1 zusammenfassung: Regel a (zu viele Token zum Prüfen)",
-                                    "S-1 massnahme: Regel a (zu viele Token zum Prüfen)", "S-1 titel: Regel a (zu viele Token zum Prüfen)"]
+                                    "S-1 massnahme: Regel a (zu viele Token zum Prüfen)", "S-1 titel: Regel a (zu viele Token zum Prüfen)",
+                                    "Kopf projekt: Regel a (zu viele Token zum Prüfen)"]          # auch der Projektname ist dann nicht prüfbar
     assert aus.err == "" and inhalt(tmp_path / "out") == [BASIS + ".json"]
 
 
@@ -1871,6 +1872,57 @@ def test_pandoc_bekommt_den_absoluten_pfad_des_markdowns_review3_m43(tmp_path, m
     assert kundenbericht.pdf_erstellen("x-kunde.md", "x-kunde.pdf", "T", time.monotonic() + 30) == (0, None, [])
     argv = aufruf(log, "pandoc")["argv"]
     assert os.path.isabs(argv[-1]) and argv[-1] == os.path.join(os.getcwd(), "x-kunde.md")
+
+
+# ------------------------------------------------------------------------------------ TF4 Härtung: Kopfangaben
+
+@pytest.mark.parametrize("feld,wert,regel", [
+    ("projekt", "/api/orders/9", "a"), ("projekt", "Portal org_id", "a"), ("projekt", "GET /api/orders", "b"),
+    ("teilpfad", "GET /status", "b"), ("ordner", "poc.py", "a"), ("repo", "org_id", "a"),
+])
+def test_kopfangabe_mit_exploit_text_exit5_keine_datei_haertung(tmp_path, feld, wert, regel):
+    """Projektname, Ordner, Repo-Name und Teilpfad stehen im Kopf des Kundenberichts. Ein Token aus einem `poc` oder ein Request darin
+    (Regel a, b) ist eine Eingabe, die sich nicht durch Feldkorrektur beheben lässt: Exit 5, nie der Wert in der Meldung."""
+    kopf = {"projekt": None, "ordner": None, feld: wert}
+    daten = bericht_daten(befund(1, datei="apps/web/src/orders.ts"), **kopf)
+    if feld == "teilpfad":
+        daten["befunde"][0]["datei"] = wert + "/orders.ts"
+    pfad = schreibe(tmp_path / "out", daten)
+    p = lauf(pfad)
+    assert p.returncode == 5, p.stdout + p.stderr
+    assert zeilen(p) == ["kategorie: eingabe", "Kopfangaben verstoßen gegen die Kundenregeln (1):", f"- {feld}: Regel {regel}"]
+    assert wert not in p.stdout and inhalt(tmp_path / "out") == [BASIS + ".json"]
+
+
+def test_kopfangabe_nur_die_angezeigte_wird_geprueft_haertung(tmp_path):
+    """Der Kopf zeigt `projekt`, sonst `ordner`, sonst `repo` (R1-W10); ein verdächtiger Ordnername unter einem gesetzten `projekt` steht nirgends."""
+    pfad = schreibe(tmp_path / "out", bericht_daten(projekt="Portal", ordner="poc.py"))
+    assert lauf(pfad).returncode == 3                                                             # weiter bis zur PDF-Stufe (ohne Werkzeuge: Exit 3)
+    md = open(kunde_pfad(pfad, "md"), encoding="utf-8").read()
+    assert md.startswith("# Manibase · Sicherheitsprüfung Portal\n") and "poc.py" not in md
+
+
+def test_kopfangabe_und_befundfelder_beides_gemeldet_exit5_zuerst_haertung(tmp_path):
+    """Exit 5 (Eingabe) geht vor Exit 2 (Feldkorrektur): erst die Kopfangabe, dann erst die Befundfelder."""
+    daten = bericht_daten(befund(1, massnahme=VORSPANN + "Bring dir den Zugriff."), projekt="GET /status")
+    p = lauf(schreibe(tmp_path / "out", daten))
+    assert p.returncode == 5 and zeilen(p)[2] == "- projekt: Regel b"
+
+
+def test_kopfangabe_nicht_pruefbar_ohne_gelistete_befunde_exit2_haertung(tmp_path, monkeypatch, capsys):
+    """Ist die Prüfung wegen zu vieler Token nicht möglich und es gibt keinen gelisteten Befund, der es meldet, meldet es der Kopf (sonst
+    ginge der Projektname ungeprüft durch)."""
+    monkeypatch.setattr(bericht, "_MAX_TOKEN", 10)
+    verworfen = befund(1, status="verworfen", grund="Kein Fehler", poc=" ".join(f"/api/pfad/{i}" for i in range(11)))
+    pfad = schreibe(tmp_path / "out", bericht_daten(verworfen))
+    assert kundenbericht.main(["erstellen", "--json", str(pfad)]) == 2
+    assert capsys.readouterr().out.splitlines() == ["kategorie: inhalt", "Kopf projekt: Regel a (zu viele Token zum Prüfen)"]
+    assert inhalt(tmp_path / "out") == [BASIS + ".json"]
+
+
+def test_pruefen_ohne_kopfverstoss_aendert_nichts_haertung(tmp_path):
+    pfad = schreibe(tmp_path / "out", bericht_daten(projekt="Portal 2.0", teilpfad=None))
+    assert lauf(pfad).returncode == 3
 
 
 # ------------------------------------------------------------------------------------ Opt-in: echte Werkzeuge (SECURITY_AUDIT_PDF=1)

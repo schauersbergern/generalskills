@@ -476,7 +476,8 @@ def pruefe_schema(daten: object) -> list[str]:
 
 # ------------------------------------------------------------------------------------ Kundenprüfung
 
-# Inhaltsregeln für Kundentexte (TF4). Geprüft werden Rohwerte nach NFC, nie das erzeugte Markdown; Regex-Regeln mit
+# Inhaltsregeln für Kundentexte (TF4). Geprüft werden Rohwerte nach NFKC (TF4 Härtung: Vollbreiten-Zeichen und Ligaturen zählen wie die
+# gewöhnlichen; der Status und die Pfade des Schemas bleiben NFC), nie das erzeugte Markdown; Regex-Regeln mit
 # re.IGNORECASE, Teilstring-Abgleiche (a, e, d mit Pfad) ohne Beachtung der Großschreibung. Meldungen nennen nie den
 # Treffertext, nur bei `du` das Wort und bei `a` das Token (beides stammt aus dem JSON der Hauptsession).
 _DU_FORMEN = ("du", "dich", "dir", "dein", "deine", "deinen", "deinem", "deiner", "deines",
@@ -499,9 +500,9 @@ _A_DATEINAME = re.compile(r"[A-Za-z][\w-]*\.(?:js|ts|mjs|cjs|json|md|html|css)",
 _MAX_TOKEN = 200000      # Token aus `poc` je Bericht; darüber ist jedes geprüfte Feld ein Verstoß gegen Regel a (fail-closed)
 _MAX_POC = 10**6         # Zeichen je `poc`; ein längerer `poc` zählt wie zu viele Token (fail-closed, nie still abgeschnitten)
 _MAX_SCHRITTE = 5_000_000  # Teilstring-Prüfungen der Regeln a, d und e je Bericht (~1 s); danach wie zu viele Token (fail-closed)
-_ZU_VIELE_TOKEN = "zu viele Token zum Prüfen"
-_KUNDEN_DETAIL = {                                   # fester Text je Regel (außer `du` und `a`), nie Treffertext
-    "b": "HTTP-Methode mit Pfad", "c": "Sonderzeichen oder Backtick", "d": "Datei mit Zeilenangabe",
+ZU_VIELE_TOKEN = "zu viele Token zum Prüfen"
+_KUNDEN_DETAIL = {                                   # fester Text je Regel (außer `du` und `a` der Befundfelder), nie Treffertext
+    "a": "Text aus einem poc", "b": "HTTP-Methode mit Pfad", "c": "Sonderzeichen oder Backtick", "d": "Datei mit Zeilenangabe",
     "e": "Dateipfad aus einem Befund", "url": "Webadresse", "email": "E-Mail-Adresse",
 }
 _KUNDEN_FELDER = (("zusammenfassung", KUNDEN_REGELN), ("massnahme", KUNDEN_REGELN),
@@ -510,7 +511,7 @@ _MAX_PRUEF = 5000        # Zeichen je Feld; hält die Regex-Prüfung auch bei ü
 
 
 def _pruef_text(wert: object) -> str | None:
-    return unicodedata.normalize("NFC", wert[:_MAX_PRUEF]) if isinstance(wert, str) else None
+    return unicodedata.normalize("NFKC", wert[:_MAX_PRUEF]) if isinstance(wert, str) else None
 
 
 def _d_allgemein(text: str) -> bool:
@@ -564,7 +565,7 @@ def _poc_token(poc: str) -> list[str]:
     js, ts, mjs, cjs, json, md, html oder css (`Node.js`, `package.json`; `admin.php`, `poc.py`, `evil.com` bleiben Token) und
     `und/oder` zählen nie; sie sind im Kundentext legitim. Schneidet nie ab: `_quellen` lässt nur `poc` bis `_MAX_POC` Zeichen herein."""
     aus: dict[str, None] = {}
-    for roh in unicodedata.normalize("NFC", poc).split():
+    for roh in unicodedata.normalize("NFKC", poc).split():
         tok = roh.strip(_A_RAND)
         if (len(tok) >= 6 and (_A_ZEICHEN.intersection(tok) or _A_PUNKT.search(tok)) and not _TAUSENDER.fullmatch(tok)
                 and not _A_VERSION.fullmatch(tok) and not _A_DATEINAME.fullmatch(tok) and tok.casefold() != "und/oder"):
@@ -586,7 +587,7 @@ def _quellen(befunde: list) -> tuple[list[str], list[str], list[str], bool]:
     d: dict[str, None] = {}
 
     def pfad(p: str, voll: bool = False) -> None:
-        p = unicodedata.normalize("NFC", p[:10**4])
+        p = unicodedata.normalize("NFKC", p[:10**4])
         if not p:
             return
         if voll or "/" in p:
@@ -612,7 +613,7 @@ def _quellen(befunde: list) -> tuple[list[str], list[str], list[str], bool]:
         for eintrag in (cp if isinstance(cp, list) else []):
             if not isinstance(eintrag, str):
                 continue
-            e[unicodedata.normalize("NFC", eintrag[:10**4])] = None
+            e[unicodedata.normalize("NFKC", eintrag[:10**4])] = None
             if m := _CODE_PFAD.fullmatch(eintrag[:10**4]):
                 pfad(m.group(1))
     e.pop("", None)
@@ -672,7 +673,7 @@ def _felder_pruefen(befunde: list, zu_viele: bool, nadeln_a: "_Nadeln | None", n
             klein = text.lower()
             t = _regex_treffer(text, titel=feld == "titel")
             if "a" in regeln and zu_viele:
-                t["a"] = [_ZU_VIELE_TOKEN]
+                t["a"] = [ZU_VIELE_TOKEN]
             elif "a" in regeln and nadeln_a is not None and (hits := nadeln_a.finde(klein)):
                 t["a"] = [_kuerzen60(k) for k in hits]
             if "e" in regeln and nadeln_e is not None and nadeln_e.finde(klein):
@@ -712,6 +713,32 @@ def kunden_verstoesse(daten: object) -> list[tuple[str, str, str, str]]:
         return _felder_pruefen(befunde, zu_viele, nadeln_a, nadeln_e, nadeln_d)
     except _ZuVieleSchritte:
         return _felder_pruefen(befunde, True, None, None, None)
+
+
+def kopf_verstoesse(daten: object, felder: dict[str, object]) -> list[tuple[str, str, str]]:
+    """Verstöße der Kopfangaben (Projektname, Teilpfad: `felder` Name -> Wert), die im Kundenbericht stehen, ohne durch
+    `kunden_verstoesse` zu laufen, als (feld, regel, detail). Nur die Regeln `a` (Token aus einem `poc`) und `b` (HTTP-Methode mit
+    Pfad): Namen und Pfade sind sonst frei (Punkte, Bindestriche, Leerzeichen, Zahlen, `&`). Nach NFKC wie die Befundfelder; ein Wert,
+    der kein Text ist, bleibt außer Betracht. `detail` ist ein fester Text, nie der Wert und nie das Token. Fail-closed wie
+    `kunden_verstoesse` (zu viele Token, zu langer `poc`, verbrauchtes Arbeitsbudget: Regel a mit dem Detail „zu viele Token zum
+    Prüfen“); eine Ausnahme aus der Prüfung wird nicht verschluckt."""
+    befunde = daten["befunde"] if isinstance(daten, dict) and isinstance(daten.get("befunde"), list) else []
+    token, _e, _d, zu_viele = _quellen(befunde)
+    nadeln = _Nadeln([(k.lower(), k) for k in token])
+    aus: list[tuple[str, str, str]] = []
+    for feld, wert in felder.items():
+        text = _pruef_text(wert)
+        if text is None:
+            continue
+        try:
+            a = ZU_VIELE_TOKEN if zu_viele else (_KUNDEN_DETAIL["a"] if nadeln.finde(text.lower()) else None)
+        except _ZuVieleSchritte:
+            a = ZU_VIELE_TOKEN
+        if a:
+            aus.append((feld, "a", a))
+        if _REGEL_B.search(text):
+            aus.append((feld, "b", _KUNDEN_DETAIL["b"]))
+    return aus
 
 
 # ------------------------------------------------------------------------------------ Markdown

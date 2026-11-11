@@ -211,6 +211,7 @@ Das Skript schreibt `<basisname>-kunde.md` und `<basisname>-kunde.pdf` neben das
     - `fehlt`: Pflichtfeld des Befunds fehlt, `zusammenfassung` oder `massnahme` ist zu ergänzen
     - `schema`: Typ, Einzeiligkeit, unsichtbare Zeichen oder Länge verletzt, Detail ist die Schemameldung ohne den Wert
 - **Exit 3, 4, 5 oder 1** (`pdf-werkzeug-fehlt`, `pdf-fehler`, `eingabe`, `intern`): Keine Korrektur der Felder. Steht nach `kategorie:` eine Zeile `kunde-md:`, liegt das Markdown (das PDF fehlt) und die Schlussmeldung lautet „Kundenbericht nur als Markdown (<kategorie>)“, sonst „Kundenbericht nicht erstellt (<kategorie>)“. Exit 3 und 4 haben immer `kunde-md:`, Exit 5 und 1 nur, wenn das Markdown schon geschrieben war.
+  - Meldet Exit 5 `- projekt: Regel a` (oder `b`; auch `ordner`, `repo`, `teilpfad`), enthält diese Kopfangabe Text aus einem `poc` (Regel `a`) oder einen Request (Regel `b`). Der Kundenbericht entsteht nicht; nenne die Meldung in der Schlussmeldung. Der Name kommt vom Nutzer, ändere ihn nicht selbst.
 
 **Schreibregeln** für `zusammenfassung` und `massnahme` (und für einen umformulierten `titel`):
 

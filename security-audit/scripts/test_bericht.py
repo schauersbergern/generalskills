@@ -2108,3 +2108,53 @@ def test_kunden_verstoesse_zufallsdokumente_werfen_nie_haertung():
         assert isinstance(ergebnis, list) and all(isinstance(x, tuple) and len(x) == 4 for x in ergebnis)
         for wert in (zufall.choice(werte), zufall.choice(werte)):
             assert isinstance(bericht.text_verstoesse(wert), list)
+
+
+def test_kunden_verstoesse_vollbreite_und_kompatibilitaetszeichen_zaehlen_wie_gewoehnliche_haertung():
+    """Die Prüfung läuft nach NFKC: ein Leck in Vollbreiten-Zeichen (`／ａｐｉ／ｏｒｄｅｒｓ／９`, `ＧＥＴ ／ｘ`) oder mit Ligatur ist nicht mehr unsichtbar
+    für die Regeln (früher NFC: nur gleiche Schreibweise traf)."""
+    assert regeln(kd(massnahme=KD_VORSPANN + "Die Stelle ／ａｐｉ／ｏｒｄｅｒｓ／９ wird geändert.")) == ["a"]
+    assert regeln(kd(massnahme=KD_VORSPANN + "Rufen Sie ＧＥＴ ／status auf.")) == ["b"]
+    assert regeln(kd(massnahme=KD_VORSPANN + "Es hilft ｄｉｒ nicht weiter.")) == ["du"]
+    assert regeln(kd(massnahme=KD_VORSPANN + "Siehe Ｚｅｉｌｅ 4 im Code.")) == ["d"]
+    assert regeln(kd(massnahme=KD_VORSPANN + "Siehe ｈｔｔｐｓ：／／ａ．ｄｅ im Netz.")) == ["url"]
+    assert [t[3] for t in bericht.kunden_verstoesse(kd(massnahme=KD_VORSPANN + "Die Stelle ／ａｐｉ／ｏｒｄｅｒｓ／９ wird geändert."))] == ["/api/orders/9"]
+    # Pfade und poc-Token in Kompatibilitätsschreibweise treffen ebenso
+    assert regeln(kd(massnahme=KD_VORSPANN + "Betrifft ｓｒｃ／ａｐｉ／ｏｒｄｅｒｓ．ｔｓ im Code.")) == ["e"]
+    assert regeln(kd(massnahme=KD_VORSPANN + "Betrifft den Parameter ｏｒｇ＿ｉｄ im Code.")) == ["a"]
+    # gewöhnlicher Text bleibt frei (kein Fehlalarm durch NFKC)
+    assert regeln(kd(massnahme=KD_VORSPANN + "Der Aufwand beträgt ca. 2 Tage … je Standort (m²) für ½ Team.")) == []
+
+
+def test_kopf_verstoesse_regeln_a_und_b_fuer_projekt_und_teilpfad_haertung():
+    """Kopfangaben (Projektname, Teilpfad) stehen im Kundenbericht, ohne durch `kunden_verstoesse` zu laufen: ein poc-Token (Regel a) oder
+    ein Request (Regel b) darin ist ein Verstoß; gewöhnliche Namen und Pfade nicht. Das Detail ist fest, nie Wert oder Token."""
+    d = kd()
+    A, B = ("a", "Text aus einem poc"), ("b", "HTTP-Methode mit Pfad")
+    assert bericht.kopf_verstoesse(d, {"projekt": "Portal 2.0", "teilpfad": "apps/web/src"}) == []
+    assert bericht.kopf_verstoesse(d, {"projekt": "Kundenportal Müller & Söhne", "teilpfad": "apps/api_v2"}) == []
+    assert bericht.kopf_verstoesse(d, {"projekt": "/api/orders/9"}) == [("projekt", *A)]
+    assert bericht.kopf_verstoesse(d, {"projekt": "Portal org_id"}) == [("projekt", *A)]
+    assert bericht.kopf_verstoesse(d, {"projekt": "GET /status"}) == [("projekt", *B)]
+    assert bericht.kopf_verstoesse(d, {"projekt": "GET /api/orders/9", "teilpfad": "post /x"}) == [("projekt", *A), ("projekt", *B), ("teilpfad", *B)]
+    assert bericht.kopf_verstoesse(d, {"projekt": "ＧＥＴ ／status"}) == [("projekt", *B)]               # NFKC wie bei den Befundfeldern
+    assert bericht.kopf_verstoesse(d, {"projekt": 5, "teilpfad": None}) == []                           # kein Text: nichts zu prüfen
+    assert bericht.kopf_verstoesse(None, {"projekt": "GET /x"}) == [("projekt", *B)]                    # ohne Befunde: nur Regel b
+    assert bericht.ZU_VIELE_TOKEN == "zu viele Token zum Prüfen"
+
+
+def test_kopf_verstoesse_fail_closed_wie_bei_den_befundfeldern_haertung(monkeypatch):
+    fest = ("projekt", "a", "zu viele Token zum Prüfen")
+    d = kd(poc=_poc_mit_ende(10**6 + 1, " x"))
+    assert bericht.kopf_verstoesse(d, {"projekt": "Portal"}) == [fest]
+    monkeypatch.setattr(bericht, "_MAX_SCHRITTE", 1)
+    d = _poc_mit_praefix(2, 5)
+    assert bericht.kopf_verstoesse(d, {"projekt": "Die Seite /api/o"}) == [fest]
+
+
+def test_kopf_verstoesse_interner_fehler_wird_nicht_verschluckt_haertung(monkeypatch):
+    def kaputt(*_a, **_k):
+        raise RuntimeError("x")
+    monkeypatch.setattr(bericht, "_quellen", kaputt)
+    with pytest.raises(RuntimeError):
+        bericht.kopf_verstoesse(kd(), {"projekt": "Portal"})

@@ -12,8 +12,8 @@ Zeilengrenze: höchstens 30 Meldungszeilen, ohne `kategorie:`, `kunde-md:` und `
   2  `inhalt`            Kundenfelder fehlen oder verstoßen gegen die Inhaltsregeln; mit Feldkorrektur behebbar; keine Kundendateien
   3  `pdf-werkzeug-fehlt` pandoc oder weasyprint fehlt oder ist nicht startbar; nur das Markdown liegt (zweite Zeile `kunde-md:`)
   4  `pdf-fehler`        PDF-Kette gescheitert (HTML-Prüfung, stderr, leere oder zu große Datei, Timeout); nur das Markdown liegt
-  5  `eingabe`           Argumente, Eingabedatei, Kollision, Ziel, Schema außerhalb der Kundenfelder (nur ID und Feld, nie ein Wert), Schreiben;
-                         keine Korrektur
+  5  `eingabe`           Argumente, Eingabedatei, Kollision, Ziel, Schema außerhalb der Kundenfelder (nur ID und Feld, nie ein Wert), Kopfangaben
+                         (Projektname, Teilpfad) mit Exploit-Text (Regel a oder b, `- <feld>: Regel <regel>`), Schreiben; keine Korrektur
 
 Die Meldungen zu Exit 2 haben die Form `<id> <feld>: Regel <regel>[ (<detail>)]` und nennen nie den Treffertext; ausgenommen sind
 das Du-Wort und das Token bei Regel a (siehe bericht.kunden_verstoesse); bei mehr als 200000 Token in den `poc`-Feldern, einem `poc`
@@ -192,11 +192,28 @@ def _kappen(zeilen: list[str]) -> list[str]:
     return zeilen if len(zeilen) <= MAX_ZEILEN else zeilen[:MAX_ZEILEN] + [f"… und {len(zeilen) - MAX_ZEILEN} weitere"]
 
 
+def _kopfangaben(daten: dict) -> dict[str, object]:
+    """Was der Kopf zeigt und nicht durch `kunden_verstoesse` läuft: der Name (`projekt`, sonst `ordner`, sonst `repo`, wie `_name_und_hinweis`)
+    und der Teilpfad."""
+    felder: dict[str, object] = {}
+    for feld in ("projekt", "ordner", "repo"):
+        if _text(daten.get(feld)):
+            felder[feld] = daten[feld]
+            break
+    if _text(daten.get("teilpfad")):
+        felder["teilpfad"] = daten["teilpfad"]
+    return felder
+
+
 def _pruefen(daten: object) -> None:
     """Schema außerhalb der Kundenfelder (Exit 5), dann fehlende Felder, Feldschema und Inhaltsregeln (Exit 2)."""
     fehler = bericht.pruefe_schema(_ohne_kundenfelder(daten))
     if fehler:
         raise Abbruch(5, "eingabe", _kappen([f"Schemafehler außerhalb der Kundenfelder ({len(fehler)}):"] + _stellen(fehler)))
+    kopf = bericht.kopf_verstoesse(daten, _kopfangaben(daten))
+    echt = [(feld, regel) for feld, regel, detail in kopf if detail != bericht.ZU_VIELE_TOKEN]
+    if echt:            # Eingabe, keine Feldkorrektur: der Projektname kommt vom Nutzer, der Teilpfad aus dem Kontext
+        raise Abbruch(5, "eingabe", _kappen([f"Kopfangaben verstoßen gegen die Kundenregeln ({len(echt)}):"] + [f"- {feld}: Regel {regel}" for feld, regel in echt]))
     schema: dict[tuple[str, str], str] = {}
     fremd = []
     for meldung in bericht.pruefe_schema(daten):
@@ -219,6 +236,7 @@ def _pruefen(daten: object) -> None:
             elif (b["id"], feld) in schema:
                 treffer.append((b["id"], feld, "schema", schema[(b["id"], feld)]))
     treffer += bericht.kunden_verstoesse(daten)
+    treffer += [("Kopf", feld, regel, detail) for feld, regel, detail in kopf if detail == bericht.ZU_VIELE_TOKEN]       # nicht prüfbar: wie die Befundfelder
     if not treffer:
         return
     treffer.sort(key=lambda t: (reihenfolge.get(t[0], len(reihenfolge)), _FELD_REIHENFOLGE.get(t[1], 9)))

@@ -1892,7 +1892,7 @@ def test_skill_schritt_7_exit_folgen_und_zwei_korrekturrunden():
     zu_viele = _punkt(s7, r"^\s*- Meldet Regel `a`")
     assert zu_viele.strip() == ("- Meldet Regel `a` „zu viele Token zum Prüfen“, helfen Feldkorrekturen nicht; den `poc` kürzen. "
                                 "Das ist die einzige Ausnahme von „Alle anderen Felder bleiben unverändert“.")
-    assert bericht._ZU_VIELE_TOKEN == "zu viele Token zum Prüfen"
+    assert bericht.ZU_VIELE_TOKEN == "zu viele Token zum Prüfen"
 
 
 def test_skill_schritt_7_exit_3_4_5_1_eine_regel_fuer_kunde_md():
@@ -1915,6 +1915,22 @@ def test_skill_schritt_7_exit_3_4_5_1_eine_regel_fuer_kunde_md():
     assert "kategorie: <wert>" in quelle or "`kategorie: <wert>`" in quelle
     assert "`kategorie: <wert>`" in s7 and "`kunde-md:`" in s7 and "`kunde-pdf:`" in s7
     assert "return 1, \"intern\", zeilen +" in quelle and "Das PDF konnte nicht geschrieben werden." in quelle       # `kunde-md:` steht vor Exit 1 und 5
+
+
+def test_skill_schritt_7_exit_5_kopfangabe_haertung():
+    """TF4 Härtung: Ein Projektname, Ordner-, Repo-Name oder Teilpfad mit Text aus einem `poc` oder einem Request endet mit Exit 5 (keine
+    Feldkorrektur); SKILL.md sagt, was die Meldung heißt und dass der Kundenbericht dann nicht entsteht."""
+    s7 = _s7()
+    punkt = _punkt(s7, r"^\s*- Meldet Exit 5 `- projekt: Regel a`")
+    _kette(punkt, "`- projekt: Regel a`", "(oder `b`; auch `ordner`, `repo`, `teilpfad`)", "Text aus einem `poc` (Regel `a`) oder einen Request (Regel `b`)",
+           "Der Kundenbericht entsteht nicht", "Schlussmeldung", "Der Name kommt vom Nutzer")
+    assert "Korrigiere" not in punkt
+    k = _abschnitt(_lies(BERICHT_FORMAT), "Kundenbericht")
+    zeile = _tabellenzeilen(k[k.index("| Exit | `kategorie`"):k.index("\n\n", k.index("| Exit | `kategorie`"))])["5"]
+    assert "Projektname oder Teilpfad mit Exploit-Text (Regel `a` oder `b`, Meldung `- projekt: Regel a`)" in zeile[1] and "keine Korrektur" in zeile[2]
+    assert "leere oder zu große Datei" in k
+    quelle = _lies(os.path.join(HIER, "kundenbericht.py"))
+    assert "Kopfangaben verstoßen gegen die Kundenregeln" in quelle
 
 
 def test_skill_schritt_7_exit_0_pfade_in_die_schlussmeldung():
