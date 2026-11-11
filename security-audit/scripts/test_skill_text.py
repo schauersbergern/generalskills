@@ -878,3 +878,12 @@ def test_skill_zusagen_zur_schwaerzung_sind_nicht_endgueltig_haertung_q7():
     assert bericht_modul.MAX_PAKETE == 300 and bericht_modul.MAX_ADVISORIES == 20
     doc = _lies(os.path.join(HIER, "lieferkette.py"))
     assert "„geschwärzt“ heißt „soweit gitleaks sie erkennt“" in doc
+
+
+def test_fix_findings_oeffentliches_repo_kein_push():
+    """Entscheidung 2026-11-11 (PR #9): Audit-Listen werden bei öffentlichem oder unbestimmbarem Repo nicht gepusht."""
+    text = _lies(FIX_FINDINGS_MD)
+    assert "Bei `PUBLIC` oder wenn sie sich nicht bestimmen lässt: **kein Push**" in text
+    assert "Nicht gepusht: öffentliches Repo — Branch, Commits und Tests würden die Lücken vor dem Deploy offenlegen." in text
+    assert "Vor dem Push die Sichtbarkeit" in text
+    assert "Öffentliches Repo: Branch, Commits und Tests beschreiben die Lücken" not in text
