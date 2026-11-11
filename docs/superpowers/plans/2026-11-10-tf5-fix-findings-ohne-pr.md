@@ -107,3 +107,9 @@ Die Plan-Stellen verweisen auf die Spec-Schritte; die Änderungen stehen dort (S
 - **R1-3:** Ablauf 1 „Basis hereinholen“ nutzt `git merge --ff-only origin/<basis>`, kein Konfliktzweig (Schritt 7).
 - **R1-4:** Ablauf 5 „Audit-Liste“: Wird nicht gepusht, gilt das Repo als ohne CI (Schritt 9).
 - **R1-5:** Erkennung: `PR #[0-9]+ · `-Kopfzeile hat Vorrang (Schritt 1).
+
+## Nachtrag Review R2 (PR #9)
+
+- **R2-1:** Der Sonst-Zweig „Branch gepusht“ ohne compare-Link ist gestrichen (Spec 11); Test `test_fix_findings_kein_unerreichbarer_ohne_github_zweig`.
+- **R2-2:** Sichtbarkeit und compare-Link nutzen `git remote get-url --push origin` (Spec 10/11), der Default-Branch bleibt bei der Fetch-URL; Test `test_fix_findings_audit_weg_zielt_gh_explizit_auf_origin` prüft je Feld.
+- **R2-3:** `test_audit_erkennung_pr_kopfzeile_hat_vorrang` extrahiert das Vorrangmuster aus SKILL.md und matcht es gegen die Kopfzeilen-Vorlage aus `pr-review-loop/SKILL.md`.
