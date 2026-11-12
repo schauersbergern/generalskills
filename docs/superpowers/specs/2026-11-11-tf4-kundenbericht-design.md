@@ -344,3 +344,10 @@ W11: Das E-Mail-Muster ist `[\w.+-]+@[\w-]+(\.[\w-]+)*\.[A-Za-z]{2,}\b`; `name@1
 - **R1-6:** Eine Eingabe mit dem Dateinamen `.json` (in beliebigem Ordner) ist Exit 5.
 - **R1-7:** `--help` endet mit Exit 0, schreibt keine Dateien und nennt weder `kunde-md:` noch `kunde-pdf:`.
 - **R1-8 (nach R2-K-4):** `ordner` ist der Ordnername der Hauptkopie des Repos (im git-Worktree der Hauptordner), nicht der Basename von `wurzel`.
+
+## Nachträge nach PR-Review Runde 2 (Vorrang vor allem oben)
+
+- **R2-2 Regel b:** Lookbehind ohne `:` (also `Endpunkt:/api` und `C:/Users` zählen, `://` bleibt frei, weil nach dem ersten `/` kein Pfadzeichen folgt); `//pfad` zählt (nicht `://`); Schrägstrich auch als U+2215, U+2044, U+29F8; Pfadzeichen nach dem Strich: Wortzeichen und `. ~ % @ -`. Bekannte Fehlalarme (fail-closed): „500 €/Monat“, „01.01./31.12.“, „5 %/Jahr“, „bzw./oder“, „ca./etwa“, „Benutzer(innen)/Admin“; die Schreibregeln in SKILL.md Schritt 7 nennen sie. **Bekannte Grenzen:** `Endpunkt-/api` (ließe sich nicht ohne „Lese-/Schreibrechte“ lösen) und `file:///etc/hosts` (der Pfad folgt auf `//`) werden nicht erkannt.
+- **R2-3:** Der feste Detailtext von Regel b lautet „Request oder Pfad mit führendem Schrägstrich“.
+- **R2-4:** Zusätzlich zur Sperre auf die JSON sperrt jeder Lauf den Ausgabeordner (flock auf einen O_RDONLY-Deskriptor des Ordners, keine Sperrdatei). Er wartet höchstens 30 s darauf (`_ORDNER_WARTEN`), danach Exit 5. Läufe im selben Ordner (ein Ordner gehört einem Repo) laufen also nacheinander. Wird die JSON per rename ersetzt, sperrt ein anderer Lauf zwar eine neue Inode, wartet aber auf den Ordner und entfernt keine Kundendateien eines laufenden Laufs. `flock` auf einem Ordner setzt ein Dateisystem mit `flock` voraus (wie bisher auf der JSON; sonst Exit 5).
+- **R2-5:** Kopfangaben sind im Schema begrenzt: `projekt` 200, `repo` und `ordner` 100 (wie `kontext`), `teilpfad` 4096 Zeichen; sonst Schemafehler (Exit 5). Dadurch bleibt die vollständige Prüfung der Kopfangaben (R1-3) begrenzt.
