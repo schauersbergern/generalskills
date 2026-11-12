@@ -589,6 +589,194 @@ def test_schema_code_pfad_ungueltig(code_pfad):
     assert any("code_pfad" in f for f in bericht.pruefe_schema(d))
 
 
+# ------------------------------------------------------------------------------------ Werkzeugbefunde (TF2)
+
+def osv_befund(**kw):
+    b = befund(id="S-5", stufe="P2", status="unbestätigt", datei="package-lock.json", zeile=40, kategorie="A03",
+               titel="lodash 4.17.20 verwundbar", poc=None, code_pfad=["package-lock.json:40"],
+               werkzeug="osv-scanner",
+               pakete=[{"name": "lodash", "version": "4.17.20", "advisories": ["GHSA-35jh-r3h4-6jhm"]}])
+    del b["poc"]
+    b.update(kw)
+    return b
+
+
+def gitleaks_befund(**kw):
+    b = befund(id="S-6", stufe="P1", status="unbestätigt", datei="config/keys.js", zeile=1, kategorie="A07",
+               titel="Secret in der Historie", werkzeug="gitleaks", commits=["a" * 40, "b1b2c3d"],
+               code_pfad=["config/keys.js:1"])
+    del b["poc"]
+    b.update(kw)
+    return b
+
+
+def lieferkette_befund(**kw):
+    b = befund(id="S-7", stufe="P2", status="unbestätigt", datei="Dockerfile", zeile=3, kategorie="A03",
+               titel="npm install ohne Lockfile-Treue", werkzeug="lieferkette",
+               klasse="installation-ohne-lockfile-treue", code_pfad=["Dockerfile:3"])
+    del b["poc"]
+    b.update(kw)
+    return b
+
+
+def mit(*befunde):
+    d = beispiel()
+    d["befunde"] = list(befunde)
+    return d
+
+
+def test_schema_werkzeug_kopplung():
+    # gekoppelt: code_pfad mit einem Eintrag genügt
+    for b in (osv_befund(), gitleaks_befund(), lieferkette_befund()):
+        assert bericht.pruefe_schema(mit(b)) == [], b["werkzeug"]
+    # ohne werkzeug bleibt es bei mindestens 2 Einträgen
+    assert any("code_pfad" in f for f in bericht.pruefe_schema(mit(
+        befund(status="unbestätigt", code_pfad=["a.js:1"]))))
+    # osv-scanner ohne pakete
+    b = osv_befund()
+    del b["pakete"]
+    assert any("pakete" in f for f in bericht.pruefe_schema(mit(b)))
+    assert any("pakete" in f for f in bericht.pruefe_schema(mit(osv_befund(pakete=[]))))
+    # gitleaks ohne commits
+    b = gitleaks_befund()
+    del b["commits"]
+    assert any("commits" in f for f in bericht.pruefe_schema(mit(b)))
+    assert any("commits" in f for f in bericht.pruefe_schema(mit(gitleaks_befund(commits=[]))))
+    # lieferkette mit fremder klasse
+    assert any("klasse" in f for f in bericht.pruefe_schema(mit(lieferkette_befund(klasse="keine weiteren"))))
+    for klasse in ("lockfile-fehlt", "installation-ohne-lockfile-treue", "install-skripte-offen"):
+        assert bericht.pruefe_schema(mit(lieferkette_befund(klasse=klasse))) == [], klasse
+    # werkzeug + bestätigt
+    f = bericht.pruefe_schema(mit(osv_befund(status="bestätigt", poc="GET http://app:3000/x")))
+    assert any("bestätigt" in x and "werkzeug" in x for x in f)
+    # falsche Kategorie je Werkzeug
+    assert any("kategorie" in f for f in bericht.pruefe_schema(mit(osv_befund(kategorie="A07"))))
+    assert any("kategorie" in f for f in bericht.pruefe_schema(mit(gitleaks_befund(kategorie="A03"))))
+    assert any("kategorie" in f for f in bericht.pruefe_schema(mit(lieferkette_befund(kategorie="A05"))))
+
+
+def test_schema_werkzeug_ungekoppelt_braucht_zwei_code_pfade():
+    # Kopplung verletzt (fremde Klasse) heißt: kein Sonderrecht, code_pfad bleibt ≥ 2
+    f = bericht.pruefe_schema(mit(lieferkette_befund(klasse="keine weiteren")))
+    assert any("code_pfad" in x for x in f) and any("klasse" in x for x in f)
+    assert bericht.pruefe_schema(mit(lieferkette_befund(klasse="keine weiteren",
+                                                         code_pfad=["Dockerfile:3", "Dockerfile:4"]))) != []
+
+
+def test_schema_werkzeug_unbekannt():
+    f = bericht.pruefe_schema(mit(osv_befund(werkzeug="semgrep")))
+    assert any("werkzeug" in x for x in f)
+    assert any("code_pfad" in x for x in f)         # kein Sonderrecht für unbekanntes Werkzeug
+    assert any("werkzeug" in x for x in bericht.pruefe_schema(mit(osv_befund(werkzeug=["osv-scanner"]))))
+    assert any("werkzeug" in x for x in bericht.pruefe_schema(mit(osv_befund(werkzeug=None))))
+
+
+@pytest.mark.parametrize("commits", ["a" * 40, [123], ["xyz1234"], ["abc123"], ["A" * 40], ["a" * 65],
+                                     ["abcdef1"] * 21, [None]])
+def test_schema_commits_ungueltig(commits):
+    assert any("commits" in f for f in bericht.pruefe_schema(mit(gitleaks_befund(commits=commits))))
+
+
+def test_schema_commits_grenzen():
+    for commits in (["abcdef1"], ["a" * 64], ["abcdef1"] * 20):
+        assert bericht.pruefe_schema(mit(gitleaks_befund(commits=commits))) == [], commits
+
+
+@pytest.mark.parametrize("pakete", [
+    {"name": "x"}, ["lodash"], [{"version": "1", "advisories": []}], [{"name": "x", "advisories": []}],
+    [{"name": "x", "version": "1"}], [{"name": "x", "version": "1", "advisories": "GHSA-1"}],
+    [{"name": "x", "version": "1", "advisories": [1]}], [{"name": "x", "version": "1", "advisories": ["a\nb"]}],
+    [{"name": "", "version": "1", "advisories": []}], [{"name": "x", "version": 1, "advisories": []}],
+    [{"name": "x", "version": "1", "advisories": [], "kev": "ja"}], [{"name": "x", "version": "1", "advisories": [], "kev": 1}],
+    [{"name": "x", "version": "1", "advisories": [], "kev": 0}],
+    [{"name": "x", "version": "1", "advisories": [], "behoben_in": 5}]])
+def test_schema_pakete_ungueltig(pakete):
+    assert any("pakete" in f for f in bericht.pruefe_schema(mit(osv_befund(pakete=pakete))))
+
+
+def test_schema_pakete_optionale_felder():
+    pakete = [{"name": "lodash", "version": "4.17.20", "advisories": ["GHSA-1", "CVE-2021-23337"],
+               "behoben_in": "4.17.21", "kev": True},
+              {"name": "minimist", "version": "1.2.5", "advisories": ["GHSA-2"], "kev": None}]
+    assert bericht.pruefe_schema(mit(osv_befund(pakete=pakete))) == []
+
+
+def test_schema_pakete_und_advisories_sind_gekappt():
+    """Auch die Befund-Liste ist begrenzt: höchstens 300 Pakete je Befund, höchstens 20 Advisories je Paket (wie die Ausgabe von
+    `lieferkette.py abhaengigkeiten`); sonst wuchse das Markdown nur durch das 16-MiB-Limit begrenzt."""
+    assert bericht.MAX_PAKETE == 300 and bericht.MAX_ADVISORIES == 20
+    paket = {"name": "x", "version": "1", "advisories": ["GHSA-1"]}
+    assert bericht.pruefe_schema(mit(osv_befund(pakete=[paket] * 300))) == []
+    zu_viele = bericht.pruefe_schema(mit(osv_befund(pakete=[paket] * 301)))
+    assert any("pakete darf höchstens 300 Einträge haben, hat 301" in f for f in zu_viele), zu_viele
+    viele = {"name": "x", "version": "1", "advisories": [f"GHSA-{i}" for i in range(20)]}
+    assert bericht.pruefe_schema(mit(osv_befund(pakete=[viele]))) == []
+    viele["advisories"].append("GHSA-21")
+    f = bericht.pruefe_schema(mit(osv_befund(pakete=[viele])))
+    assert any("pakete[0].advisories darf höchstens 20 Einträge haben, hat 21" in x for x in f), f
+
+
+@pytest.mark.parametrize("fehlerhaft", [
+    lambda: befund(commits=["abcdef1"]),
+    lambda: befund(pakete=[{"name": "x", "version": "1", "advisories": []}]),
+    lambda: osv_befund(commits=["abcdef1"]),
+    lambda: gitleaks_befund(pakete=[{"name": "x", "version": "1", "advisories": []}]),
+    lambda: lieferkette_befund(commits=["abcdef1"]),
+    lambda: lieferkette_befund(pakete=[{"name": "x", "version": "1", "advisories": []}])])
+def test_schema_commits_pakete_ohne_passendes_werkzeug(fehlerhaft):
+    f = bericht.pruefe_schema(mit(fehlerhaft()))
+    assert any(("commits" in x or "pakete" in x) and "werkzeug" in x for x in f), f
+
+
+def test_schema_werkzeug_befund_verdacht_und_verworfen_ok():
+    # Status verdacht/verworfen brauchen kein code_pfad
+    b = osv_befund(status="verdacht")
+    del b["code_pfad"]
+    assert bericht.pruefe_schema(mit(b)) == []
+    b = osv_befund(status="verworfen", grund="g")
+    del b["code_pfad"]
+    assert bericht.pruefe_schema(mit(b)) == []
+
+
+def test_schema_werkzeug_code_pfad_format_bleibt_geprueft():
+    assert any("code_pfad" in f for f in bericht.pruefe_schema(mit(osv_befund(code_pfad=["../x:1"]))))
+    assert any("code_pfad" in f for f in bericht.pruefe_schema(mit(osv_befund(code_pfad=[]))))
+
+
+def test_markdown_werkzeugbefunde_commits_und_pakete_im_detail():
+    d = mit(osv_befund(pakete=[
+        {"name": "lodash", "version": "4.17.20", "advisories": ["GHSA-35jh-r3h4-6jhm", "CVE-2021-23337"]},
+        {"name": "minimist", "version": "1.2.5", "advisories": ["GHSA-xvch-5gv4-984h"]}]),
+        gitleaks_befund(commits=["1234567" + "a" * 33, "2345678" + "b" * 33]))
+    md = bericht.markdown(d)
+    assert "Commits: 1234567, 2345678" in md
+    assert "Pakete: lodash@4.17.20 (GHSA-35jh-r3h4-6jhm, CVE-2021-23337); minimist@1.2.5 (GHSA-xvch-5gv4-984h)" in md
+    # Befundliste (Codeblock) unverändert: weder Commits noch Pakete
+    block = "\n".join(codeblock(md))
+    assert "Commits" not in block and "Pakete" not in block and "lodash@" not in block
+    assert "S-5 [P2] package-lock.json:40 — lodash 4.17.20 verwundbar" in block
+
+
+def test_markdown_commits_gekappt_auf_fuenf():
+    commits = [f"{i}abcdef" for i in range(1, 9)]
+    md = bericht.markdown(mit(gitleaks_befund(commits=commits)))
+    assert "Commits: 1abcdef, 2abcdef, 3abcdef, 4abcdef, 5abcdef (+3)" in md
+    assert "6abcdef" not in md
+    md5 = bericht.markdown(mit(gitleaks_befund(commits=commits[:5])))
+    assert "Commits: 1abcdef, 2abcdef, 3abcdef, 4abcdef, 5abcdef" in md5 and "(+" not in md5
+
+
+def test_markdown_ohne_werkzeug_keine_commits_pakete_zeilen():
+    md = bericht.markdown(beispiel())
+    assert "Commits:" not in md and "Pakete:" not in md
+
+
+def test_markdown_pakete_escaped_backticks_und_leere_advisories():
+    d = mit(osv_befund(pakete=[{"name": "a`b", "version": "1", "advisories": []}]))
+    md = bericht.markdown(d)
+    assert "Pakete: a\\`b@1" in md and "()" not in md
+
+
 def test_schema_unbekannte_felder_erlaubt():
     d = beispiel()
     d["extra"] = {"x": 1}

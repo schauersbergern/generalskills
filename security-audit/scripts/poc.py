@@ -14,6 +14,12 @@ Aufruf (immer als einzelner einfacher Befehl, siehe Netzregel):
 Exit-Codes: 0 ok, 2 ungültige Argumente, 3 Docker fehlt oder Daemon nicht erreichbar, 4 Bau/Start scheitert
 (erste stdout-Zeile `kategorie: <wert>`, danach höchstens die letzten 40 Zeilen der Docker-Ausgabe),
 1 sonstiger Fehler (Request fehlgeschlagen, Befehl im Container mit Exit ≠ 0, Aufräumen unvollständig).
+
+`SECURITY_AUDIT_OHNE` (kommagetrennt): `docker` lässt `pruefen`, `bauen`, `starten` und `neustart` mit Exit 3 `docker-fehlt` enden.
+`bauen` verlangt den Schwärzungs-Marker (`schwaerz_marker`, gesetzt von `lieferkette.py secrets`; `vorbereiten` löscht ihn),
+solange gitleaks im PATH liegt und nicht in `SECURITY_AUDIT_OHNE` steht: sonst Exit 4 `kategorie: nicht-geschwaerzt`. Der Marker
+gilt nur für die Arbeitskopie, auf der `secrets` lief: er trägt deren Kennung (`id` aus `quelle.fertig`, bei jedem `vorbereiten`
+neu), eine andere oder fehlende Kennung zählt wie ein fehlender Marker. Er sagt nicht, dass die Kopie seither unverändert blieb.
 """
 from __future__ import annotations
 
@@ -109,6 +115,42 @@ def zustand_ordner(lauf: str) -> str:
     if os.path.commonpath([basis, pfad]) != basis or os.path.dirname(pfad) != basis:
         raise ValueError("Zustandsordner liegt nicht unter dem Temp-Ordner")
     return pfad
+
+
+def schwaerz_marker(lauf: str) -> str:
+    """Marker `<zustand>/lieferkette/geschwaerzt`: `lieferkette.py secrets` setzt ihn, sobald die Arbeitskopie geschwärzt ist
+    (auch ohne Treffer), mit der Kennung der Kopie (`kopie_kennung`); `vorbereiten` löscht ihn, `bauen` verlangt ihn samt
+    passender Kennung, solange gitleaks verfügbar ist."""
+    return os.path.join(zustand_ordner(lauf), "lieferkette", "geschwaerzt")
+
+
+def _regulaere_datei_lesen(pfad: str) -> object | None:
+    """JSON einer kleinen regulären Datei (kein Symlink, kein Ordner); None bei jedem Fehler."""
+    try:
+        if not stat.S_ISREG(os.lstat(pfad).st_mode):
+            return None
+        with open(pfad, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def kopie_kennung(lauf: str) -> str | None:
+    """Kennung der aktuellen Arbeitskopie: das Feld `id` des Fertig-Markers `quelle.fertig`, den `vorbereiten` mit jeder Kopie
+    atomar neu schreibt. None, wenn der Marker fehlt, kein Symlink-freies JSON-Objekt oder ohne nichtleeren Text `id` ist."""
+    daten = _regulaere_datei_lesen(os.path.join(zustand_ordner(lauf), "quelle.fertig"))
+    kennung = daten.get("id") if isinstance(daten, dict) else None
+    return kennung if isinstance(kennung, str) and kennung else None
+
+
+def _ohne_werkzeuge() -> set[str]:
+    """Namen aus `SECURITY_AUDIT_OHNE` (kommagetrennt, getrimmt, klein geschrieben): Werkzeuge, die der Aufrufer ausschließt."""
+    return {n.strip().casefold() for n in os.environ.get("SECURITY_AUDIT_OHNE", "").split(",") if n.strip()}
+
+
+def werkzeug_fehlt(name: str) -> bool:
+    """True, wenn `name` nicht im PATH liegt oder in `SECURITY_AUDIT_OHNE` steht. Der einzige Parser dieser Variable."""
+    return name.strip().casefold() in _ohne_werkzeuge() or shutil.which(name) is None
 
 
 def _ordner(lauf: str, anlegen: bool = False) -> str:
@@ -353,6 +395,8 @@ def _docker(args: list[str], timeout: int, eingabe: bytes | None = None, env: di
 
 
 def _daemon_pruefen() -> str:
+    if "docker" in _ohne_werkzeuge():         # zentral für pruefen, bauen, starten, neustart: kein docker-Aufruf
+        raise DockerFehlt("docker per SECURITY_AUDIT_OHNE ausgeschlossen")
     r = _docker(["version", "--format", "{{.Server.Version}}"], VERSION_TIMEOUT, budget=False)
     if not r.ok:
         grund = "Timeout" if r.rc is None else _tail(r.text, 3)
@@ -792,6 +836,7 @@ def cmd_vorbereiten(a: argparse.Namespace) -> int:
 
 
 def _vorbereiten(a: argparse.Namespace, repo: str, ordner: str, quelle: str, marker: str) -> int:
+    _entferne(schwaerz_marker(a.lauf), os.path.join(ordner, "lieferkette"))    # neue Kopie ist ungeschwärzt: `secrets` erneut
     _entferne(marker, ordner)          # erst der Marker, dann die Kopie: ein Absturz dazwischen hinterlässt keine „fertige“ Kopie
     _entferne(quelle, ordner)          # lokale Dateioperation: wird nicht unterbrochen, zählt aber gegen das Budget
     try:
@@ -812,9 +857,17 @@ def _vorbereiten(a: argparse.Namespace, repo: str, ordner: str, quelle: str, mar
     if any("Arbeitskopie unvollständig" in m for m in meldungen):
         print("kategorie: arbeitskopie-unvollstaendig")
         return 4
-    _schreibe_atomar(marker, {"fertig": True, "sha": kopiert, "repo": gitkopie.repo_name(repo)})
+    _schreibe_atomar(marker, {"fertig": True, "sha": kopiert, "repo": gitkopie.repo_name(repo), "id": secrets.token_hex(16)})
     print(quelle)
     return 0
+
+
+def _marker_gueltig(lauf: str) -> bool:
+    """Schwärzungs-Marker ist eine reguläre Datei (kein Symlink, kein Ordner, kein Gerät) und trägt die Kennung der aktuellen
+    Arbeitskopie (Feld `kopie`); ohne Kennung der Kopie gilt er nie."""
+    daten = _regulaere_datei_lesen(schwaerz_marker(lauf))
+    kennung = kopie_kennung(lauf)
+    return kennung is not None and isinstance(daten, dict) and daten.get("kopie") == kennung
 
 
 def cmd_bauen(a: argparse.Namespace) -> int:
@@ -826,6 +879,9 @@ def cmd_bauen(a: argparse.Namespace) -> int:
     if not os.path.isfile(os.path.join(ordner, "quelle.fertig")):
         raise PocFehler("Arbeitskopie unvollständig (kein Fertig-Marker, Abbruch beim Kopieren?): "
                         "erneut `poc.py vorbereiten --lauf … --repo …`")
+    if not werkzeug_fehlt("gitleaks") and not _marker_gueltig(a.lauf):
+        return _fehler_ende("nicht-geschwaerzt", "Arbeitskopie nicht auf Secrets geprüft und geschwärzt: erst "
+                            "`lieferkette.py secrets --lauf … --repo … --quelle … --sha …` (Marker fehlt), dann erneut bauen.")
     kategorie = lockfile_pruefen(quelle)
     if kategorie:
         return _fehler_ende(kategorie)

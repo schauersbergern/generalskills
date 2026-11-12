@@ -435,6 +435,28 @@ def test_geerbte_git_umgebung(tmp_path, monkeypatch):
     assert gitkopie.git(str(repo), "rev-parse", "--show-toplevel").stdout.strip()
 
 
+def test_werkzeug_umgebung_ohne_git_variablen(monkeypatch):
+    for name, wert in {"GIT_DIR": "/x", "GIT_WORK_TREE": "/y", "GIT_CONFIG_PARAMETERS": "'core.fsmonitor=/x'",
+                       "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath", "GIT_CONFIG_VALUE_0": "/h",
+                       "GIT_EXEC_PATH": "/e", "GIT_CONFIG_GLOBAL": "/geerbt", "GIT_NO_LAZY_FETCH": "0",
+                       "GITLEAKS_CONFIG": "/c", "GITLEAKS_CONFIG_TOML": "x", "GITLEAKS_BASELINE_PATH": "/b",
+                       "OSV_SCANNER_CONFIG": "/o", "OSV_ANYTHING": "1", "GITHUB_TOKEN": "bleibt",
+                       "MEIN_GIT_NAME": "bleibt"}.items():
+        monkeypatch.setenv(name, wert)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    env = gitkopie.werkzeug_umgebung()
+    assert not [k for k in env if k.startswith(("GITLEAKS_", "OSV_"))]
+    assert {k for k in env if k.startswith("GIT_")} == {
+        "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_NO_LAZY_FETCH", "GIT_TERMINAL_PROMPT", "GIT_OPTIONAL_LOCKS"}
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1" and env["GIT_CONFIG_GLOBAL"] == "/dev/null"
+    assert env["GIT_NO_LAZY_FETCH"] == "1" and env["GIT_TERMINAL_PROMPT"] == "0"
+    assert env["GIT_OPTIONAL_LOCKS"] == "0"
+    assert env["PATH"] == "/usr/bin:/bin" and env["HOME"] == os.environ["HOME"]
+    assert env["MEIN_GIT_NAME"] == "bleibt"
+    assert os.environ["GIT_DIR"] == "/x" and os.environ["GITLEAKS_CONFIG"] == "/c"   # Prozessumgebung unverändert
+    assert gitkopie.werkzeug_umgebung() is not env                                   # frische Kopie je Aufruf
+
+
 def test_git_wirft_giterror_und_liefert_bytes(tmp_path):
     repo = repo_mit(tmp_path, {"a.txt": b"a\n"})
     r = gitkopie.git(str(repo), "cat-file", "-p", "HEAD:a.txt")
@@ -1124,3 +1146,25 @@ def test_arbeitskopie_bricht_bei_erschoepfter_frist_ab_haertung_i3(tmp_path, mon
     meldungen = gitkopie.arbeitskopie(str(repo), str(ziel))
     assert any("Arbeitskopie unvollständig" in m and "Zeitbudget" in m for m in meldungen), meldungen
     assert not (ziel / "a.txt").exists() and not (ziel / "b.txt").exists()
+
+
+def test_gruppe_beenden_blockiert_nie_ohne_ende(monkeypatch):
+    """Entscheidung 2026-11-11 (PR #12): auch das letzte Einsammeln nach `proc.kill()` hat ein Zeitlimit. Attrappe statt
+    echtem Prozess; `os.killpg` ist ersetzt, es geht kein Signal an irgendeinen Prozess."""
+    import subprocess as sp
+    signale, getoetet, wartezeiten = [], [], []
+
+    class Attrappe:
+        pid = 999_999_999                              # nie benutzt: killpg ist ersetzt
+
+        def communicate(self, timeout=None):
+            wartezeiten.append(timeout)
+            raise sp.TimeoutExpired("attrappe", timeout)
+
+        def kill(self):
+            getoetet.append(True)
+
+    monkeypatch.setattr(gitkopie.os, "killpg", lambda pid, sig: signale.append((pid, sig)))
+    assert gitkopie._gruppe_beenden(Attrappe()) == (b"", b"")
+    assert [pid for pid, _ in signale] == [999_999_999, 999_999_999] and getoetet == [True]
+    assert None not in wartezeiten and len(wartezeiten) == 3

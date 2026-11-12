@@ -18,8 +18,10 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import signal
 import stat
 import subprocess
+import tempfile
 import threading
 import time
 import unicodedata
@@ -77,6 +79,79 @@ def _umgebung() -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_") or k == "GIT_EXEC_PATH"}
     env.update(GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0", GIT_NO_LAZY_FETCH="1")
     return env
+
+
+def werkzeug_umgebung() -> dict[str, str]:
+    """Umgebung für Werkzeuge (gitleaks, osv-scanner) und deren git-Aufrufe auf Kundenmaterial: ohne `GIT_*`, `GITLEAKS_*`
+    und `OSV_*` aus der Prozessumgebung (kein umgeleitetes Repo, keine Konfiguration, Allowlist oder Baseline von außen),
+    mit `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_NO_LAZY_FETCH=1`, `GIT_TERMINAL_PROMPT=0`,
+    `GIT_OPTIONAL_LOCKS=0`. Jeder Aufruf liefert ein neues Dict."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("GIT_", "GITLEAKS_", "OSV_"))}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null", GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0",
+               GIT_OPTIONAL_LOCKS="0")
+    return env
+
+
+AUSGABE_MAX = 16 * 1024 * 1024   # Bytes je Strom (stdout, stderr), die `werkzeug_ausfuehren` höchstens in den Speicher liest
+
+
+class Lauf(NamedTuple):
+    rc: int | None      # None = Zeitüberschreitung (die eigene Prozessgruppe wurde beendet)
+    out: bytes
+    err: bytes
+    abgeschnitten: bool = False      # stdout oder stderr war länger als `ausgabe_max`; `out`/`err` enthalten nur den Anfang
+
+
+def _gruppe_beenden(proc: subprocess.Popen) -> tuple[bytes, bytes]:
+    """Eigene, per `start_new_session=True` gestartete Prozessgruppe nach Zeitüberschreitung beenden (erst SIGTERM, nach 5 s
+    SIGKILL) und die Ströme einsammeln. `proc.pid` ist zugleich die Gruppen-ID; es gibt nie ein anderes Ziel, und der Prozess
+    ist hier noch nicht eingesammelt (keine PID-Wiederverwendung)."""
+    for sig, warten in ((signal.SIGTERM, 5), (signal.SIGKILL, 10)):
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            pass
+        try:
+            return proc.communicate(timeout=warten)
+        except subprocess.TimeoutExpired:
+            continue
+    proc.kill()                                       # letzte Rückfallebene: nur das eigene direkte Kind
+    try:
+        return proc.communicate(timeout=10)
+    except subprocess.TimeoutExpired:                 # Kind hängt im Kernel oder ein Enkel hält Ströme: nicht ewig blockieren
+        return b"", b""
+
+
+def _anfang_lesen(datei, grenze: int) -> tuple[bytes, bool]:
+    """Die ersten `grenze` Bytes einer Ausgabedatei und ob sie länger war."""
+    groesse = datei.seek(0, os.SEEK_END)
+    datei.seek(0)
+    return datei.read(grenze), groesse > grenze
+
+
+def werkzeug_ausfuehren(args: list[str], timeout: float, cwd: str, env: dict[str, str] | None = None,
+                        ausgabe_max: int = AUSGABE_MAX) -> Lauf:
+    """Werkzeug (gitleaks, osv-scanner, `git clone`) als eigene Sitzung starten (`start_new_session=True`), mit `timeout`
+    Sekunden. Bei Zeitüberschreitung wird nur diese selbst gestartete Gruppe beendet (`rc` ist dann None). Ohne `env` gilt
+    `werkzeug_umgebung()`; stdin ist /dev/null. stdout und stderr gehen in unbenannte Temp-Dateien (nie eine Pipe: auch ein
+    ausgebrochener Enkel kann nichts offen halten) und werden danach höchstens bis `ausgabe_max` Bytes je Strom gelesen
+    (`abgeschnitten`). Wirft GitFehler, wenn das Programm nicht startbar ist."""
+    with tempfile.TemporaryFile() as aus, tempfile.TemporaryFile() as fehler:
+        try:
+            proc = subprocess.Popen(args, cwd=cwd, env=env if env is not None else werkzeug_umgebung(),
+                                    stdin=subprocess.DEVNULL, stdout=aus, stderr=fehler, start_new_session=True)
+        except OSError as e:
+            raise GitFehler(f"{os.path.basename(args[0])} nicht startbar: {e}") from e
+        rc: int | None
+        try:
+            proc.communicate(timeout=max(timeout, 0.01))
+            rc = proc.returncode
+        except subprocess.TimeoutExpired:
+            _gruppe_beenden(proc)
+            rc = None
+        out, k1 = _anfang_lesen(aus, ausgabe_max)
+        err, k2 = _anfang_lesen(fehler, ausgabe_max)
+    return Lauf(rc, out, err, k1 or k2)
 
 
 def _befehl(repo: str, args: tuple[str, ...]) -> list[str]:
@@ -715,4 +790,39 @@ def repo_hinweise(repo: str, rev: str = "HEAD") -> list[str]:
             continue
         if aktuell != sha:
             hinweise.append(f"Uncommittete Änderung im Arbeitsbaum: {_t(pfad)}")
+    return hinweise
+
+
+# ------------------------------------------------------------------------------------ Spiegel für die Secret-Prüfung
+
+def _refs(repo: str) -> set[str]:
+    ausgabe = git(repo, "for-each-ref", "--format=%(refname)", timeout=120).stdout
+    return {os.fsdecode(z) for z in ausgabe.split(b"\n") if z}
+
+
+def spiegel(repo: str, ziel: str, frist: float) -> list[str]:
+    """Spiegelklon (`git clone --mirror --no-local`) der Repo-Wurzel `repo` nach `ziel` (darf nicht existieren), damit Werkzeuge
+    die Historie in einem Repo mit frischer Konfiguration lesen: kein Filter, kein Textconv, kein Fsmonitor und kein Hook aus der
+    Konfiguration des Kundenrepos. Der Klon läuft als eigene Prozessgruppe mit `werkzeug_umgebung()` und höchstens `frist`
+    Sekunden. Rückgabe: Hinweise (deutsch) zu Refs, die im Spiegel fehlen (z. B. `transfer.hideRefs`), und zu einer flachen
+    Quelle. Wirft ZeitbudgetFehler bei Fristablauf, GitFehler bei Fehlschlag; ein Teilklon bleibt dann liegen (der Aufrufer
+    löscht `ziel`)."""
+    if frist <= 0:
+        raise ZeitbudgetFehler("git clone --mirror: Zeitbudget erschöpft, nicht gestartet")
+    quelle = os.path.realpath(repo)
+    elternordner = os.path.dirname(os.path.realpath(ziel))
+    r = werkzeug_ausfuehren(["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "clone", "--mirror",
+                             "--no-local", "--quiet", "--", quelle, ziel], frist, elternordner)
+    if r.rc is None:
+        raise ZeitbudgetFehler(f"git clone --mirror: Zeitbudget erschöpft (Timeout nach {frist:g} s)")
+    if r.rc != 0:
+        raise GitFehler(f"git clone --mirror fehlgeschlagen (Exit {r.rc}): {_t(r.err.decode(errors='replace').strip(), 200)}",
+                        r.rc, r.err)
+    hinweise: list[str] = []
+    fehlend = sorted(_refs(quelle) - _refs(ziel))
+    if fehlend:
+        hinweise.append(f"Refs fehlen im Spiegel: {len(fehlend)} (z. B. {_t(fehlend[0])}); ihre Historie wurde nicht geprüft "
+                        f"(versteckt per transfer.hideRefs/uploadpack.hideRefs?)")
+    if git(quelle, "rev-parse", "--is-shallow-repository").stdout.strip() == b"true":
+        hinweise.append("Quelle ist flach (shallow): ältere Historie fehlt, Secret-Prüfung der Historie unvollständig")
     return hinweise

@@ -79,9 +79,11 @@ class Umgebung:
         self.config_datei.write_text(json.dumps(cfg))
 
     def env(self, **extra):
+        # SECURITY_AUDIT_OHNE=gitleaks: `bauen` verlangt sonst den Schwärzungs-Marker, sobald gitleaks auf dem Host liegt
         env = {"PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}", "HOME": str(self.home),
                "TMPDIR": str(self.tmp), "FAKE_DOCKER_LOG": str(self.log_datei),
-               "FAKE_DOCKER_CONFIG": str(self.config_datei), "GIT_CONFIG_NOSYSTEM": "1"}
+               "FAKE_DOCKER_CONFIG": str(self.config_datei), "GIT_CONFIG_NOSYSTEM": "1",
+               "SECURITY_AUDIT_OHNE": "gitleaks"}
         env.update(extra)
         return env
 
@@ -96,6 +98,31 @@ class Umgebung:
 
     def zustand(self, lauf=LAUF):
         return os.path.join(os.path.realpath(self.tmp), f"security-audit-{lauf}")
+
+    def fake_gitleaks(self):
+        """Fake-`gitleaks` im Shim-PATH (nur zum Auffinden; wird von `poc.py` nie aufgerufen)."""
+        fake = self.bin / "gitleaks"
+        fake.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(0)\n")
+        fake.chmod(0o755)
+        return fake
+
+    def marker(self, lauf=LAUF):
+        return os.path.join(self.zustand(lauf), "lieferkette", "geschwaerzt")
+
+    def marker_setzen(self, lauf=LAUF, kopie="aus-fertig-marker"):
+        """Schwärzungs-Marker wie `lieferkette.py secrets` ihn setzt: mit der Kennung der Arbeitskopie (`id` aus `quelle.fertig`,
+        sonst ein Platzhalter für Läufe ohne Arbeitskopie)."""
+        pfad = self.marker(lauf)
+        os.makedirs(os.path.dirname(pfad), exist_ok=True)
+        if kopie == "aus-fertig-marker":
+            try:
+                with open(os.path.join(self.zustand(lauf), "quelle.fertig"), encoding="utf-8") as f:
+                    kopie = json.load(f).get("id", "ohne-id")
+            except OSError:
+                kopie = "ohne-arbeitskopie"
+        with open(pfad, "w") as f:
+            json.dump({"geschwaerzt": 0, "sha": "0" * 40, "kopie": kopie}, f)
+        return pfad
 
 
 @pytest.fixture
@@ -536,6 +563,53 @@ def test_ohne_docker_binary(umg, tmp_path):
     assert "Docker" in r.stderr
 
 
+@pytest.mark.parametrize("befehl,ohne", [
+    (["pruefen"], "docker"),
+    (["bauen", "--lauf", LAUF], "gitleaks,docker"),
+    (["starten", "--lauf", LAUF, "--rolle", "p1", "--start-befehl", "x", "--port", "1"], "docker")])
+def test_daemon_pruefen_ohne_docker_exit3(umg, befehl, ohne):
+    """`SECURITY_AUDIT_OHNE=docker` wirkt zentral in `_daemon_pruefen`, obwohl ein (Fake-)docker im PATH liegt."""
+    umg.konfig({"version": {"rc": 0, "stdout": "29.1.3\n"}})
+    r = umg.poc(*befehl, env=umg.env(SECURITY_AUDIT_OHNE=ohne))
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert r.stdout.splitlines()[0] == "kategorie: docker-fehlt"
+    assert umg.aufrufe() == []                    # kein einziger docker-Aufruf
+
+
+def test_ohne_docker_trimmt_gross_klein_und_liste(umg):
+    umg.konfig({"version": {"rc": 0, "stdout": "29.1.3\n"}})
+    r = umg.poc("pruefen", env=umg.env(SECURITY_AUDIT_OHNE=" Gitleaks , DOCKER ,osv-scanner"))
+    assert r.returncode == 3 and r.stdout.splitlines()[0] == "kategorie: docker-fehlt"
+    r = umg.poc("pruefen", env=umg.env(SECURITY_AUDIT_OHNE="dockerx,gitleaks"))
+    assert r.returncode == 0, r.stderr
+
+
+def test_werkzeug_fehlt(umg, tmp_path, monkeypatch):
+    leer = tmp_path / "leer-bin"
+    leer.mkdir()
+    fake = umg.bin / "gitleaks"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{umg.bin}{os.pathsep}{leer}")
+    monkeypatch.delenv("SECURITY_AUDIT_OHNE", raising=False)
+    assert poc.werkzeug_fehlt("gitleaks") is False
+    assert poc.werkzeug_fehlt("osv-scanner") is True                  # nicht im PATH
+    monkeypatch.setenv("SECURITY_AUDIT_OHNE", "osv-scanner")
+    assert poc.werkzeug_fehlt("gitleaks") is False
+    monkeypatch.setenv("SECURITY_AUDIT_OHNE", " OSV-Scanner , Gitleaks ")
+    assert poc.werkzeug_fehlt("gitleaks") is True and poc.werkzeug_fehlt("GitLeaks") is True
+    monkeypatch.setenv("SECURITY_AUDIT_OHNE", "gitleaks-x,,")
+    assert poc.werkzeug_fehlt("gitleaks") is False
+    monkeypatch.setenv("SECURITY_AUDIT_OHNE", "")
+    assert poc.werkzeug_fehlt("gitleaks") is False
+
+
+def test_schwaerz_marker_pfad(temp_ordner):
+    assert poc.schwaerz_marker(LAUF) == os.path.join(poc.zustand_ordner(LAUF), "lieferkette", "geschwaerzt")
+    with pytest.raises(ValueError):
+        poc.schwaerz_marker("../x")
+
+
 def test_ohne_docker_binary_stdout_kategorie(umg, tmp_path):
     leer = tmp_path / "leer"
     leer.mkdir()
@@ -569,6 +643,36 @@ def test_vorbereiten_zweimal_ersetzt_kopie(umg, tmp_path):
     r = umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo)
     assert r.returncode == 0
     assert not os.path.exists(os.path.join(quelle, "fremd.txt"))
+
+
+def test_vorbereiten_loescht_marker(umg, tmp_path):
+    repo = repo_mit(tmp_path, MINI)
+    assert umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo).returncode == 0
+    marker = umg.marker_setzen()
+    daneben = os.path.join(os.path.dirname(marker), "andere-datei")
+    with open(daneben, "w") as f:
+        f.write("bleibt")
+    r = umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo)
+    assert r.returncode == 0, r.stderr
+    assert not os.path.lexists(marker)                         # nach dem Neuaufbau muss `secrets` erneut laufen
+    assert open(daneben).read() == "bleibt"                    # nur der Marker, nichts sonst unter lieferkette/
+
+
+def test_vorbereiten_ohne_marker_und_ohne_lieferkette_ordner(umg, tmp_path):
+    repo = repo_mit(tmp_path, MINI)
+    assert not os.path.exists(os.path.join(umg.zustand(), "lieferkette"))
+    assert umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo).returncode == 0
+    assert not os.path.exists(os.path.join(umg.zustand(), "lieferkette"))       # legt nichts an
+
+
+def test_vorbereiten_marker_symlink_wird_nur_als_link_entfernt(umg, tmp_path):
+    repo = repo_mit(tmp_path, MINI)
+    ziel = tmp_path / "ziel-datei"
+    ziel.write_text("fremd")
+    os.makedirs(os.path.join(umg.zustand(), "lieferkette"))
+    os.symlink(ziel, umg.marker())
+    assert umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo).returncode == 0
+    assert not os.path.lexists(umg.marker()) and ziel.read_text() == "fremd"
 
 
 def test_vorbereiten_repo_fehlt(umg, tmp_path):
@@ -657,6 +761,84 @@ def test_bauen_setzt_buildkit(umg, tmp_path):
     r = umg.poc("bauen", "--lauf", LAUF)
     assert r.returncode == 4
     assert "BK=1" in r.stdout
+
+
+# ---- Schwärzungs-Marker (TF2)
+
+def test_bauen_ohne_marker_mit_gitleaks_verweigert(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    umg.fake_gitleaks()
+    r = umg.poc("bauen", "--lauf", LAUF, env=umg.env(SECURITY_AUDIT_OHNE=""))
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert r.stdout.splitlines()[0] == "kategorie: nicht-geschwaerzt"
+    assert [a for a in umg.aufrufe() if a["args"][0] == "build"] == []
+
+
+def test_bauen_mit_marker_baut(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    umg.fake_gitleaks()
+    umg.marker_setzen()
+    r = umg.poc("bauen", "--lauf", LAUF, env=umg.env(SECURITY_AUDIT_OHNE=""))
+    assert r.returncode == 0, r.stdout + r.stderr
+    build_aufruf(umg)
+
+
+def test_bauen_ohne_gitleaks_im_path_baut(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    # PATH nur mit dem Fake-docker: kein gitleaks, also keine Marker-Pflicht
+    r = umg.poc("bauen", "--lauf", LAUF, env=umg.env(PATH=str(umg.bin), SECURITY_AUDIT_OHNE=""))
+    assert r.returncode == 0, r.stdout + r.stderr
+    build_aufruf(umg)
+
+
+def test_bauen_ohne_marker_bei_ohne_gitleaks_baut(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    umg.fake_gitleaks()
+    r = umg.poc("bauen", "--lauf", LAUF, env=umg.env(SECURITY_AUDIT_OHNE="osv-scanner, GITLEAKS"))
+    assert r.returncode == 0, r.stdout + r.stderr
+    build_aufruf(umg)
+
+
+def test_bauen_marker_pruefung_nach_daemon_pruefung(umg, tmp_path):
+    """Docker nicht erreichbar und Marker fehlt: zuerst docker-fehlt (Exit 3), nicht nicht-geschwaerzt."""
+    vorbereitet(umg, tmp_path)
+    umg.fake_gitleaks()
+    umg.konfig({"version": {"rc": 1, "stderr": "Cannot connect to the Docker daemon at unix:///x.sock"}})
+    r = umg.poc("bauen", "--lauf", LAUF, env=umg.env(SECURITY_AUDIT_OHNE=""))
+    assert r.returncode == 3
+    assert r.stdout.splitlines()[0] == "kategorie: docker-fehlt"
+
+
+def test_bauen_marker_ist_pro_lauf(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    umg.fake_gitleaks()
+    umg.marker_setzen(ANDERER_LAUF)                    # Marker eines anderen Laufs zählt nicht
+    r = umg.poc("bauen", "--lauf", LAUF, env=umg.env(SECURITY_AUDIT_OHNE=""))
+    assert r.returncode == 4 and r.stdout.splitlines()[0] == "kategorie: nicht-geschwaerzt"
+
+
+def test_bauen_ohne_arbeitskopie_meldet_arbeitskopie(umg):
+    """Kein Marker und keine Arbeitskopie: Exit 2 „Arbeitskopie fehlt“, nicht nicht-geschwaerzt."""
+    umg.fake_gitleaks()
+    os.makedirs(umg.zustand())
+    r = umg.poc("bauen", "--lauf", LAUF, env=umg.env(SECURITY_AUDIT_OHNE=""))
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "Arbeitskopie fehlt" in r.stderr and "nicht-geschwaerzt" not in r.stdout
+    assert [a for a in umg.aufrufe() if a["args"][0] == "build"] == []
+
+
+def test_bauen_marker_symlink_zaehlt_nicht(umg, tmp_path):
+    """Ein Symlink (auch auf eine existierende Datei) ist kein Marker: nur eine reguläre Datei zählt."""
+    vorbereitet(umg, tmp_path)
+    umg.fake_gitleaks()
+    ziel = tmp_path / "irgendeine-datei"
+    ziel.write_text("x")
+    pfad = umg.marker()
+    os.makedirs(os.path.dirname(pfad), exist_ok=True)
+    os.symlink(ziel, pfad)
+    r = umg.poc("bauen", "--lauf", LAUF, env=umg.env(SECURITY_AUDIT_OHNE=""))
+    assert r.returncode == 4 and r.stdout.splitlines()[0] == "kategorie: nicht-geschwaerzt"
+    assert [a for a in umg.aufrufe() if a["args"][0] == "build"] == []
 
 
 def test_bauen_ohne_quelle(umg):
@@ -1858,3 +2040,82 @@ def test_vorbereiten_mit_ausreichendem_budget_laeuft_normal_haertung_i3(umg, tmp
     r = umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo, env=umg.env(SECURITY_AUDIT_VORBEREITEN_BUDGET="120"))
     assert r.returncode == 0, r.stderr
     assert os.path.isfile(os.path.join(umg.zustand(), "quelle.fertig"))
+
+
+# ---- Härtung TF2: der Marker gehört zu genau einer Arbeitskopie
+
+def fertig_id(umg, lauf=LAUF):
+    with open(os.path.join(umg.zustand(lauf), "quelle.fertig"), encoding="utf-8") as f:
+        return json.load(f)["id"]
+
+
+def test_vorbereiten_vergibt_je_kopie_eine_neue_kennung(umg, tmp_path):
+    repo = repo_mit(tmp_path, MINI, name="kunde-kennung")
+    assert umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo).returncode == 0
+    erste = fertig_id(umg)
+    assert re.fullmatch(r"[0-9a-f]{32}", erste)
+    assert umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo).returncode == 0
+    assert fertig_id(umg) != erste
+
+
+def test_kopie_kennung_liest_die_id_aus_dem_fertig_marker(temp_ordner, tmp_path):
+    zustand = poc.zustand_ordner(LAUF)
+    assert poc.kopie_kennung(LAUF) is None                               # kein Zustandsordner
+    os.makedirs(zustand)
+    assert poc.kopie_kennung(LAUF) is None                               # kein Marker
+    for inhalt in ("", "kein json", "[]", '{"id": 5}', '{"id": ""}', '{"fertig": true}'):
+        with open(os.path.join(zustand, "quelle.fertig"), "w") as f:
+            f.write(inhalt)
+        assert poc.kopie_kennung(LAUF) is None, inhalt
+    with open(os.path.join(zustand, "quelle.fertig"), "w") as f:
+        f.write('{"fertig": true, "id": "abc123"}')
+    assert poc.kopie_kennung(LAUF) == "abc123"
+    os.unlink(os.path.join(zustand, "quelle.fertig"))
+    ziel = tmp_path / "anderswo.json"
+    ziel.write_text('{"id": "fremd"}')
+    os.symlink(ziel, os.path.join(zustand, "quelle.fertig"))
+    assert poc.kopie_kennung(LAUF) is None                               # ein Symlink ist kein Marker
+
+
+def test_bauen_marker_einer_anderen_kopie_verweigert(umg, tmp_path):
+    """Marker aus einer früheren Kopie (z. B. `secrets` lief über ein `vorbereiten` hinweg): kein Bau auf der neuen,
+    ungeschwärzten Kopie."""
+    vorbereitet(umg, tmp_path)
+    umg.fake_gitleaks()
+    umg.marker_setzen(kopie="0" * 32)
+    r = umg.poc("bauen", "--lauf", LAUF, env=umg.env(SECURITY_AUDIT_OHNE=""))
+    assert r.returncode == 4 and r.stdout.splitlines()[0] == "kategorie: nicht-geschwaerzt"
+    assert [a for a in umg.aufrufe() if a["args"][0] == "build"] == []
+
+
+@pytest.mark.parametrize("inhalt", ["", "kein json", "[]", '{"geschwaerzt": 0}', '{"kopie": 5}', '{"kopie": null}'])
+def test_bauen_marker_ohne_kennung_der_kopie_verweigert(umg, tmp_path, inhalt):
+    vorbereitet(umg, tmp_path)
+    umg.fake_gitleaks()
+    pfad = umg.marker()
+    os.makedirs(os.path.dirname(pfad), exist_ok=True)
+    with open(pfad, "w") as f:
+        f.write(inhalt)
+    r = umg.poc("bauen", "--lauf", LAUF, env=umg.env(SECURITY_AUDIT_OHNE=""))
+    assert r.returncode == 4 and r.stdout.splitlines()[0] == "kategorie: nicht-geschwaerzt"
+    assert [a for a in umg.aufrufe() if a["args"][0] == "build"] == []
+
+
+def test_poc_verweist_nur_auf_vorhandene_unterbefehle_von_lieferkette():
+    """Task 4 (Vorwärtsreferenz): Der Docstring von `poc.py` nennt `lieferkette.py secrets`; das Skript und der Unterbefehl
+    müssen existieren (die Referenz war bis Task 1 voraus)."""
+    quelle = open(os.path.join(SKILL, "scripts", "poc.py"), encoding="utf-8").read()
+    assert "`lieferkette.py secrets`" in quelle
+    lieferkette = open(os.path.join(SKILL, "scripts", "lieferkette.py"), encoding="utf-8").read()
+    assert 'sub.add_parser("secrets"' in lieferkette
+
+
+def test_bauen_marker_und_fertig_marker_ohne_kennung_gelten_nicht_als_gleich(umg, tmp_path):
+    """`None == None` darf nie als „gleiche Kopie“ zählen: ohne Kennung im Fertig-Marker gilt auch ein Marker mit `kopie: null` nicht."""
+    vorbereitet(umg, tmp_path)
+    umg.fake_gitleaks()
+    with open(os.path.join(umg.zustand(), "quelle.fertig"), "w") as f:
+        f.write('{"fertig": true}')
+    umg.marker_setzen(kopie=None)
+    r = umg.poc("bauen", "--lauf", LAUF, env=umg.env(SECURITY_AUDIT_OHNE=""))
+    assert r.returncode == 4 and r.stdout.splitlines()[0] == "kategorie: nicht-geschwaerzt"
