@@ -869,10 +869,10 @@ def test_skill_typische_fehler_netzregel_stimmt_fachlich_m6():
     lk = ("python3 -I /pfad/skill/scripts/lieferkette.py secrets --lauf 0a1b2c3d --repo /home/u/my.app.com "
           "--quelle /tmp/z/quelle --sha 0123456789abcdef0123456789abcdef01234567")
     assert netzregel.verstoesse_bash(lk, []) == [] and not netzregel.ist_poc_aufruf(lk)     # kein Fehlalarm, kein poc-Aufruf
-    assert netzregel.ist_poc_aufruf("python3 -I /pfad/skill/scripts/poc.py pruefen")
-    assert netzregel.verstoesse_bash("python3 -I /pfad/skill/scripts/poc.py pruefen && echo ok", []) == []   # Kette ohne URL
-    assert netzregel.verstoesse_bash("python3 -I /pfad/skill/scripts/poc.py anfrage --rolle p1 --url http://app:3000/x 2>&1", [])
-    assert not netzregel.ist_poc_aufruf("python3 -I /pfad/skill/scripts/poc.py pruefen && ls")
+    assert netzregel.ist_poc_aufruf("python3 -I /pfad/security-audit/scripts/poc.py pruefen")
+    assert netzregel.verstoesse_bash("python3 -I /pfad/security-audit/scripts/poc.py pruefen && echo ok", []) == []   # Kette ohne URL
+    assert netzregel.verstoesse_bash("python3 -I /pfad/security-audit/scripts/poc.py anfrage --rolle p1 --url http://app:3000/x 2>&1", [])
+    assert not netzregel.ist_poc_aufruf("python3 -I /pfad/security-audit/scripts/poc.py pruefen && ls")
 
 
 def test_beispiel_json_k8_text_m7():

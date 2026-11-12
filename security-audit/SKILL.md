@@ -162,7 +162,7 @@ Pfade von `.md` und `.json`, Zahl der Befunde je Stufe und Status, Zahl der Verw
 
 ## Typische Fehler
 
-- `poc.py` oder `lieferkette.py` in einer `&&`-Kette oder mit `2>&1`, `poc.py` auch mit Request-Body per `--daten`: Bei `poc.py` gilt ohne einfachen poc-Aufruf jede URL im Befehl als Verstoß (z. B. ein SSRF-Query `?url=http://…` im Pfad oder Body); die Kette oder `2>&1` allein ist keiner. Beide sind nach Grundregel 8 einzelne einfache Befehle, bei `lieferkette.py` wegen Grundregel 8 und der Eval-Rechte, nicht wegen der Netzregel: Sie meldet dort nur URLs, nicht erlaubte Hosts und Netzwerkwerkzeuge. Einzelner Befehl, Body per `--daten-datei`.
+- `poc.py` oder `lieferkette.py` in einer `&&`-Kette oder mit `2>&1`, `poc.py` auch mit Request-Body per `--daten`: Beide sind nach Grundregel 8 einzelne einfache Befehle, bei `lieferkette.py` wegen Grundregel 8 und der Eval-Rechte, nicht wegen der Netzregel. Die Netzregel meldet `poc.py`-Befehle in Ketten oder mit `2>&1` erst dann als Verstoß, wenn eine URL im Befehl steht (ohne einfachen poc-Aufruf gilt jede URL im Befehl als Verstoß, z. B. ein SSRF-Query `?url=http://…` im Pfad oder Body; die Kette oder `2>&1` allein ist keiner); bei `lieferkette.py` meldet sie nur URLs, nicht erlaubte Hosts und Netzwerkwerkzeuge. Einzelner Befehl, Body per `--daten-datei`.
 - Code per `cat`, `grep`, `find` oder `git` lesen: Read, Grep, Glob nutzen.
 - Dem Prüfer das Szenario des Reviewers mitgeben: er bestätigt dann, statt zu widerlegen.
 - Status `bestätigt` ohne `poc` oder `unbestätigt` ohne `code_pfad`: das Schema lehnt es ab.
