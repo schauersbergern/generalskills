@@ -28,8 +28,14 @@ TESTDATEN = os.path.join(HIER, "testdaten")
 SKILL = os.path.dirname(HIER)
 POC = "python3 /skill/security-audit/scripts/poc.py"
 MUSTER = ["fixture.invalid"]
+# Plan-Nachtrag R1 B2: fixture-web hat TF1-D1 bis D7 und wegen `ki_hinweis` TF3-D4
+DOD_WEB = {f"TF1-D{i}" for i in range(1, 8)} | {"TF3-D4"}
 # W6: Namen der Test-App `fixture-deps` dürfen im Skill-Text, in den references und im kopierten Skill nicht stehen
 VERBOTENE_NAMEN_TF2 = ("config/keys.js", "src/routes/vorlage.js", "_.template", "variable:", "lodash", "minimist")
+# R2 B1-neu: Namen und Marker der Test-App `fixture-ki` (dazu alle `dateien` der Erwartung außer generischen Namen) dürfen im
+# kopierten Skill nicht stehen
+VERBOTENE_NAMEN_TF3 = ("CRM_API_KEY", "datei_suchen", "send_email", "antwort-sicher", "tickets.js", "assistent.js", "fixture-ki",
+                       "ausgang.jsonl", "tok-mitarbeiter", "poc-dummy-crm", "poc-l2", "POCMARKER-ki-", "x@example.invalid")
 
 
 def _json(pfad):
@@ -383,7 +389,7 @@ def alles(bericht, erwartung, stream, **ueberschreibe):
 def test_auswerten_ok(bericht, erwartung, stream):
     ergebnis = alles(bericht, erwartung, stream)
     assert ergebnis["ok"] is True
-    assert set(ergebnis["dod"]) == {f"TF1-D{i}" for i in range(1, 8)}
+    assert set(ergebnis["dod"]) == DOD_WEB
     assert all(d["ok"] and d["details"] == [] for d in ergebnis["dod"].values())
     json.dumps(ergebnis)                                # serialisierbar (ergebnis.json)
 
@@ -900,7 +906,7 @@ def test_regeln_passen_zu_skill():
     regeln = run_eval.erlaubte_regeln(skill, aus, home)
     bash = [r for r in regeln if r.startswith("Bash(")]
     zeilen = _aufrufzeilen()
-    gesehen = {"poc": 0, "kontext": 0, "repo": 0, "rendern": 0, "add": 0, "lieferkette": 0}
+    gesehen = {"poc": 0, "kontext": 0, "repo": 0, "rendern": 0, "add": 0, "lieferkette": 0, "ki": 0}
     assert len(zeilen) >= 5
     for z in zeilen:
         z = z.replace("${CLAUDE_SKILL_DIR}", skill).replace("<SKILL_DIR>", skill)
@@ -909,11 +915,12 @@ def test_regeln_passen_zu_skill():
             continue
         assert any(_regel_passt(r, z) for r in bash), f"keine Regel für: {z}"
         for schluessel, marke in (("poc", "/poc.py "), ("kontext", "bericht.py kontext"), ("repo", "bericht.py repo"), ("rendern", "bericht.py rendern "),
-                                  ("add", "agent-stats.py add "), ("lieferkette", "/lieferkette.py ")):
+                                  ("add", "agent-stats.py add "), ("lieferkette", "/lieferkette.py "), ("ki", "/ki.py ")):
             gesehen[schluessel] += marke in z
     assert all(gesehen.values()), gesehen                                # jede Form kommt im Skill-Text vor
     assert f"Bash(python3 -I {skill}/scripts/poc.py *)" in regeln
     assert f"Bash(python3 -I {skill}/scripts/lieferkette.py *)" in regeln
+    assert f"Bash(python3 -I {skill}/scripts/ki.py *)" in regeln
     assert f"Bash(python3 -I {skill}/scripts/bericht.py kontext)" in regeln
     assert f"Bash(python3 -I {skill}/scripts/bericht.py kontext *)" in regeln
     assert f"Bash(python3 -I {skill}/scripts/bericht.py repo)" in regeln
@@ -968,6 +975,31 @@ def test_regeln_lieferkette_tf2():
                      f"python3 -I {skill}/scripts/gitkopie.py spiegel",                    # anderes Skript
                      f"python3 -I {skill}/scripts/lieferkette.pyx secrets",
                      f"python3 -I {skill}scripts/lieferkette.py secrets"):
+        assert not any(_regel_passt(r, schlecht) for r in bash), schlecht
+
+
+def test_regeln_ki_tf3():
+    """TF3: `ki.py erkennen` ist erlaubt (kopierter Skill, `-I`), jede Form aus SKILL.md und jede andere Skript-Datei nicht; `poc.py modell`
+    fällt unter die bestehende `poc.py`-Regel."""
+    skill, home, aus = "/tmp/x/.claude/skills/security-audit-eval", "/Users/test", "/tmp/x/ausgabe"
+    regeln = run_eval.erlaubte_regeln(skill, aus, home)
+    bash = [r for r in regeln if r.startswith("Bash(")]
+    assert regeln.count(f"Bash(python3 -I {skill}/scripts/ki.py *)") == 1
+    aufrufe = [z.replace("${CLAUDE_SKILL_DIR}", skill) for z in _aufrufzeilen() if "/ki.py" in z and "<skript>" not in z]
+    assert aufrufe and {z.split("ki.py ")[1].split()[0] for z in aufrufe} == {"erkennen"}
+    for z in aufrufe:
+        assert any(_regel_passt(r, z) for r in bash), z
+    assert any(_regel_passt(r, f"python3 -I {skill}/scripts/ki.py erkennen --lauf ab12cd34 --quelle /tmp/security-audit-ab12cd34/quelle")
+               for r in bash)
+    modell = [z.replace("${CLAUDE_SKILL_DIR}", skill).replace("<SKILL_DIR>", skill) for z in _aufrufzeilen() if "poc.py modell" in z]
+    assert modell
+    for z in modell:
+        assert any(_regel_passt(r, z) for r in bash), z
+    for schlecht in (f"python3 {skill}/scripts/ki.py erkennen --lauf a --quelle /q",                 # ohne -I
+                     f"python3 -I /etc/scripts/ki.py erkennen --lauf a --quelle /q",                 # fremder Skill-Ordner
+                     f"python3 -I {skill}/scripts/ki.pyx erkennen",
+                     f"python3 -I {skill}scripts/ki.py erkennen",
+                     f"python3 -I {skill}/scripts/llm.py erkennen"):
         assert not any(_regel_passt(r, schlecht) for r in bash), schlecht
 
 
@@ -1173,7 +1205,7 @@ def test_lauf_ok_und_aufruf(ev, capsys, monkeypatch):
     ev.modus("bericht")
     assert run_eval.main(["--fixture", "fixture-web", "--ohne", "a,b", "--prompt-art", "text"]) == 0
     ergebnis = json.loads(capsys.readouterr().out)
-    assert ergebnis["ok"] is True and set(ergebnis["dod"]) == {f"TF1-D{i}" for i in range(1, 8)}
+    assert ergebnis["ok"] is True and set(ergebnis["dod"]) == DOD_WEB
     assert all(d["ok"] for d in ergebnis["dod"].values())
     assert ev.temp_ordner() == []                                      # nach Exit 0 ohne --behalten entfernt
     smoke, lauf = ev.aufrufe(smoke=True), ev.aufrufe(smoke=False)
@@ -1427,7 +1459,17 @@ def test_signal_beendet_gruppe_und_raeumt_auf(ev, tmp_path, monkeypatch, sig, co
 def test_eval_fixture_web(capsys):
     assert run_eval.main(["--fixture", "fixture-web"]) == 0
     ergebnis = json.loads(capsys.readouterr().out)
-    assert set(ergebnis["dod"]) == {f"TF1-D{i}" for i in range(1, 8)}
+    assert set(ergebnis["dod"]) == DOD_WEB
+    assert all(d["ok"] for d in ergebnis["dod"].values()), ergebnis["dod"]
+
+
+@pytest.mark.skipif(os.environ.get("SECURITY_AUDIT_EVAL") != "1", reason="echter Eval-Lauf nur mit SECURITY_AUDIT_EVAL=1")
+def test_eval_fixture_ki(capsys):
+    """K6: `run_eval.py` bleibt unverändert; `start.modell_mock` der Erwartung ist Dokumentation und Vorgabe für `test_fixture.py`.
+    Genau TF1-D3 bis D7 und TF3-D1 bis D4 (Plan W3)."""
+    assert run_eval.main(["--fixture", "fixture-ki"]) == 0
+    ergebnis = json.loads(capsys.readouterr().out)
+    assert set(ergebnis["dod"]) == {f"TF1-D{i}" for i in range(3, 8)} | {f"TF3-D{i}" for i in range(1, 5)}
     assert all(d["ok"] for d in ergebnis["dod"].values()), ergebnis["dod"]
 
 
@@ -2035,7 +2077,7 @@ def test_flags_defaults(bericht, erwartung, stream):
     """Fehlende Flags: `koeder_pruefen` true, `secret` false, `werkzeug_hinweise` leer, `alle_unbestaetigt` false."""
     assert not {"koeder_pruefen", "secret", "werkzeug_hinweise", "alle_unbestaetigt"} & set(erwartung)
     e = alles(bericht, erwartung, stream)
-    assert set(e["dod"]) == {f"TF1-D{i}" for i in range(1, 8)} and e["ok"] is True
+    assert set(e["dod"]) == DOD_WEB and e["ok"] is True
     explizit = {**erwartung, "koeder_pruefen": True, "secret": False, "werkzeug_hinweise": [], "alle_unbestaetigt": False}
     assert alles(bericht, explizit, stream) == e
     assert set(alles(bericht, {**erwartung, "secret": True}, stream)["dod"]) >= {"TF2-D2"}
@@ -2249,13 +2291,15 @@ def test_auswertung_fixture_web_ohne_tf1_d1(bericht, erw_ohne, stream):
 
 
 def test_auswertung_regression_nur_tf1(bericht, erwartung, stream):
-    """TF2-D6: Mit der Erwartung `fixture-web.json` gelten genau TF1-D1 bis TF1-D7, auch wenn der Bericht Werkzeugbefunde enthält."""
+    """TF2-D6: TF1 vollständig, kein TF2-Schlüssel. Mit der Erwartung `fixture-web.json` gelten TF1-D1 bis TF1-D7 (und wegen
+    `ki_hinweis` TF3-D4), auch wenn der Bericht Werkzeugbefunde enthält; der Name bleibt (Plan-Nachtrag R2 K6)."""
     assert erwartung["fixture"] == "fixture-web"
-    e = alles(bericht, erwartung, stream)
-    assert set(e["dod"]) == {f"TF1-D{i}" for i in range(1, 8)} and e["ok"] is True
-    bericht["befunde"].append(wbefund(30, "osv-scanner", "package-lock.json", 5, "P2"))
-    e = alles(bericht, erwartung, stream)
-    assert set(e["dod"]) == {f"TF1-D{i}" for i in range(1, 8)} and e["ok"] is True
+    for _ in range(2):
+        e = alles(bericht, erwartung, stream)
+        assert {f"TF1-D{i}" for i in range(1, 8)} <= set(e["dod"]) and e["ok"] is True
+        assert not any(k.startswith("TF2-") for k in e["dod"])
+        assert set(e["dod"]) == DOD_WEB
+        bericht["befunde"].append(wbefund(30, "osv-scanner", "package-lock.json", 5, "P2"))
 
 
 # --- Köder-Ausnahme, Status-Kopplung ---
@@ -2524,11 +2568,11 @@ def test_erwartung_pfad_relativ_zu_evals_und_absolut(ev, tmp_path, monkeypatch, 
     absolut.write_text(json.dumps(ohne))
     assert run_eval.main(["--fixture", "fixture-web", "--erwartung", str(absolut), "--ohne-lockfile"]) == 0
     assert json.loads(capsys.readouterr().out)["lauf"]["erwartung"] == str(absolut)
-    # Standard: expected/<fixture>.json, nur TF1
+    # Standard: expected/<fixture>.json, TF1 und TF3-D4
     monkeypatch.setenv("FAKE_CLAUDE_BERICHT", os.path.join(TESTDATEN, "bericht_ok.json"))
     assert run_eval.main(["--fixture", "fixture-web"]) == 0
     e = json.loads(capsys.readouterr().out)
-    assert set(e["dod"]) == {f"TF1-D{i}" for i in range(1, 8)}
+    assert set(e["dod"]) == DOD_WEB
     assert e["lauf"]["erwartung"] == os.path.join(HIER, "expected", "fixture-web.json")
 
 
@@ -2663,6 +2707,39 @@ def test_temp_repo_deps_skill_ohne_erwartung(tmp_path, monkeypatch):
         shutil.rmtree(wurzel, ignore_errors=True)
 
 
+def test_temp_repo_ki_skill_ohne_erwartung(tmp_path, monkeypatch):
+    """R2 B1-neu/W10: Der kopierte Skill kennt weder `evals/` noch Namen, Pfade oder Marker der Test-App `fixture-ki` (sonst sähe
+    das Modell die Erwartung). Generische Namen (package.json, package-lock.json, Dockerfile) bleiben erlaubt. Die API-Hosts sind
+    ausgenommen: SKILL.md und agenten-briefings.md nennen sie im Satz von TF3-D3."""
+    wurzel, repo = _temp_repo(tmp_path, monkeypatch, "fixture-ki")
+    try:
+        skill = os.path.join(repo, ".claude", "skills", "security-audit-eval")
+        assert not os.path.exists(os.path.join(skill, "evals")) and not os.path.exists(os.path.join(repo, "expected"))
+        assert os.path.isfile(os.path.join(repo, "package.json")) and os.path.isfile(os.path.join(repo, "package-lock.json"))
+        assert not [n for _, _, ns in os.walk(repo) for n in ns if n.endswith(".tmpl")]
+        erw = _json(os.path.join(HIER, "expected", "fixture-ki.json"))
+        generisch = {"package.json", "package-lock.json", "Dockerfile"}
+        verboten = {d for e in erw["eintraege"] for d in e["dateien"]} - generisch
+        verboten |= {"fixture.invalid"} | set(VERBOTENE_NAMEN_TF3)
+        assert verboten >= {"src/agent/tickets.js", "src/agent/assistent.js", "src/agent/prompt.js", "src/routes/antwort.js",
+                            "src/routes/antwort-sicher.js", "CRM_API_KEY", "POCMARKER-ki-"}
+        dateien = [os.path.join(d, n) for d, _, ns in os.walk(skill) for n in ns]
+        assert dateien
+        for p in dateien:
+            with open(p, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+            for v in verboten:
+                assert v not in text, f"{v} in {p}"
+        assert sorted(os.listdir(skill)) == sorted(n for n in os.listdir(SKILL) if n not in ("evals", "__pycache__")
+                                                   and not n.startswith("."))
+        # die Test-App selbst ist im Temp-Repo vollständig (Quelle der Erwartung)
+        for e in erw["eintraege"]:
+            for d in e["dateien"]:
+                assert os.path.isfile(os.path.join(repo, d)), d
+    finally:
+        shutil.rmtree(wurzel, ignore_errors=True)
+
+
 def test_secret_wert_wird_neu_gezogen_bis_gitleaks_ihn_erkennt(monkeypatch):
     """Härtung Verifikation: übersieht gitleaks einen Zufallswert (Stoppwort), zieht der Einbau neu; ohne gitleaks gilt der erste."""
     antworten = iter([False, False, True])
@@ -2684,6 +2761,347 @@ def test_gitleaks_erkennt_stoppwort_wert_nicht():
     """Gemessener Fehlschlag (Stoppwort „fake“, Zufallswert ohne Bedeutung) vs. ein erkannter Wert."""
     assert run_eval._gitleaks_erkennt("ifAkeAplMhOAXoZW8qfDrVfz2bYsYGPX") is False
     assert run_eval._gitleaks_erkennt("Zq8Rk2Xw7Pv4Lm9Tn3Hb6Jc5Gd1Fs0Wy") is True
+
+
+# ------------------------------------------------------------------------------------ TF3: KI-Prüfpunkte (D1 bis D4)
+
+KI_HINWEIS_ANGEWENDET = "KI-Prüfpunkte: angewendet (openai)"
+KI_HINWEIS_NICHT = "KI-Prüfpunkte: nicht anwendbar (kein LLM- oder Agenten-SDK in package.json)"
+
+
+@pytest.fixture
+def erw_ki():
+    return _json(os.path.join(HIER, "expected", "fixture-ki.json"))
+
+
+def kbefund(nr, datei, kategorie, stufe="P1", status="bestätigt", **extra):
+    """Schema-gültiger KI-Befund (`bestätigt` mit `poc`, `unbestätigt` mit zwei Schritten im Code-Pfad)."""
+    b = {"id": f"S-{nr}", "stufe": stufe, "status": status, "datei": datei, "zeile": 10 + nr, "kategorie": kategorie,
+         "titel": f"KI-Befund {nr}", "beschreibung": "x", "szenario": "x", "erwartet": "x", "klasse": "x",
+         "ohne_anmeldung": False, "mandantenuebergreifend": False}
+    if status == "bestätigt":
+        b["poc"] = f"{POC} anfrage --lauf 0a1b2c3d --rolle p1 --pfad /x"
+    else:
+        b["code_pfad"] = ["src/a.js:3", "src/b.js:7"]
+    b.update(extra)
+    return b
+
+
+@pytest.fixture
+def ki_bericht():
+    """Bericht zu `fixture-ki`, der die Erwartung `fixture-ki.json` erfüllt (L1 bis L4, Köder verworfen)."""
+    return {"version": 1, "repo": "fixture-ki", "sha": "0" * 40, "datum": "2026-11-11", "teilpfad": None,
+            "projekt": None, "karte": [], "hinweise": [KI_HINWEIS_ANGEWENDET],
+            "befunde": [
+                kbefund(1, "src/agent/tickets.js", "A05"),
+                kbefund(2, "src/agent/assistent.js", "A05"),
+                kbefund(3, "src/routes/antwort.js", "A05", stufe="P2"),
+                kbefund(4, "src/agent/prompt.js", "A02", stufe="P2", status="unbestätigt"),
+                kbefund(5, "src/routes/antwort-sicher.js", "A05", stufe="P2", status="verworfen",
+                        grund="escapeHtml vor der Ausgabe")]}
+
+
+def _ki_dod(**k):
+    return {f"TF1-D{i}" for i in range(3, 8)} | {f"TF3-D{i}" for i in range(1, 5)}
+
+
+def test_erwartung_fixture_ki_inhalt(erw_ki):
+    """Spec §6 und R2-W5: vier Lücken (L4 auch in der Datei der Schleife), ein Köder, Muster, Hinweis, Start."""
+    assert erw_ki["fixture"] == "fixture-ki" and erw_ki["ki_hinweis"] == "angewendet"
+    assert erw_ki["verbotene_muster"] == ["fixture.invalid", "api.openai.com", "api.anthropic.com"]
+    assert erw_ki["start"]["modell_mock"] == ["openai"] and erw_ki["start"]["port"] == 3000 and erw_ki["start"]["befehl"]
+    eintraege = {e["id"]: e for e in erw_ki["eintraege"]}
+    assert [e["id"] for e in erw_ki["eintraege"]] == ["L1", "L2", "L3", "L4", "K1"]
+    assert {i: e["dod"] for i, e in eintraege.items()} == {"L1": "TF3-D1", "L2": "TF3-D1", "L3": "TF3-D1", "L4": "TF3-D1",
+                                                           "K1": "TF3-D2"}
+    assert (eintraege["L1"]["stufen"], eintraege["L1"]["kategorien"]) == (["P1"], ["A01", "A05"])
+    assert (eintraege["L2"]["stufen"], eintraege["L2"]["kategorien"]) == (["P1"], ["A05"])
+    assert (eintraege["L3"]["stufen"], eintraege["L3"]["kategorien"]) == (["P1", "P2", "P3"], ["A05"])
+    assert (eintraege["L4"]["stufen"], eintraege["L4"]["kategorien"]) == (["P1", "P2", "P3"], ["A01", "A02", "A04", "A07"])
+    assert len(eintraege["L4"]["dateien"]) == 2 and eintraege["L2"]["dateien"][0] in eintraege["L4"]["dateien"]
+    assert eintraege["K1"]["typ"] == "koeder" and all(e["typ"] == "luecke" for i, e in eintraege.items() if i != "K1")
+    assert erw_ki["nebenbefunde"]
+
+
+def test_erwartungen_ki_hinweis(erw_ki, erwartung):
+    """fixture-web: nicht anwendbar; fixture-web-ohne und fixture-deps bleiben ohne `ki_hinweis`."""
+    assert erwartung["ki_hinweis"] == "nicht anwendbar"
+    for name in ("fixture-web-ohne", "fixture-deps"):
+        assert "ki_hinweis" not in _json(os.path.join(HIER, "expected", f"{name}.json"))
+    assert erw_ki["ki_hinweis"] == "angewendet"
+
+
+def test_bericht_ok_traegt_den_ki_hinweis(bericht):
+    assert KI_HINWEIS_NICHT in bericht["hinweise"]
+
+
+# --- Filterparameter von pruefe_recall und pruefe_koeder ---
+
+def test_recall_koeder_filter_standard_ohne_dod(ki_bericht, erw_ki, bericht, erwartung):
+    """Standard: nur Einträge ohne `dod` (TF1-D1/D2); bei fixture-ki gibt es keine, bei fixture-web bleibt alles beim Alten."""
+    assert auswertung.pruefe_recall(ki_bericht, erw_ki) == [f"{auswertung.ERWARTUNG_LEER}: keine Lücken"]
+    assert auswertung.pruefe_koeder(ki_bericht, erw_ki) == [f"{auswertung.ERWARTUNG_LEER}: keine Köder"]
+    assert auswertung.pruefe_recall(bericht, erwartung) == [] and auswertung.pruefe_koeder(bericht, erwartung) == []
+    assert auswertung.pruefe_koeder(ki_bericht, erw_ki, dod="TF3-D2") == []
+    assert auswertung.pruefe_koeder(ki_bericht, erw_ki, dod="TF3-D9") == [f"{auswertung.ERWARTUNG_LEER}: keine Köder"]
+    assert auswertung.pruefe_recall(ki_bericht, erw_ki, dod="TF3-D9") == [f"{auswertung.ERWARTUNG_LEER}: keine Lücken"]
+
+
+# --- TF3-D1: Lücken gefunden ---
+
+def test_auswertung_tf3_d1_ok(ki_bericht, erw_ki, stream):
+    e = alles(ki_bericht, erw_ki, stream)
+    assert e["dod"]["TF3-D1"] == {"ok": True, "details": []}
+    assert auswertung.pruefe_ki_luecken(ki_bericht, erw_ki) == []
+
+
+def test_auswertung_tf3_d1_l2_nur_p2_rot(ki_bericht, erw_ki, stream):
+    befund(ki_bericht, "src/agent/assistent.js")["stufe"] = "P2"                # L2 erlaubt nur P1
+    e = alles(ki_bericht, erw_ki, stream)
+    d1 = e["dod"]["TF3-D1"]
+    assert d1["ok"] is False and e["ok"] is False
+    assert any("L2" in x and "P2" in x for x in d1["details"]) and not any("L1" in x or "L3" in x for x in d1["details"])
+
+
+def test_auswertung_tf3_d1_luecke_fehlt_rot(ki_bericht, erw_ki, stream):
+    for datei in ("src/agent/tickets.js", "src/routes/antwort.js"):
+        e = alles(ohne(copy.deepcopy(ki_bericht), datei), erw_ki, stream)
+        assert e["dod"]["TF3-D1"]["ok"] is False and e["ok"] is False, datei
+    # keine Toleranz: auch eine fehlende Lücke von vier ist rot (anders als TF1-D1 mit „alle bis auf eine“)
+    fehler = auswertung.pruefe_ki_luecken(ohne(ki_bericht, "src/agent/tickets.js"), erw_ki)
+    assert any("L1" in f and "nicht gefunden" in f for f in fehler)
+
+
+def test_auswertung_tf3_d1_status_und_kategorie(ki_bericht, erw_ki, stream):
+    """Nur `bestätigt`/`unbestätigt` zählt; die Kategorie muss zur Lücke passen; L4 nimmt beide Dateien."""
+    befund(ki_bericht, "src/agent/tickets.js")["status"] = "verdacht"
+    assert any("L1" in f for f in auswertung.pruefe_ki_luecken(ki_bericht, erw_ki))
+    befund(ki_bericht, "src/agent/tickets.js").update(status="bestätigt", kategorie="A09")
+    assert any("L1" in f for f in auswertung.pruefe_ki_luecken(ki_bericht, erw_ki))
+    befund(ki_bericht, "src/agent/tickets.js")["kategorie"] = "A01"
+    assert auswertung.pruefe_ki_luecken(ki_bericht, erw_ki) == []
+    # L4 über die Datei der Schleife (assistent.js, A07) statt prompt.js
+    befund(ki_bericht, "src/agent/prompt.js").update(datei="src/agent/assistent.js", kategorie="A07", zeile=99)
+    assert auswertung.pruefe_ki_luecken(ki_bericht, erw_ki) == []
+
+
+def test_auswertung_tf3_d1_ohne_bericht_und_stufen_fehlen(ki_bericht, erw_ki, stream):
+    e = alles(None, erw_ki, stream)
+    assert e["dod"]["TF3-D1"] == {"ok": False, "details": [auswertung.KEIN_BERICHT]}
+    kaputt = copy.deepcopy(erw_ki)
+    del kaputt["eintraege"][0]["stufen"]
+    assert any("L1" in f and "stufen" in f for f in auswertung.pruefe_ki_luecken(ki_bericht, kaputt))
+    assert auswertung.pruefe_ki_luecken(ki_bericht, {"eintraege": []}) == [f"{auswertung.ERWARTUNG_LEER}: keine Lücken"]
+
+
+# --- TF3-D2: Köder ---
+
+def test_auswertung_tf3_d2_koeder_p2_rot(ki_bericht, erw_ki, stream):
+    befund(ki_bericht, "src/routes/antwort-sicher.js").update(status="bestätigt", stufe="P2",
+                                                              poc=f"{POC} anfrage --lauf 0a1b2c3d --rolle p1 --pfad /x")
+    e = alles(ki_bericht, erw_ki, stream)
+    assert e["dod"]["TF3-D2"]["ok"] is False and any("K1" in x for x in e["dod"]["TF3-D2"]["details"])
+    assert e["dod"]["TF3-D1"]["ok"] is True and e["ok"] is False
+
+
+def test_auswertung_tf3_d2_koeder_p3_ok(ki_bericht, erw_ki, stream):
+    befund(ki_bericht, "src/routes/antwort-sicher.js").update(status="unbestätigt", stufe="P3", code_pfad=["a.js:1", "b.js:2"])
+    e = alles(ki_bericht, erw_ki, stream)
+    assert e["dod"]["TF3-D2"] == {"ok": True, "details": []} and e["ok"] is True
+
+
+def test_auswertung_tf3_d2_ohne_bericht(erw_ki, stream):
+    e = alles(None, erw_ki, stream)
+    assert e["dod"]["TF3-D2"] == {"ok": False, "details": [auswertung.KEIN_BERICHT]}
+
+
+# --- TF3-D3: kein Modell-API-Host im Stream ---
+
+def _ki_stream(stream, *zusatz):
+    return list(stream) + list(zusatz)
+
+
+def test_auswertung_tf3_d3_ok(ki_bericht, erw_ki, stream):
+    e = alles(ki_bericht, erw_ki, _ki_stream(stream, bash("k1", f"{POC} modell --lauf 0a1b2c3d --rolle p1 --protokoll")))
+    assert e["dod"]["TF3-D3"] == {"ok": True, "details": []}
+
+
+def test_auswertung_tf3_d3_api_host_im_bash_rot(ki_bericht, erw_ki, stream):
+    e = alles(ki_bericht, erw_ki, _ki_stream(stream, bash("k1", "curl -s https://api.openai.com/v1/models")))
+    assert e["dod"]["TF3-D3"]["ok"] is False and e["ok"] is False
+    assert any("api.openai.com" in x for x in e["dod"]["TF3-D3"]["details"])
+    e = alles(ki_bericht, erw_ki, _ki_stream(stream, bash("k2", "echo API.Anthropic.com")))      # Groß-/Kleinschreibung
+    assert any("api.anthropic.com" in x for x in e["dod"]["TF3-D3"]["details"])
+
+
+def test_auswertung_tf3_d3_url_kodiert_rot(ki_bericht, erw_ki, stream):
+    e = alles(ki_bericht, erw_ki, _ki_stream(stream, bash("k1", "echo https://api%2Eopenai%2Ecom/v1")))
+    assert e["dod"]["TF3-D3"]["ok"] is False and any("api.openai.com" in x for x in e["dod"]["TF3-D3"]["details"])
+
+
+def test_auswertung_tf3_d3_subagent_rot(ki_bericht, erw_ki, stream):
+    e = alles(ki_bericht, erw_ki, _ki_stream(stream, bash("k1", "echo api.anthropic.com", parent="t2")))
+    assert e["dod"]["TF3-D3"]["ok"] is False and any("Subagent" in x for x in e["dod"]["TF3-D3"]["details"])
+
+
+def test_auswertung_tf3_d3_letzte_zeile_rot(ki_bericht, erw_ki, stream):
+    zeile = ('{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t9", "name": "Bash", '
+             '"input": {"command": "curl https://api.anthropic.com/v1/messages')
+    e = alles(ki_bericht, erw_ki, stream, stream_uebersprungen=1, stream_nur_letzte=True, stream_letzte_zeile=zeile)
+    assert e["dod"]["TF3-D3"]["ok"] is False and any("letzte Stream-Zeile" in x for x in e["dod"]["TF3-D3"]["details"])
+    # R2 K14: von der letzten Zeile zählen nur die `command`-Werte, nicht der Rohtext
+    text = '{"type": "assistant", "message": {"content": [{"type": "text", "text": "api.openai.com ist gesperrt'
+    e = alles(ki_bericht, erw_ki, stream, stream_uebersprungen=1, stream_nur_letzte=True, stream_letzte_zeile=text)
+    assert e["dod"]["TF3-D3"]["ok"] is True
+    # mehr als eine unlesbare Zeile: die letzte Zeile wird nicht ausgewertet (wie TF1-D5), TF1-D5 ist dann rot
+    e = alles(ki_bericht, erw_ki, stream, stream_uebersprungen=2, stream_nur_letzte=True, stream_letzte_zeile=zeile)
+    assert e["dod"]["TF1-D5"]["ok"] is False
+
+
+def test_auswertung_tf3_d3_ohne_bericht_und_ohne_stream(ki_bericht, erw_ki, stream):
+    """Ohne Bericht auswertbar; ohne Stream rot („kein Stream“)."""
+    e = alles(None, erw_ki, _ki_stream(stream, bash("k1", "curl https://api.openai.com/")))
+    assert e["dod"]["TF3-D3"]["ok"] is False and auswertung.KEIN_BERICHT not in e["dod"]["TF3-D3"]["details"]
+    assert alles(None, erw_ki, stream)["dod"]["TF3-D3"]["ok"] is True
+    e = alles(ki_bericht, erw_ki, [])
+    assert e["dod"]["TF3-D3"] == {"ok": False, "details": ["kein Stream"]}
+
+
+def test_auswertung_tf3_d3_zu_tief_verschachtelt_rot(ki_bericht, erw_ki, stream):
+    tief = {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "z", "name": "Bash",
+                                                            "input": {"command": "echo ok"}}]}}
+    for _ in range(80):
+        tief = {"type": "user", "message": {"content": [tief]}}
+    e = alles(ki_bericht, erw_ki, _ki_stream(stream, tief))
+    assert e["dod"]["TF3-D3"]["ok"] is False and any("tief verschachtelt" in x for x in e["dod"]["TF3-D3"]["details"])
+
+
+def test_auswertung_tf3_d3_fixture_web_ohne_schluessel(bericht, erwartung, stream):
+    """fixture-web nennt keine API-Hosts und meldet `nicht anwendbar`: kein TF3-D3, und ein Host im Stream stört TF1-D5 nicht anders als bisher."""
+    assert "TF3-D3" not in alles(bericht, erwartung, stream)["dod"]
+
+
+def test_auswertung_tf3_d3_ausloeser_einzeln_haertung_m1(bericht, erwartung, stream):
+    """Härtung (Review 6a/6b M1): TF3-D3 entsteht aus jedem der beiden Auslöser einzeln, nicht erst aus beiden. Die Basis (fixture-web) hat
+    keinen: Ohne `ki_hinweis: angewendet` und ohne API-Host in `verbotene_muster` gibt es kein TF3-D3."""
+    assert "TF3-D3" not in alles(bericht, erwartung, stream)["dod"]
+    angewendet = copy.deepcopy(erwartung)
+    angewendet["ki_hinweis"] = "angewendet"
+    kb = copy.deepcopy(bericht)
+    kb["hinweise"] = [KI_HINWEIS_ANGEWENDET]
+    assert not any(a in " ".join(angewendet["verbotene_muster"]) for a in ("api.openai.com", "api.anthropic.com"))
+    e = alles(kb, angewendet, stream)
+    assert "TF3-D3" in e["dod"] and e["dod"]["TF3-D3"] == {"ok": True, "details": []}      # Auslöser 1: `ki_hinweis: angewendet`
+    for host in ("api.openai.com", "api.anthropic.com"):
+        nur_muster = copy.deepcopy(erwartung)
+        nur_muster["verbotene_muster"] = list(nur_muster["verbotene_muster"]) + [host]
+        assert nur_muster["ki_hinweis"] != "angewendet"
+        e = alles(bericht, nur_muster, stream)
+        assert "TF3-D3" in e["dod"], host                                                  # Auslöser 2: API-Host in `verbotene_muster`
+        gross = copy.deepcopy(nur_muster)
+        gross["verbotene_muster"] = [m.upper() for m in gross["verbotene_muster"]]         # `_verbotene` vergleicht ohne Großschreibung
+        assert "TF3-D3" in alles(bericht, gross, stream)["dod"], host
+    leer = copy.deepcopy(erwartung)
+    leer["verbotene_muster"] = [1, None, ["api.openai.com"]]                               # Nicht-Texte lösen nichts aus (und stürzen nicht ab)
+    assert "TF3-D3" not in alles(bericht, leer, stream)["dod"]
+
+
+# --- TF3-D4: Hinweis wörtlich ---
+
+def test_auswertung_tf3_d4_ok(ki_bericht, erw_ki, bericht, erwartung, stream):
+    assert alles(ki_bericht, erw_ki, stream)["dod"]["TF3-D4"] == {"ok": True, "details": []}
+    assert alles(bericht, erwartung, stream)["dod"]["TF3-D4"] == {"ok": True, "details": []}
+    ki_bericht["hinweise"] = ["Hinweis davor", unicodedata.normalize("NFD", "KI-Prüfpunkte: angewendet (ai, openai) – ok")]
+    assert auswertung.pruefe_ki_hinweis(ki_bericht, erw_ki) == []                       # Teilstring, NFC
+
+
+def test_auswertung_tf3_d4_angewendet_ohne_klammer_rot(ki_bericht, erw_ki, stream):
+    """6a/6b-Review M1 (A14): „angewendet“ nur mit der Paketliste in Klammern, wie ki.py sie schreibt."""
+    ki_bericht["hinweise"] = ["KI-Prüfpunkte: angewendet"]
+    assert alles(ki_bericht, erw_ki, stream)["dod"]["TF3-D4"]["ok"] is False
+    ki_bericht["hinweise"] = ["KI-Prüfpunkte: angewendet (openai)"]
+    assert alles(ki_bericht, erw_ki, stream)["dod"]["TF3-D4"]["ok"] is True
+
+
+def test_auswertung_tf3_d4_fehlender_hinweis_rot(bericht, erwartung, ki_bericht, erw_ki, stream):
+    bericht["hinweise"] = []
+    e = alles(bericht, erwartung, stream)
+    assert e["dod"]["TF3-D4"]["ok"] is False and e["ok"] is False
+    assert e["dod"]["TF1-D1"]["ok"] is True
+    # falscher Hinweis: bei fixture-ki „nicht anwendbar“ statt „angewendet“ und umgekehrt, Teilsatz reicht nicht
+    ki_bericht["hinweise"] = [KI_HINWEIS_NICHT]
+    assert alles(ki_bericht, erw_ki, stream)["dod"]["TF3-D4"]["ok"] is False
+    bericht["hinweise"] = [KI_HINWEIS_ANGEWENDET]
+    assert alles(bericht, erwartung, stream)["dod"]["TF3-D4"]["ok"] is False
+    bericht["hinweise"] = ["KI-Prüfpunkte: nicht anwendbar"]
+    assert alles(bericht, erwartung, stream)["dod"]["TF3-D4"]["ok"] is False
+    bericht["hinweise"] = [None, 5, {"x": 1}]
+    assert alles(bericht, erwartung, stream)["dod"]["TF3-D4"]["ok"] is False
+    del bericht["hinweise"]
+    assert alles(bericht, erwartung, stream)["dod"]["TF3-D4"]["ok"] is False
+
+
+def test_auswertung_tf3_d4_ohne_bericht(erwartung, stream):
+    assert alles(None, erwartung, stream)["dod"]["TF3-D4"] == {"ok": False, "details": [auswertung.KEIN_BERICHT]}
+
+
+@pytest.mark.parametrize("wert", ["bogus", "", None, 1, ["angewendet"], "Angewendet", {"a": 1}])
+def test_auswertung_tf3_d4_ki_hinweis_ungueltig_rot(bericht, erwartung, stream, wert):
+    e = alles(bericht, {**erwartung, "ki_hinweis": wert}, stream)
+    d4 = e["dod"]["TF3-D4"]
+    assert d4["ok"] is False and e["ok"] is False
+    assert any("ki_hinweis" in x for x in d4["details"])
+
+
+def test_auswertung_tf3_d4_ohne_ki_hinweis_kein_schluessel(bericht, stream):
+    """fixture-web-ohne und fixture-deps haben kein `ki_hinweis`: kein TF3-D4 (R1 B2)."""
+    ohne_ki = _json(os.path.join(HIER, "expected", "fixture-web-ohne.json"))
+    e = alles(ohne_bericht(bericht), ohne_ki, stream)
+    assert set(e["dod"]) == {f"TF1-D{i}" for i in range(1, 8)} | {"TF2-D4"} and e["ok"] is True
+
+
+# --- Schlüsselmenge ---
+
+def test_auswertung_tf3_schluessel_fixture_ki(ki_bericht, erw_ki, stream):
+    """Genau TF1-D3 bis D7 und TF3-D1 bis D4: TF1-D1/D2 entstehen nur aus Einträgen ohne `dod`, `leer` zählt alle Einträge."""
+    e = alles(ki_bericht, erw_ki, stream)
+    assert set(e["dod"]) == _ki_dod()
+    assert e["ok"] is True and all(d["ok"] and d["details"] == [] for d in e["dod"].values())
+    json.dumps(e)
+    assert list(e["dod"]) == sorted(e["dod"], key=lambda k: (k[:3] != "TF1", k))
+
+
+def test_auswertung_tf3_schluessel_ohne_bericht(erw_ki, stream):
+    e = alles(None, erw_ki, stream)
+    assert set(e["dod"]) == _ki_dod() and e["ok"] is False
+    assert all(e["dod"][k]["ok"] is False for k in ("TF1-D3", "TF3-D1", "TF3-D2", "TF3-D4"))
+
+
+def test_auswertung_tf3_schluessel_ungueltiges_dod(ki_bericht, erw_ki, stream):
+    """Eine Lücke mit falschem `dod` (oder ein Köder mit dem der Lücken) ist ein roter Schlüssel, nie stillschweigend TF1."""
+    for index, dod in ((0, "TF3-D2"), (1, "TF3-D9"), (4, "TF3-D1"), (2, "TF2-D1"), (3, "")):
+        kaputt = copy.deepcopy(erw_ki)
+        kaputt["eintraege"][index]["dod"] = dod
+        e = alles(ki_bericht, kaputt, stream)
+        assert e["dod"]["TF3-D?"]["ok"] is False and e["ok"] is False, (index, dod)
+        assert "TF1-D1" not in e["dod"] and "TF1-D2" not in e["dod"]
+
+
+def test_auswertung_tf3_luecken_ohne_dod_bleiben_tf1(ki_bericht, erw_ki, stream):
+    """Nimmt man das `dod` weg, gelten wieder TF1-D1/D2 (mit `stufe` statt `stufen`) und kein TF3-D1/D2."""
+    erw = copy.deepcopy(erw_ki)
+    for x in erw["eintraege"]:
+        x.pop("dod")
+        if x["typ"] == "luecke":
+            x["stufe"] = "P2"
+    e = alles(ki_bericht, erw, stream)
+    assert {"TF1-D1", "TF1-D2"} <= set(e["dod"]) and not {"TF3-D1", "TF3-D2"} & set(e["dod"])
+
+
+def test_auswertung_tf3_regression_tf2_erwartungen_unveraendert(bericht, erw_deps, erw_ohne, stream):
+    """TF2: fixture-deps und fixture-web-ohne behalten ihre Schlüsselmengen (kein TF3-Schlüssel)."""
+    for erw in (erw_deps, erw_ohne):
+        assert not any(k.startswith("TF3-") for k in alles(ohne_bericht(copy.deepcopy(bericht)), erw, stream)["dod"])
 
 
 def test_ungekoppelter_werkzeugbefund_zaehlt_nie_als_luecke_r1_10d(bericht, erwartung):

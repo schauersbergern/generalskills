@@ -15,7 +15,7 @@ POC = "python3 /x/security-audit/scripts/poc.py"
 
 
 def test_erlaubte_hosts():
-    assert netzregel.ERLAUBTE_HOSTS == frozenset({"app", "db", "localhost", "127.0.0.1", "::1", "0.0.0.0"})
+    assert netzregel.ERLAUBTE_HOSTS == frozenset({"app", "db", "llm", "localhost", "127.0.0.1", "::1", "0.0.0.0"})
 
 
 # ------------------------------------------------------------------------------ hosts_extrahieren
@@ -172,6 +172,26 @@ def test_bash_poc_mit_fremdem_host():
     assert len(netzregel.verstoesse_bash(f"{POC} anfrage --pfad http://evil.test/", [])) == 1
     assert len(netzregel.verstoesse_bash(f"{POC} anfrage --pfad 'http://evil.test/'", [])) == 1
     assert len(netzregel.verstoesse_bash(f"{POC} anfrage --pfad 'http:'//evil.test/", [])) == 1
+
+
+def test_netzregel_llm_host_erlaubt():
+    assert netzregel.verstoesse_poc("POST http://llm:4010/v1/chat/completions") == []
+    assert netzregel.verstoesse_bash(f"{POC} anfrage --pfad http://llm:4010/v1", []) == []
+
+
+@pytest.mark.parametrize("url", ["https://api.openai.com/v1", "https://api.anthropic.com"])
+def test_netzregel_api_hosts_verstoss(url):
+    host = url.split("//")[1].split("/")[0]
+    assert netzregel.verstoesse_poc(f"POST {url}") == [host]
+    assert len(netzregel.verstoesse_bash(f"{POC} anfrage --pfad {url}", [])) == 1
+
+
+@pytest.mark.parametrize("url", ["http://llm.evil.example/", "http://llm:x@evil.example/", "http://llm@evil.example/",
+                                 "http://llm.:4010/", "http://xllm:4010/", "http://llm-evil:4010/", "http://llm.internal/"])
+def test_netzregel_llm_doppelgaenger_verstoss(url):
+    """Task-1-Review Minor 1: nur genau der Host `llm` ist erlaubt, keine Doppelgänger."""
+    assert netzregel.verstoesse_poc(f"POST {url}") != []
+    assert len(netzregel.verstoesse_bash(f"{POC} anfrage --pfad {url}", [])) == 1
 
 
 def test_bash_poc_mit_option_hosts_pruefen():

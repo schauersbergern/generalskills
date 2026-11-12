@@ -1665,6 +1665,7 @@ class _Baum:
         self.pakete: list[tuple[str, int]] = []          # package.json
         self.texte: list[tuple[str, str, int]] = []      # (rel, art, größe) mit art docker | ci | make
         self.konfig: dict[tuple[str, str], tuple[str, int]] = {}    # (Ordner, Name) -> (rel, größe)
+        self.pfade_uebersprungen = 0                     # Pfade mit Steuerzeichen oder über PFAD_MAX (Dateien und Ordner)
 
 
 def _art(name: str, ordner: str) -> str | None:
@@ -1744,6 +1745,7 @@ def _baum_suchen(quelle: str, ende: float, s: _Sammler) -> _Baum:
 
 
 def _pfad_hinweise(baum: _Baum, steuer: int, lang: int, s: _Sammler) -> _Baum:
+    baum.pfade_uebersprungen = steuer + lang
     if steuer:
         s.hinweis(f"{steuer} Pfade mit Steuerzeichen oder ungültigen Zeichen übersprungen")
     if lang:

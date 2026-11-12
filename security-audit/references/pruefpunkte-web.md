@@ -73,13 +73,14 @@ Ein Befund je Regel und Datei, P1: ein Secret in der Git-Historie, auch wenn die
 
 ## A05 Injection
 
-- **Angriffsweg:** Eingabe verändert Struktur einer SQL-, Shell-, Template- oder NoSQL-Anweisung.
+- **Angriffsweg:** Eingabe verändert Struktur einer SQL-, Shell-, Template- oder NoSQL-Anweisung oder gelangt ungefiltert als HTML in eine Seite (XSS).
 - **Senken:**
   - SQL: `prisma.$queryRawUnsafe`/`$executeRawUnsafe`, `$queryRaw` als normaler Aufruf mit gebautem String (nur das Tagged Template `$queryRaw\`…\`` parametrisiert), `knex.raw`, `sequelize.query`, `pg`/`mysql2`/`sql.js` mit Template-Literal oder `+`.
   - Befehl: `child_process.exec`/`execSync`, `spawn` mit `shell: true`.
   - Template: `ejs.render`, `Handlebars.compile`, `pug.render` mit Nutzertext.
   - NoSQL: `find(req.body)` mit Operatoren (`$ne`, `$where`).
-- **Beleg:** PoC mit einer Eingabe, die das Ergebnis erkennbar ändert (zusätzliche Zeilen, Fehlertext der DB, verzögerte Antwort, Dateiinhalt). Code-Pfad zeigt, dass die Eingabe **ohne Parametrisierung** in die Senke gelangt. Spalten- oder Tabellennamen aus einer Whitelist sind kein Befund.
+  - HTML (XSS): `innerHTML`, `dangerouslySetInnerHTML`, `v-html`, `res.send` oder `res.write` mit HTML-Text aus Eingabe oder gespeicherten Daten, Template-Ausgabe ohne Escaping (`<%-`, `{{{ … }}}`, `| safe`). Das gilt unabhängig von KI; für Modellausgabe als Quelle siehe `pruefpunkte-ki.md` (K4). Stufe: P1, wenn der Inhalt gespeichert oder geteilt wird und andere Nutzer erreicht, sonst P2.
+- **Beleg:** PoC mit einer Eingabe, die das Ergebnis erkennbar ändert (zusätzliche Zeilen, Fehlertext der DB, verzögerte Antwort, Dateiinhalt). Code-Pfad zeigt, dass die Eingabe **ohne Parametrisierung** in die Senke gelangt. Spalten- oder Tabellennamen aus einer Whitelist sind kein Befund. Bei der HTML-Senke zeigt der PoC harmloses Markup (etwa `<b>poc</b>`), das in der Antwort mit Content-Type HTML unescaped zurückkommt; Escaping (Escape-Funktion, Template mit Auto-Escape) vor der Ausgabe entkräftet den Befund.
 
 ## A07 Authentication Failures
 

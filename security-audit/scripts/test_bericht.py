@@ -777,6 +777,130 @@ def test_markdown_pakete_escaped_backticks_und_leere_advisories():
     assert "Pakete: a\\`b@1" in md and "()" not in md
 
 
+# ------------------------------------------------------------------------------------ KI-Felder (TF3)
+
+def ki_befund(**kw):
+    return befund(owasp_ki=["ASI01", "LLM02"], annahme_modell=True, **{"klasse": "K1 Tool mit Wirkung", **kw})
+
+
+def test_schema_owasp_ki_gueltig():
+    for ids in (["ASI01"], ["ASI10", "LLM01", "LLM10"], ["LLM05"], ["ASI01", "ASI02", "ASI03"]):
+        assert bericht.pruefe_schema(mit(befund(owasp_ki=ids))) == [], ids
+    assert bericht.pruefe_schema(mit(ki_befund())) == []
+
+
+@pytest.mark.parametrize("ids", [
+    ["ASI00"], ["ASI11"], ["LLM00"], ["LLM11"], ["asi01"], ["ASI1"], ["ASI01 "], ["OWASP01"], ["A01"],      # falsche ID
+    [],                                                                                                   # leer
+    ["ASI01", "ASI02", "ASI03", "ASI04"],                                                                 # 4 IDs
+    ["ASI01", "ASI01"], ["ASI01", "LLM01", "ASI01"],                                                      # Duplikat
+    [1], [None], [["ASI01"]], [True], ["ASI01", 2],                                                       # Nicht-String
+    "ASI01", None, {"ASI01": 1}, 1])                                                                      # keine Liste
+def test_schema_owasp_ki_ungueltig(ids):
+    f = bericht.pruefe_schema(mit(befund(owasp_ki=ids)))
+    assert any("S-1" in x and "owasp_ki" in x for x in f), f
+
+
+@pytest.mark.parametrize("wert", ["true", 1, 0, None, "ja", [True]])
+def test_schema_annahme_modell_kein_bool(wert):
+    f = bericht.pruefe_schema(mit(befund(annahme_modell=wert)))
+    assert any("S-1" in x and "annahme_modell" in x for x in f), f
+
+
+def test_schema_annahme_modell_false_immer_ok():
+    for status in ("bestätigt", "unbestätigt", "verworfen", "verdacht"):
+        b = befund(status=status, annahme_modell=False)
+        if status == "unbestätigt":
+            b["code_pfad"] = ["src/a.js:1", "src/b.js:2"]
+        if status == "verworfen":
+            b["grund"] = "g"
+        assert bericht.pruefe_schema(mit(b)) == [], status
+
+
+@pytest.mark.parametrize("status", ["unbestätigt", "verworfen", "verdacht"])
+def test_schema_annahme_modell_true_nur_mit_bestaetigt(status):
+    b = befund(status=status, annahme_modell=True, code_pfad=["src/a.js:1", "src/b.js:2"], grund="g")
+    f = bericht.pruefe_schema(mit(b))
+    assert any("S-1" in x and "annahme_modell" in x and "bestätigt" in x for x in f), f
+
+
+def test_schema_annahme_modell_true_status_nfd_ist_bestaetigt():
+    import unicodedata
+    b = befund(status=unicodedata.normalize("NFD", "bestätigt"), annahme_modell=True, klasse="K1 Tool mit Wirkung")
+    assert not any("annahme_modell" in x for x in bericht.pruefe_schema(mit(b)))
+
+
+@pytest.mark.parametrize("klasse", ["K3 Tool-Rechte", "K5 Geheimnisse im Prompt", "K6 Speicher über Mandanten", "K7 MCP-Herkunft",
+                                    "keine weiteren", "K10 x", "k1 x", "K1x", "x K1 y"])
+def test_schema_annahme_modell_true_nur_bei_k1_k2_k4_review_r1_9(klasse):
+    """Review R1-9: `annahme_modell: true` gehört nur an bestätigte K1-, K2- und K4-Befunde. Sonst zeigte der Bericht „bestätigt (Modell-Mock,
+    Annahme: Modell folgt)“ bei einem Befund ohne Modellentscheidung."""
+    f = bericht.pruefe_schema(mit(befund(klasse=klasse, annahme_modell=True)))
+    assert any("S-1" in x and "annahme_modell" in x and "K1, K2 oder K4" in x for x in f), f
+    assert bericht.pruefe_schema(mit(befund(klasse=klasse, annahme_modell=False))) == []
+
+
+@pytest.mark.parametrize("klasse", ["K1 Tool mit Wirkung nach fremd befülltem Kontext", "K2 Tool-Argumente in Senke", "K4 Modellausgabe in Senke",
+                                    "K1 x", "K4 "])
+def test_schema_k1_k2_k4_bestaetigt_braucht_annahme_modell_haertung(klasse):
+    """Härtung (Frage 7): Ein bestätigter K1-, K2- oder K4-Befund beruht auf dem Modell-Mock. Ohne `annahme_modell: true` (vergessen von der
+    Hauptsession) liefe er als schlichtes „bestätigt“ ohne die Annahme durch; `rendern` lehnt das ab. Mit `annahme_modell: true` ist er gültig."""
+    f = bericht.pruefe_schema(mit(befund(klasse=klasse)))
+    assert any("S-1" in x and "annahme_modell" in x and "K1, K2 oder K4" in x for x in f), f
+    assert bericht.pruefe_schema(mit(befund(klasse=klasse, annahme_modell=False))) != []
+    assert bericht.pruefe_schema(mit(befund(klasse=klasse, annahme_modell=True))) == []
+    assert "Modell-Mock, Annahme" in bericht.markdown(mit(befund(klasse=klasse, annahme_modell=True)))
+
+
+@pytest.mark.parametrize("klasse", ["K3 Tool-Rechte", "K5 Geheimnis im Prompt", "K6 Speicher", "K7 MCP", "K10 x", "K1", "K1x", "k1 x", " K1 x",
+                                    "Injection K1 x", "keine weiteren", "x K2 y"])
+def test_schema_bestaetigt_ohne_k1_k2_k4_praefix_braucht_keine_annahme_haertung(klasse):
+    """Die Kopplung gilt nur bei dem Präfix `K1 `, `K2 ` oder `K4 ` am Anfang von `klasse` (so erkennt Schritt 6 den Fall)."""
+    assert bericht.pruefe_schema(mit(befund(klasse=klasse))) == [], klasse
+
+
+@pytest.mark.parametrize("wert", ["true", 1, None])
+def test_schema_k1_annahme_modell_kein_bool_meldet_nur_den_typfehler_haertung(wert):
+    """Ein `annahme_modell`, das kein Wahrheitswert ist, ergibt bei K1 nur den Typfehler, nicht zusätzlich den Fehler „braucht annahme_modell true“."""
+    f = [x for x in bericht.pruefe_schema(mit(befund(klasse="K1 x", annahme_modell=wert))) if "annahme_modell" in x]
+    assert len(f) == 1 and "muss true oder false sein" in f[0], f
+
+
+@pytest.mark.parametrize("status", ["unbestätigt", "verworfen", "verdacht"])
+def test_schema_k1_ohne_bestaetigt_braucht_keine_annahme_haertung(status):
+    b = befund(status=status, klasse="K1 Tool mit Wirkung nach fremd befülltem Kontext", code_pfad=["src/a.js:1", "src/b.js:2"], grund="g")
+    assert not any("annahme_modell" in x for x in bericht.pruefe_schema(mit(b)))
+
+
+def test_schema_ki_felder_optional():
+    b = befund()
+    assert "owasp_ki" not in b and "annahme_modell" not in b
+    assert bericht.pruefe_schema(mit(b)) == []
+
+
+def test_markdown_owasp_ki_detailzeile():
+    md = bericht.markdown(mit(befund(owasp_ki=["ASI01", "ASI02"])))
+    assert "- OWASP KI: ASI01, ASI02" in md.splitlines()
+    assert bericht.markdown(beispiel()).count("OWASP KI") == 0
+
+
+def test_markdown_annahme_modell_statusanzeige():
+    md = bericht.markdown(mit(ki_befund()))
+    assert "- Status: bestätigt (Modell-Mock, Annahme: Modell folgt)" in md.splitlines()
+    ohne = bericht.markdown(mit(befund(annahme_modell=False)))
+    assert "- Status: bestätigt" in ohne.splitlines() and "Modell-Mock" not in ohne
+    nur_ids = bericht.markdown(mit(befund(owasp_ki=["ASI01"])))
+    assert "Modell-Mock" not in nur_ids
+
+
+def test_markdown_ki_felder_lassen_befundliste_unveraendert():
+    basis = codeblock(bericht.markdown(mit(befund(klasse="K1 Tool mit Wirkung"))))
+    mit_ki = codeblock(bericht.markdown(mit(ki_befund())))
+    assert mit_ki == basis
+    block = "\n".join(mit_ki)
+    assert "OWASP" not in block and "Modell-Mock" not in block and "ASI01" not in block
+
+
 def test_schema_unbekannte_felder_erlaubt():
     d = beispiel()
     d["extra"] = {"x": 1}

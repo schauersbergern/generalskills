@@ -93,6 +93,20 @@ setTimeout(() => { console.log('fail'); process.exit(0); }, 8000);
 """
 
 
+HTTP_PROBE = """
+const http = require('http');
+const [host, pfad, body] = process.argv.slice(1);
+const q = http.request({host, port: 4010, path: pfad, method: 'POST', headers: {'content-type': 'application/json'}}, (r) => {
+  const t = [];
+  r.on('data', (c) => t.push(c));
+  r.on('end', () => { console.log(JSON.stringify({status: r.statusCode, body: Buffer.concat(t).toString()})); process.exit(0); });
+});
+q.on('error', (e) => { console.log(JSON.stringify({status: 0, body: String(e.code)})); process.exit(0); });
+q.setTimeout(8000, () => { console.log(JSON.stringify({status: 0, body: 'timeout'})); process.exit(0); });
+q.end(body);
+"""
+
+
 @pytest.fixture(scope="module")
 def stack(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("zustand")
@@ -272,6 +286,48 @@ def test_09_start_fehler_kategorie(stack):
     assert "gibt-es-nicht" in r.stdout
     # Netz der Rolle bleibt, Container sind entfernt.
     assert docker("ps", "-a", "--filter", f"name=security-audit-{stack.lauf}-p1-app", "--format", "{{.Names}}").stdout.strip() == ""
+
+
+def test_09b_modell_mock(stack, tmp_path):
+    """TF3: Modell-Mock `llm` im Netz der Rolle p1: nur die API ist erreichbar, der Container ist gehärtet, und `poc.py modell`
+    setzt Antworten und liest das Protokoll mit maskiertem `--env`-Wert. Kein Request an eine echte Modell-API (die Sperre nach
+    außen belegt test_05). Aufgeräumt wird in test_10 (`praefix_reste` deckt `-llm` ab)."""
+    geheim = "poc-dummy-abcdef"
+    r = stack.poc("starten", "--lauf", stack.lauf, "--rolle", "p1", "--start-befehl", "node server.js", "--port", "3000",
+                  "--modell-mock", "openai", "--env", f"X_TOKEN={geheim}", timeout=300)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "modell-mock: http://llm:4010 (openai)" in r.stdout.splitlines()
+    llm = f"{stack.netz}-llm"
+    assert stack.probe(stack.netz, TCP_PROBE, "llm", "4010") == "ok"
+    assert stack.probe(stack.netz, TCP_PROBE, "llm", "4011") == "fail"            # Steuerung lauscht nur auf 127.0.0.1 im Container
+    info = json.loads(docker("inspect", llm).stdout)[0]
+    host = info["HostConfig"]
+    assert host["ReadonlyRootfs"] is True
+    assert host["Tmpfs"] == {"/tmp": "rw,noexec,nosuid,size=16m"}
+    assert host["CapDrop"] == ["ALL"] and "no-new-privileges" in " ".join(host["SecurityOpt"])
+    assert host["Memory"] == 256 * 1024 ** 2 and host["PidsLimit"] == 64
+    assert not host.get("Binds") and not host.get("PortBindings")
+    assert list(info["NetworkSettings"]["Networks"]) == [stack.netz]
+    assert "llm" in info["NetworkSettings"]["Networks"][stack.netz]["Aliases"]
+    app_env = json.loads(docker("inspect", f"{stack.netz}-app").stdout)[0]["Config"]["Env"]
+    assert "OPENAI_BASE_URL=http://llm:4010/v1" in app_env and f"X_TOKEN={geheim}" in app_env
+    # Antworten setzen und per Probe-Request aus dem App-Netz abholen; der Request trägt den Wert und einen Marker.
+    antworten = tmp_path / "antworten.json"
+    antworten.write_text(json.dumps([{"text": "mock-antwort-docker", "wenn_enthaelt": "POCMARKER-docker-1"}]))
+    r = stack.poc("modell", "--lauf", stack.lauf, "--rolle", "p1", "--antworten-datei", str(antworten))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout == "modell: 1 Antworten gesetzt (Rolle p1)\n"
+    body = json.dumps({"model": "m", "messages": [{"role": "user", "content": f"POCMARKER-docker-1 {geheim}"}]})
+    antwort = json.loads(stack.probe(stack.netz, HTTP_PROBE, "llm", "/v1/chat/completions", body))
+    assert antwort["status"] == 200, antwort
+    assert json.loads(antwort["body"])["choices"][0]["message"]["content"] == "mock-antwort-docker"
+    r = stack.poc("modell", "--lauf", stack.lauf, "--rolle", "p1", "--protokoll")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert geheim not in r.stdout
+    eintraege = json.loads(r.stdout)["eintraege"]
+    assert len(eintraege) == 1 and "<ENV:X_TOKEN>" in eintraege[0]["body"] and "POCMARKER-docker-1" in eintraege[0]["body"]
+    r = stack.poc("modell", "--lauf", stack.lauf, "--rolle", "p1", "--protokoll", "--suche", "POCMARKER-docker-1")
+    assert r.returncode == 0 and "<ENV:X_TOKEN>" in r.stdout and geheim not in r.stdout
 
 
 def test_10_aufraeumen(stack):

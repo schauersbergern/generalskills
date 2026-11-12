@@ -1,4 +1,4 @@
-"""Tests für die Test-Apps evals/fixture-web und evals/fixture-deps und ihre Erwartungen unter evals/expected/.
+"""Tests für die Test-Apps evals/fixture-web, evals/fixture-deps und evals/fixture-ki und ihre Erwartungen unter evals/expected/.
 
 Aufruf: python3 -m pytest security-audit/evals/test_fixture.py -q
 test_server_startet und test_deps_server_startet laufen nur mit SECURITY_AUDIT_FIXTURE_START=1: Sie kopieren die App in ein
@@ -6,9 +6,16 @@ Temp-Verzeichnis, installieren dort mit `npm ci --ignore-scripts` (npm-Registry)
 Code, kein Kundencode). test_deps_osv_scanner_echt braucht zusätzlich SECURITY_AUDIT_FIXTURE_OSV=1 (osv-scanner, OSV-API).
 Lockfiles mit verwundbaren Versionen liegen im öffentlichen Repo nur als `.tmpl`; die Tests kopieren sie unter dem echten
 Namen in Temp-Ordner.
+test_ki_*_start laufen ebenfalls nur mit SECURITY_AUDIT_FIXTURE_START=1: Die App fixture-ki spricht ausschließlich mit dem
+lokalen Modell-Mock (docker/llm-mock.mjs auf 127.0.0.1, eigene Prozessgruppe), ihre Umgebung ist eine Whitelist und davor liegt der
+Wächter des SDK-Vertragstests (`node --import`, Treffer in `<wurzel>/waechter-treffer.jsonl`): jede Verbindung zu einem anderen Ziel als
+127.0.0.1 wird abgewiesen und festgehalten (nie eine echte Modell-API; der Wächter schützt vor Fehlkonfiguration, nicht vor bösartigem
+Code). Node >= 22 verlangt das SDK; ein anderes node wählt SECURITY_AUDIT_SDK_NODE=<pfad>.
 """
+import inspect
 import json
 import os
+import pathlib
 import re
 import shutil
 import signal
@@ -16,6 +23,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -29,8 +37,11 @@ import run_eval  # noqa: E402
 SKILL = os.path.dirname(HIER)
 FIXTURE = os.path.join(HIER, "fixture-web")
 FIXTURE_DEPS = os.path.join(HIER, "fixture-deps")
+FIXTURE_KI = os.path.join(HIER, "fixture-ki")
 ERWARTUNG = os.path.join(HIER, "expected", "fixture-web.json")
 ERWARTUNG_DEPS = os.path.join(HIER, "expected", "fixture-deps.json")
+ERWARTUNG_KI = os.path.join(HIER, "expected", "fixture-ki.json")
+MOCK = os.path.join(SKILL, "docker", "llm-mock.mjs")
 LOCKFILE = "package-lock.json.tmpl"
 LOCKFILES = (LOCKFILE,)
 
@@ -168,7 +179,8 @@ def test_app_fixtures_benennen_alle_tmpl_um(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", os.path.realpath(tmp_path))
     for fixture, erwartet in (("fixture-web", {"package-lock.json"}),
                               ("fixture-deps", {"package.json", "package-lock.json", "Dockerfile", "src/server.js",
-                                                "src/routes/vorlage.js"})):
+                                                "src/routes/vorlage.js"}),
+                              ("fixture-ki", {"package.json", "package-lock.json", "src/server.js", "src/llm.js"})):
         quelle = [os.path.relpath(p, os.path.join(HIER, fixture)) for p in dateien_unter(os.path.join(HIER, fixture))]
         tmpl = {p for p in quelle if p.endswith(".tmpl")}
         assert tmpl, fixture
@@ -182,8 +194,9 @@ def test_app_fixtures_benennen_alle_tmpl_um(tmp_path, monkeypatch):
             shutil.rmtree(wurzel, ignore_errors=True)
         assert tmpl == {p for p in (os.path.relpath(q, os.path.join(HIER, fixture))
                                     for q in dateien_unter(os.path.join(HIER, fixture))) if p.endswith(".tmpl")}
-    for datei in ("package.json", "package-lock.json"):
-        assert not os.path.exists(os.path.join(FIXTURE_DEPS, datei)), f"{datei} nur als .tmpl ablegen (öffentliches Repo)"
+    for ordner in (FIXTURE_DEPS, FIXTURE_KI):
+        for datei in ("package.json", "package-lock.json"):
+            assert not os.path.exists(os.path.join(ordner, datei)), f"{datei} nur als .tmpl ablegen (öffentliches Repo)"
 
 
 def test_deps_fixture_dateien_vollstaendig():
@@ -330,6 +343,178 @@ def test_deps_osv_scanner_echt(tmp_path):
         assert set(ids) <= gefunden.get(paket, set()), paket
 
 
+# --- fixture-ki ----------------------------------------------------------------------------------------------
+
+API_HOSTS = ("api.openai.com", "api.anthropic.com")
+KI_ROUTEN = {"L1": "src/agent/tickets.js", "L2": "src/agent/assistent.js", "L3": "src/routes/antwort.js",
+             "L4": "src/agent/prompt.js", "K1": "src/routes/antwort-sicher.js"}
+
+
+def erwartung_ki():
+    with open(ERWARTUNG_KI, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def ki_text(rel):
+    with open(os.path.join(FIXTURE_KI, rel), encoding="utf-8") as f:
+        return f.read()
+
+
+def ki_quellen():
+    """Alle JS-Dateien unter `src/` (relativer Pfad -> Text)."""
+    return {os.path.relpath(p, FIXTURE_KI): ki_text(os.path.relpath(p, FIXTURE_KI))
+            for p in dateien_unter(os.path.join(FIXTURE_KI, "src"))}
+
+
+def ki_lockfile():
+    with open(os.path.join(FIXTURE_KI, "package-lock.json.tmpl"), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def ki_manifest():
+    with open(os.path.join(FIXTURE_KI, "package.json.tmpl"), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def test_ki_fixture_erwartung_schema():
+    e = erwartung_ki()
+    assert e["fixture"] == "fixture-ki"
+    assert e["verbotene_muster"] == ["fixture.invalid", "api.openai.com", "api.anthropic.com"]
+    assert e["ki_hinweis"] == "angewendet"
+    assert e["start"] == {"befehl": "node src/server.js", "port": 3000, "modell_mock": ["openai"]}
+    assert isinstance(e["nebenbefunde"], list) and e["nebenbefunde"]
+    assert all(isinstance(x, str) and x for x in e["nebenbefunde"])
+    assert [x["id"] for x in e["eintraege"]] == ["L1", "L2", "L3", "L4", "K1"]
+    for x in e["eintraege"]:
+        assert x["dateien"] and all(os.path.isfile(os.path.join(FIXTURE_KI, d)) for d in x["dateien"]), x["id"]
+        assert KI_ROUTEN[x["id"]] in x["dateien"], x["id"]
+        if x["typ"] == "luecke":
+            assert x["dod"] == "TF3-D1" and x["stufen"] and set(x["stufen"]) <= {"P1", "P2", "P3"}
+            assert x["kategorien"] and all(re.fullmatch(r"A(0[1-9]|10)", k) for k in x["kategorien"])
+        else:
+            assert x["typ"] == "koeder" and x["dod"] == "TF3-D2" and x["id"] == "K1"
+
+
+def test_ki_fixture_dateien_vollstaendig():
+    for pflicht in ("package.json.tmpl", "package-lock.json.tmpl", "README.md", ".env.example", "src/server.js", "src/auth.js",
+                    "src/llm.js", "src/agent/tickets.js", "src/agent/assistent.js", "src/agent/prompt.js",
+                    "src/routes/antwort.js", "src/routes/antwort-sicher.js"):
+        assert os.path.isfile(os.path.join(FIXTURE_KI, pflicht)), pflicht
+    assert ki_text(".env.example") == "CRM_API_KEY=poc-dummy-crm\n"
+    server = ki_text("src/server.js")
+    assert 'app.get("/health"' in server and 'app.get("/"' in server
+    assert re.search(r"tok-mitarbeiter-a", ki_text("src/auth.js")) and re.search(r"tok-mitarbeiter-b", ki_text("src/auth.js"))
+
+
+def test_ki_fixture_trennung_der_dateien():
+    """W5: Jede Lücke hat ihre eigene Datei mit eigener Schleife und eigenen Tools; keine Lücken-Datei enthält die Senke einer
+    anderen. Gemeinsam ist nur `src/llm.js`."""
+    q = ki_quellen()
+    assert set(q) == {"src/server.js", "src/auth.js", "src/llm.js", "src/agent/tickets.js", "src/agent/assistent.js",
+                      "src/agent/prompt.js", "src/routes/antwort.js", "src/routes/antwort-sicher.js"}
+
+    def nur_in(muster, erlaubt):
+        treffer = {p for p, t in q.items() if re.search(muster, t)}
+        assert treffer == set(erlaubt), (muster, sorted(treffer))
+
+    nur_in(r"\bexec(Sync|File|FileSync)?\b|child_process|\bspawn", {"src/agent/assistent.js"})
+    nur_in(r"datei_suchen", {"src/agent/assistent.js"})
+    nur_in(r"send_email", {"src/agent/tickets.js"})
+    nur_in(r"ausgang\.jsonl|appendFile|writeFile", {"src/agent/tickets.js"})
+    nur_in(r"CRM_API_KEY", {"src/agent/prompt.js"})
+    nur_in(r"<html|text/html|<body", {"src/routes/antwort.js", "src/routes/antwort-sicher.js"})
+    nur_in(r"escapeHtml", {"src/routes/antwort-sicher.js"})
+    nur_in(r"require\(\"openai\"\)|from \"openai\"|import\(\"openai\"\)", {"src/llm.js"})
+    # unescaptes HTML: die Antwort-Route ruft nichts auf, was escaped
+    assert not re.search(r"escape|replace\(", q["src/routes/antwort.js"], re.I)
+    # Importe: je Lücken-Datei nur Client und Anmeldung, der Prompt nur von der Schleife in assistent.js
+    erlaubt = {"src/agent/tickets.js": {"../llm", "../auth"}, "src/agent/assistent.js": {"../llm", "../auth", "./prompt"},
+               "src/agent/prompt.js": set(), "src/routes/antwort.js": {"../llm"}, "src/routes/antwort-sicher.js": {"../llm"},
+               "src/llm.js": set(), "src/auth.js": set()}
+    for datei, ok in erlaubt.items():
+        relativ = set(re.findall(r"require\(\"(\.[^\"]*)\"\)", q[datei]))
+        assert relativ == ok, (datei, relativ)
+    nur_in(r"require\(\"\./agent/prompt\"\)|require\(\"\.\./agent/prompt\"\)", set())
+    assert len(re.findall(r"chat\(", q["src/agent/tickets.js"])) >= 1 and len(re.findall(r"\bfor \(", q["src/agent/tickets.js"])) >= 1
+    assert len(re.findall(r"\bfor \(", q["src/agent/assistent.js"])) >= 1
+
+
+def test_ki_fixture_client_lazy_ohne_basis_url_im_code():
+    """Der Client entsteht erst beim ersten Aufruf; die Basis-URL kommt aus der Umgebung des SDKs (`OPENAI_BASE_URL`), nicht
+    aus dem Code."""
+    q = ki_quellen()
+    llm = q["src/llm.js"]
+    assert not re.search(r"^(const|let|var)\s+\w+\s*=\s*(await\s+)?(new\s+\w+\(|require\(\"openai\"\))", llm, re.M)
+    assert re.search(r"^\s+.*new OpenAI\(", llm, re.M)                                     # nur eingerückt, also in einer Funktion
+    for rel, text in q.items():
+        assert not re.search(r"base_?url|https?://", text, re.I), rel
+        assert not re.search(r"\bapiKey\b|OPENAI_API_KEY", text), rel
+
+
+def test_ki_fixture_keine_verraeterischen_kommentare():
+    muster = re.compile(r"vuln|köder|koeder|decoy|insecure|TODO|FIXME|unsafe|injection|ssrf|traversal|xss|poc|absichtlich|"
+                        r"lücke|luecke", re.I)
+    gefunden = []
+    for rel, text in ki_quellen().items():
+        for nr, zeile in enumerate(text.splitlines(), 1):
+            if muster.search(zeile):
+                gefunden.append(f"{rel}:{nr}: {zeile.strip()}")
+    assert gefunden == []
+    readme = ki_text("README.md")
+    assert not re.search(r"vuln|köder|koeder|decoy|insecure|unsafe|injection|ssrf|traversal|xss|lücke|luecke|absichtlich|"
+                         r"escape|shell|exec", readme, re.I)
+
+
+def test_ki_fixture_keine_schluessel_und_fremden_urls():
+    erlaubt = {"127.0.0.1", "localhost", "0.0.0.0"}
+    url = re.compile(r"[a-z][a-z0-9+.-]*://(?:[^/\s'\"`@?#]*@)?([^/\s'\"`:@?#]+)", re.I)
+    secret = re.compile(r"sk_live_|sk_test_|sk-[A-Za-z0-9_-]{16,}|ghp_|gho_|xox[bp]-|AKIA[0-9A-Z]{12}|-----BEGIN", re.I)
+    for pfad in dateien_unter(FIXTURE_KI):
+        rel = os.path.relpath(pfad, FIXTURE_KI)
+        with open(pfad, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        assert not secret.search(text), rel
+        if rel == "package-lock.json.tmpl":                                # Lockfile: nur die Registry
+            continue
+        for host in url.findall(text):
+            assert host in erlaubt, f"{rel}: {host}"
+    assert not os.path.exists(os.path.join(FIXTURE_KI, ".env")) and not os.path.exists(os.path.join(FIXTURE_KI, ".git"))
+    assert not os.path.exists(os.path.join(FIXTURE_KI, ".npmrc"))
+
+
+def test_ki_fixture_ohne_api_hosts():
+    """W9: Weder die API-Hosts noch `fixture.invalid` stehen irgendwo in der Test-App (Code, Kommentare, README, Lockfile).
+    Sonst landen sie über Protokollauszüge im `poc` und machen TF1-D5 rot."""
+    verboten = ["fixture.invalid", *API_HOSTS]
+    assert verboten == erwartung_ki()["verbotene_muster"]
+    for pfad in dateien_unter(FIXTURE_KI):
+        with open(pfad, encoding="utf-8", errors="replace") as f:
+            text = f.read().casefold()
+        for muster in verboten:
+            assert muster not in text, f"{muster} in {os.path.relpath(pfad, FIXTURE_KI)}"
+
+
+def test_ki_fixture_manifest_und_lockfile_gepinnt():
+    pkg, lock = ki_manifest(), ki_lockfile()
+    assert pkg["dependencies"] == {"express": "4.22.3", "openai": "7.49.0"}
+    assert lock["packages"][""]["dependencies"] == pkg["dependencies"]
+    assert lock["packages"]["node_modules/openai"]["version"] == "7.49.0"
+    assert lock["packages"]["node_modules/express"]["version"] == "4.22.3"
+    assert lock["lockfileVersion"] == 3 and len(lock["packages"]) > 10
+
+
+def test_ki_fixture_keine_install_skripte():
+    pkg, lock = ki_manifest(), ki_lockfile()
+    for name in ("preinstall", "install", "postinstall", "prepare", "prepublish", "prepack"):
+        assert name not in pkg.get("scripts", {})
+    for name, daten in lock["packages"].items():
+        assert not daten.get("hasInstallScript"), name
+        if name:
+            assert daten["resolved"].startswith("https://registry.npmjs.org/"), name
+    for datei in ("package.json.tmpl", "package-lock.json.tmpl"):
+        assert "hasInstallScript" not in ki_text(datei)
+
+
 # --- Start der App auf dem Host ---------------------------------------------------------------------------
 
 pytest_start = pytest.mark.skipif(os.environ.get("SECURITY_AUDIT_FIXTURE_START") != "1",
@@ -363,11 +548,72 @@ def anfrage(port, pfad, token=None, methode="GET", daten=None, kopf=None, roh=No
         return erg + (dict(e.headers),) if mit_kopf else erg
 
 
-def _app_starten(fixture, praefix):
+def _node():
+    """Das node für die App: `SECURITY_AUDIT_SDK_NODE` (echte Binärdatei, kein Versions-Manager-Shim) oder das aus dem PATH."""
+    return os.environ.get("SECURITY_AUDIT_SDK_NODE") or shutil.which("node")
+
+
+def _node_major(pfad):
+    r = subprocess.run([pfad, "--version"], capture_output=True, timeout=20)
+    m = re.match(rb"v(\d+)\.", r.stdout)
+    return int(m.group(1)) if m else 0
+
+
+def _start_umgebung(wurzel, port, umgebung=None):
+    """Umgebung des App-Prozesses. Ohne `umgebung` wie bisher `dict(os.environ, HOST, PORT, TMPDIR)`. Mit `umgebung` (dict) wird
+    die Umgebung vollständig ERSETZT: Whitelist `PATH`, `HOME` (Temp), `TMPDIR`, `LANG`, dazu `HOST`, `PORT` und genau die Einträge
+    von `umgebung`. Nichts wird aus der Umgebung des Testlaufs geerbt (kein `OPENAI_*`, keine Proxys, kein `NODE_OPTIONS`)."""
+    if umgebung is None:
+        return dict(os.environ, HOST="127.0.0.1", PORT=str(port), TMPDIR=wurzel)
+    pfad = os.environ.get("PATH") or "/usr/bin:/bin"
+    node = os.environ.get("SECURITY_AUDIT_SDK_NODE")
+    if node:
+        pfad = os.path.dirname(node) + os.pathsep + pfad
+    home = os.path.join(wurzel, "home")
+    os.makedirs(home, exist_ok=True)
+    return {"PATH": pfad, "HOME": home, "TMPDIR": wurzel, "LANG": os.environ.get("LANG") or "C.UTF-8",
+            "HOST": "127.0.0.1", "PORT": str(port), **umgebung}
+
+
+WAECHTER = os.path.join(HIER, "sdk-vertrag", "waechter.mjs")
+
+
+def _waechter_vorschalt(wurzel):
+    """Schreibt `<wurzel>/waechter-vorschalt.mjs` und gibt (Pfad des Moduls, Pfad der Trefferdatei) zurück. Das Modul lädt den Wächter
+    des SDK-Vertragstests (er ersetzt fetch, http(s), net und tls: nur 127.0.0.1 ist erlaubt), legt beim Laden `<wurzel>/waechter-aktiv`
+    an (Beleg, dass der Prozess hinter dem Wächter läuft; ohne ihn bewiese eine leere Trefferdatei nichts) und schreibt jeden Treffer
+    (`{art, ziel}`, nie einen Request-Inhalt) sofort als eine JSON-Zeile in die Trefferdatei, auch wenn die App den Fehler fängt."""
+    vorschalt = os.path.join(wurzel, "waechter-vorschalt.mjs")
+    treffer = os.path.join(wurzel, "waechter-treffer.jsonl")
+    aktiv = os.path.join(wurzel, "waechter-aktiv")
+    with open(vorschalt, "w", encoding="utf-8") as f:
+        f.write(f'import {{ treffer }} from {json.dumps(pathlib.Path(WAECHTER).as_uri())};\n'
+                'import { appendFileSync, writeFileSync } from "node:fs";\n'
+                f'const ziel = {json.dumps(treffer)};\n'
+                f'writeFileSync({json.dumps(aktiv)}, "1");\n'
+                'const eintragen = treffer.push.bind(treffer);\n'
+                'treffer.push = (...t) => { for (const x of t) appendFileSync(ziel, JSON.stringify(x) + "\\n"); return eintragen(...t); };\n')
+    return vorschalt, treffer
+
+
+def _start_kommando(node, wurzel, mit_waechter):
+    """Kommandozeile der App: `[node, src/server.js]`; mit Wächter `[node, --import, <Vorschalt>, src/server.js]`. Der Wächter gilt für
+    die Apps mit eigener Umgebung (fixture-ki: sie darf nur den lokalen Mock erreichen)."""
+    if not mit_waechter:
+        return [node, "src/server.js"]
+    vorschalt, _treffer = _waechter_vorschalt(wurzel)
+    return [node, "--import", vorschalt, "src/server.js"]
+
+
+def _app_starten(fixture, praefix, bereit_pfad="/health", umgebung=None, info=None):
     """Kopiert die Test-App in einen Temp-Ordner (alle `.tmpl` verlieren die Endung), installiert mit `npm ci
     --ignore-scripts` und startet Node in eigener Sitzung; gibt den Port zurück und beendet am Ende nur diese eigene
-    Gruppe."""
+    Gruppe. `bereit_pfad` ist der Pfad, der mit 200 antworten muss, bevor der Port zurückgegeben wird. `umgebung` ersetzt
+    die Umgebung des Node-Prozesses (siehe `_start_umgebung`) und schaltet den Wächter vor (`_start_kommando`); `npm ci` erbt wie
+    bisher. `info` (dict) bekommt `wurzel`."""
     wurzel = os.path.realpath(tempfile.mkdtemp(prefix=praefix))
+    if info is not None:
+        info["wurzel"] = wurzel
     kopie = os.path.join(wurzel, "app")
     prozess = None
     try:
@@ -377,14 +623,16 @@ def _app_starten(fixture, praefix):
                               capture_output=True, text=True, timeout=240)
         assert inst.returncode == 0, inst.stdout + inst.stderr
         port = freier_port()
-        env = dict(os.environ, HOST="127.0.0.1", PORT=str(port), TMPDIR=wurzel)
-        prozess = subprocess.Popen(["node", "src/server.js"], cwd=kopie, env=env, start_new_session=True,
+        env = _start_umgebung(wurzel, port, umgebung)
+        node = _node() if umgebung is not None else "node"
+        kommando = _start_kommando(node, wurzel, umgebung is not None)
+        prozess = subprocess.Popen(kommando, cwd=kopie, env=env, start_new_session=True,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         ende = time.time() + 30
         while True:
             assert prozess.poll() is None, prozess.stdout.read().decode("utf-8", "replace")
             try:
-                if anfrage(port, "/health")[0] == 200:
+                if anfrage(port, bereit_pfad)[0] == 200:
                     break
             except OSError:
                 pass
@@ -392,18 +640,27 @@ def _app_starten(fixture, praefix):
             time.sleep(0.2)
         yield port
     finally:
-        if prozess is not None:
-            try:
-                os.killpg(prozess.pid, signal.SIGTERM)
-                prozess.wait(timeout=10)
-            except (ProcessLookupError, subprocess.TimeoutExpired):
+        _gruppe_beenden(prozess)
+        shutil.rmtree(wurzel, ignore_errors=True)
+
+
+def _gruppe_beenden(prozess):
+    """Beendet nur die eigene Prozessgruppe (`Popen(start_new_session=True)`), und nur solange der Prozess noch läuft."""
+    if prozess is None:
+        return
+    if prozess.poll() is None:
+        try:
+            os.killpg(prozess.pid, signal.SIGTERM)
+            prozess.wait(timeout=10)
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            if prozess.poll() is None:
                 try:
                     os.killpg(prozess.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-            if prozess.stdout:
-                prozess.stdout.close()
-        shutil.rmtree(wurzel, ignore_errors=True)
+    for strom in (prozess.stdout, prozess.stderr):
+        if strom:
+            strom.close()
 
 
 @pytest.fixture(scope="module")
@@ -516,3 +773,265 @@ def test_deps_vorlage_variable_ausnutzbar_harmlos(app_deps):
     assert status == 200 and body == "42", (status, body)
     # Gegenprobe: ein harmloser Name rendert die Vorlage normal
     assert anfrage(port, "/api/vorlage?v=daten&name=Bob")[1].startswith("Hallo Bob")
+
+
+# --- fixture-ki: Start der App gegen den lokalen Modell-Mock --------------------------------------------------
+
+TOKEN_A = "tok-mitarbeiter-a"
+TOKEN_B = "tok-mitarbeiter-b"
+KI_DUMMY = {"OPENAI_API_KEY": "poc-dummy-openai", "CRM_API_KEY": "poc-dummy-crm"}
+BEREIT_ZEILE = re.compile(r"^bereit api=(\d+) steuer=(\d+)$")
+
+
+class ModellMock:
+    """`docker/llm-mock.mjs` lokal auf 127.0.0.1 (Port 0), als eigene Prozessgruppe. Beendet wird nur diese Gruppe."""
+
+    def __init__(self, node, home):
+        env = {"PATH": os.path.dirname(node) + os.pathsep + (os.environ.get("PATH") or "/usr/bin:/bin"), "HOME": home,
+               "TMPDIR": home, "LANG": os.environ.get("LANG") or "C.UTF-8"}
+        self.node = node
+        self.p = subprocess.Popen([node, MOCK, "--server", "--host", "127.0.0.1", "--port", "0", "--steuer-port", "0"],
+                                  env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                  start_new_session=True)
+        try:
+            gelesen = []
+            t = threading.Thread(target=lambda: gelesen.append(self.p.stdout.readline()), daemon=True)
+            t.start()
+            t.join(10)
+            assert gelesen and gelesen[0], "keine bereit-Zeile des Mocks innerhalb von 10 s"
+            m = BEREIT_ZEILE.match(gelesen[0].decode("utf-8").rstrip("\n"))
+            assert m, gelesen[0]
+            self.api, self.steuer = int(m.group(1)), int(m.group(2))
+        except BaseException:
+            self.beenden()
+            raise
+
+    def beenden(self):
+        _gruppe_beenden(self.p)
+
+    def _cli(self, modus, eingabe, extra=()):
+        r = subprocess.run([self.node, MOCK, modus, "--steuer-port", str(self.steuer), *extra], input=eingabe.encode("utf-8"),
+                           capture_output=True, timeout=30,
+                           env={"PATH": os.environ.get("PATH") or "/usr/bin:/bin", "LANG": "C.UTF-8"})
+        assert r.returncode == 0, r.stderr
+        return r.stdout.decode("utf-8")
+
+    def setzen(self, antworten):
+        assert self._cli("--setzen", json.dumps(antworten)) == ""
+
+    def protokoll(self, suche, werte=()):
+        text = self._cli("--protokoll", json.dumps({"werte": [{"name": n, "wert": w} for n, w in werte]}), ["--suche", suche])
+        return text
+
+
+class KiApp:
+    def __init__(self, port, mock, wurzel):
+        self.port, self.mock, self.wurzel = port, mock, wurzel
+
+    def ausgang(self):
+        pfad = os.path.join(self.wurzel, "ausgang.jsonl")
+        if not os.path.exists(pfad):
+            return []
+        with open(pfad, encoding="utf-8") as f:
+            return [json.loads(z) for z in f.read().splitlines() if z]
+
+
+@pytest.fixture(scope="module")
+def app_ki():
+    node = _node()
+    if node is None or _node_major(node) < 22:
+        pytest.skip("Node >= 22 nötig (SECURITY_AUDIT_SDK_NODE=<pfad>)")
+    home = os.path.realpath(tempfile.mkdtemp(prefix="fixture-ki-mock-"))
+    mock = ModellMock(node, home)
+    info = {}
+    try:
+        umgebung = {"OPENAI_BASE_URL": f"http://127.0.0.1:{mock.api}/v1", **KI_DUMMY}
+        for port in _app_starten(FIXTURE_KI, "fixture-ki-test-", umgebung=umgebung, info=info):
+            yield KiApp(port, mock, info["wurzel"])
+    finally:
+        mock.beenden()
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_ki_start_umgebung_ohne_fremde_variablen(monkeypatch, tmp_path):
+    """W3-neu: `umgebung` ersetzt die Prozessumgebung vollständig. Fremde Variablen des Testlaufs kommen im Kind nicht an."""
+    fremd = {"OPENAI_ORG_ID": "org-fremd", "HTTPS_PROXY": "http://poc-fremd.invalid:3128", "NODE_OPTIONS": "--require /fremd.js",
+             "OPENAI_BASE_URL": "http://poc-fremd.invalid/v1", "ANTHROPIC_API_KEY": "fremd", "ALL_PROXY": "http://poc-fremd.invalid:3128",
+             "CRM_API_KEY": "echt-wirkender-schluessel"}
+    for k, v in fremd.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("OPENAI_API_KEY", "echt-wirkender-schluessel")
+    wurzel = str(tmp_path)
+    zusatz = {"OPENAI_BASE_URL": "http://127.0.0.1:4242/v1", **KI_DUMMY}
+    env = _start_umgebung(wurzel, 3999, zusatz)
+    assert set(env) == {"PATH", "HOME", "TMPDIR", "LANG", "HOST", "PORT", "OPENAI_BASE_URL", "OPENAI_API_KEY", "CRM_API_KEY"}
+    assert env["HOST"] == "127.0.0.1" and env["PORT"] == "3999" and env["TMPDIR"] == wurzel
+    assert env["HOME"] != wurzel and env["HOME"].startswith(wurzel) and os.path.isdir(env["HOME"])
+    assert env["OPENAI_BASE_URL"] == "http://127.0.0.1:4242/v1"
+    assert env["OPENAI_API_KEY"] == "poc-dummy-openai" and env["CRM_API_KEY"] == "poc-dummy-crm"
+    # im Kind (echter Prozess mit genau dieser Umgebung): nichts Fremdes
+    r = subprocess.run([sys.executable, "-I", "-c", "import json, os; print(json.dumps(dict(os.environ)))"], env=env,
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    kind = json.loads(r.stdout)
+    kind.pop("__CF_USER_TEXT_ENCODING", None)                                  # setzt macOS selbst (reine Kodierung)
+    assert not [k for k in kind if k not in env], kind
+    for k in ("OPENAI_ORG_ID", "HTTPS_PROXY", "NODE_OPTIONS", "ALL_PROXY", "ANTHROPIC_API_KEY"):
+        assert k not in kind, k
+    assert "poc-fremd" not in r.stdout and "echt-wirkender-schluessel" not in r.stdout
+
+
+def test_start_umgebung_ohne_zusatz_erbt_wie_bisher(monkeypatch, tmp_path):
+    """fixture-web und fixture-deps starten ohne `umgebung` wie vorher: `dict(os.environ, HOST, PORT, TMPDIR)`."""
+    monkeypatch.setenv("POC_PROBE_VARIABLE", "da")
+    env = _start_umgebung(str(tmp_path), 3998)
+    assert env["POC_PROBE_VARIABLE"] == "da" and env["HOST"] == "127.0.0.1" and env["PORT"] == "3998"
+    assert env["TMPDIR"] == str(tmp_path) and env["PATH"] == os.environ["PATH"]
+
+
+def test_ki_start_mock_und_app_nur_loopback(tmp_path):
+    """Härtung (Review 6a/6b M3): Die Start-Fixture gibt dem Kind nur den lokalen Mock als Modell-Ziel, und davor liegt der Wächter. Statt den
+    eigenen Quelltext zu lesen, prüft der Test die Kommandozeile, die Vorschaltdatei und die Umgebung, die `_app_starten` benutzt."""
+    assert KI_DUMMY == {"OPENAI_API_KEY": "poc-dummy-openai", "CRM_API_KEY": "poc-dummy-crm"}
+    assert ki_text(".env.example").strip() == "CRM_API_KEY=" + KI_DUMMY["CRM_API_KEY"]
+    wurzel = str(tmp_path)
+    kommando = _start_kommando("/pfad/zu/node", wurzel, True)
+    vorschalt = os.path.join(wurzel, "waechter-vorschalt.mjs")
+    assert kommando == ["/pfad/zu/node", "--import", vorschalt, "src/server.js"]
+    text = open(vorschalt, encoding="utf-8").read()
+    assert pathlib.Path(WAECHTER).as_uri() in text and os.path.join(wurzel, "waechter-treffer.jsonl") in text
+    assert os.path.join(wurzel, "waechter-aktiv") in text
+    assert os.path.isfile(WAECHTER)
+    assert _start_kommando("node", wurzel, False) == ["node", "src/server.js"]          # fixture-web und fixture-deps starten wie bisher
+    env = _start_umgebung(wurzel, 3999, {"OPENAI_BASE_URL": "http://127.0.0.1:4242/v1", **KI_DUMMY})
+    assert "NODE_OPTIONS" not in env and re.fullmatch(r"http://127\.0\.0\.1:\d+/v1", env["OPENAI_BASE_URL"])
+    quelle = inspect.getsource(_app_starten)                                           # nur die Funktion, nicht der Test selbst
+    assert "kommando = _start_kommando(node, wurzel, umgebung is not None)" in quelle      # `_app_starten` benutzt sie auch
+    assert "Popen(kommando," in quelle
+
+
+def _node_fuer_waechter():
+    node = _node()
+    if node is None:
+        pytest.skip("node fehlt")
+    return node
+
+
+def test_ki_waechter_vorschalt_weist_fremden_host_ab_und_haelt_ihn_fest(tmp_path):
+    """Härtung (M3): Mit dem Vorschaltmodul weist ein Prozess jede Verbindung zu einem anderen Ziel als 127.0.0.1 ab (fetch und http), noch
+    bevor ein Namensaufruf oder eine Verbindung entsteht (Ziele: `poc-fremd.invalid`, `192.0.2.1`), und schreibt sie in die Trefferdatei,
+    auch wenn der Aufrufer den Fehler fängt. 127.0.0.1 bleibt erlaubt (kein Treffer). Kein Netz."""
+    node = _node_fuer_waechter()
+    wurzel = str(tmp_path)
+    vorschalt, treffer = _waechter_vorschalt(wurzel)
+    skript = ("const aus = [];\n"
+              "for (const u of ['http://poc-fremd.invalid/v1', 'https://192.0.2.1/x']) {\n"
+              "  try { await fetch(u); aus.push('offen'); } catch (e) { aus.push(e.code === 'EWAECHTER' ? 'abgewiesen' : String(e.code ?? e.message)); }\n"
+              "}\n"
+              "const http = await import('node:http');\n"
+              "try { http.request({ host: 'poc-fremd.invalid', port: 80 }); aus.push('offen'); } catch (e) { aus.push(e.code); }\n"
+              "try { await fetch('http://127.0.0.1:1/'); } catch (e) { aus.push(e.code === 'EWAECHTER' ? 'abgewiesen' : 'lokal'); }\n"
+              "console.log(JSON.stringify(aus));\n")
+    r = subprocess.run([node, "--import", vorschalt, "--input-type=module", "-e", skript], cwd=wurzel, capture_output=True, text=True, timeout=60,
+                       env={"PATH": os.environ.get("PATH") or "/usr/bin:/bin", "HOME": wurzel, "LANG": "C.UTF-8"})
+    assert r.returncode == 0, r.stderr
+    assert os.path.isfile(os.path.join(wurzel, "waechter-aktiv"))                           # Beleg: der Prozess lief hinter dem Wächter
+    assert json.loads(r.stdout.strip().splitlines()[-1]) == ["abgewiesen", "abgewiesen", "EWAECHTER", "lokal"], r.stdout
+    zeilen = [json.loads(z) for z in open(treffer, encoding="utf-8").read().splitlines()]
+    assert [z["ziel"] for z in zeilen] == ["poc-fremd.invalid", "192.0.2.1", "poc-fremd.invalid"], zeilen
+    assert all(set(z) == {"art", "ziel"} for z in zeilen)
+
+
+@pytest_start
+def test_ki_server_startet(app_ki):
+    port = app_ki.port
+    assert anfrage(port, "/")[0] == 200
+    assert anfrage(port, "/health")[0] == 200
+    assert anfrage(port, "/assistent", methode="POST", daten={"frage": "x"})[0] == 401
+    assert anfrage(port, "/assistent", "tok-falsch", "POST", {"frage": "x"})[0] == 401
+    assert anfrage(port, "/ausgang")[0] == 404                                     # keine Route zum Lesen der Mails
+
+
+@pytest_start
+def test_ki_l1_ticket_ohne_anmeldung_loest_mail_aus(app_ki):
+    """L1: Ein Fremder legt ohne Anmeldung ein Ticket mit Dokument an, ein Mitarbeiter lässt es bearbeiten, das Modell ruft
+    `send_email` auf, und die Mail geht ohne Bestätigung raus (hier: nur in `<TMPDIR>/ausgang.jsonl`, an eine `.invalid`-Adresse)."""
+    marker = "POCMARKER-ki-l1"
+    port = app_ki.port
+    status, body = anfrage(port, "/tickets", methode="POST", daten={"text": "Bitte um Rückruf", "dokument": f"Anlage {marker}"})
+    assert status in (200, 201), body
+    ticket = json.loads(body)["id"]
+    assert anfrage(port, f"/agent/tickets/{ticket}/bearbeiten", methode="POST", daten={})[0] == 401
+    assert app_ki.ausgang() == []
+    app_ki.mock.setzen([{"wenn_enthaelt": marker, "werkzeug": {"name": "send_email", "argumente": {
+        "an": "x@example.invalid", "betreff": "poc", "text": "poc-l1"}}}])
+    status, body = anfrage(port, f"/agent/tickets/{ticket}/bearbeiten", TOKEN_A, "POST", {})
+    assert status == 200, body
+    mails = app_ki.ausgang()
+    assert len(mails) == 1 and mails[0]["an"] == "x@example.invalid" and mails[0]["text"] == "poc-l1", mails
+    assert anfrage(port, "/agent/tickets/999/bearbeiten", TOKEN_B, "POST", {})[0] == 404
+
+
+@pytest_start
+def test_ki_l2_tool_argument_erreicht_die_shell(app_ki):
+    """L2: `datei_suchen` hängt das Argument des Modells an `ls ` und führt es in der Shell aus; `; echo poc-l2` erzeugt eine
+    eigene Ausgabezeile. Harmlos: nur Textausgabe."""
+    marker = "POCMARKER-ki-l2"
+    port = app_ki.port
+    app_ki.mock.setzen([{"wenn_enthaelt": marker, "werkzeug": {"name": "datei_suchen", "argumente": {"pfad": ".; echo poc-l2"}}}])
+    status, body = anfrage(port, "/assistent", TOKEN_B, "POST", {"frage": f"Wo liegt die Datei? {marker}"})
+    assert status == 200, body
+    ausgaben = [w["ausgabe"] for w in json.loads(body)["werkzeuge"]]
+    assert len(ausgaben) == 1 and "poc-l2" in ausgaben[0].splitlines(), ausgaben
+
+
+@pytest_start
+def test_ki_l3_antwort_roh_und_koeder_escaped(app_ki):
+    """L3: Die Modellausgabe kommt unverändert als HTML zurück; der Köder escaped sie."""
+    marker = "POCMARKER-ki-l3"
+    port = app_ki.port
+    app_ki.mock.setzen([{"wenn_enthaelt": marker, "text": "<b>poc</b>"}])
+    status, body, kopf = anfrage(port, f"/antwort?frage={marker}", mit_kopf=True)
+    assert status == 200 and "<b>poc</b>" in body and kopf["Content-Type"].startswith("text/html"), (status, body)
+    app_ki.mock.setzen([{"wenn_enthaelt": marker, "text": "<b>poc</b>"}])
+    status, body = anfrage(port, f"/antwort-sicher?frage={marker}")
+    assert status == 200 and "&lt;b&gt;poc&lt;/b&gt;" in body and "<b>poc</b>" not in body, (status, body)
+
+
+@pytest_start
+def test_ki_l4_systemprompt_enthaelt_den_schluessel_maskiert(app_ki):
+    """L4: Der Systemprompt trägt `CRM_API_KEY`. Das Mock-Protokoll zeigt es nur maskiert (`<ENV:CRM_API_KEY>`); ohne Maskierung
+    stünde der Dummy-Wert im Request, also kommt er wirklich beim Modell an."""
+    marker = "POCMARKER-ki-l4"
+    port = app_ki.port
+    app_ki.mock.setzen([])
+    status, body = anfrage(port, "/assistent", TOKEN_A, "POST", {"frage": f"Hallo {marker}"})
+    assert status == 200, body
+    roh = app_ki.mock.protokoll(marker)
+    assert KI_DUMMY["CRM_API_KEY"] in roh and "<ENV:" not in roh
+    maskiert = app_ki.mock.protokoll(marker, [("CRM_API_KEY", KI_DUMMY["CRM_API_KEY"])])
+    assert "<ENV:CRM_API_KEY>" in maskiert and KI_DUMMY["CRM_API_KEY"] not in maskiert
+    assert json.loads(maskiert)["eintraege"]
+
+
+def test_ki_fixture_auth_ohne_prototyp_umgehung():
+    """6a/6b-Review M2: Tokens wie `constructor` oder `__proto__` dürfen die Anmeldung der Test-App nicht bestehen
+    (sonst eine unbeabsichtigte Auth-Lücke neben L1–L4)."""
+    with open(os.path.join(FIXTURE_KI, "src", "auth.js"), encoding="utf-8") as f:
+        quelle = f.read()
+    assert "Object.hasOwn(" in quelle
+
+
+@pytest_start
+def test_ki_nur_der_mock_sah_requests(app_ki):
+    """Härtung (M3): Nach einem Aufruf, der ein Modell braucht, steht der Request im Protokoll des Mocks (Positivkontrolle: der Weg
+    zum Mock funktioniert), und der Wächter vor der App hat keine Verbindung zu einem anderen Ziel als 127.0.0.1 abgewiesen."""
+    marker = "POCMARKER-ki-nur-mock"
+    app_ki.mock.setzen([])
+    status, body = anfrage(app_ki.port, "/assistent", TOKEN_A, "POST", {"frage": f"Hallo {marker}"})
+    assert status == 200, body
+    eintraege = json.loads(app_ki.mock.protokoll(marker))["eintraege"]
+    assert eintraege and all(e["methode"] == "POST" and e["pfad"].endswith("/chat/completions") for e in eintraege), eintraege
+    assert os.path.isfile(os.path.join(app_ki.wurzel, "waechter-aktiv")), "die App läuft nicht hinter dem Wächter"
+    treffer = os.path.join(app_ki.wurzel, "waechter-treffer.jsonl")
+    assert not os.path.exists(treffer) or open(treffer, encoding="utf-8").read() == "", open(treffer, encoding="utf-8").read()

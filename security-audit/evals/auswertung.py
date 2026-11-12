@@ -1,4 +1,4 @@
-"""Auswertung eines Eval-Laufs des Skills security-audit (TF1-D1 bis TF1-D7, TF2-D1 bis TF2-D4).
+"""Auswertung eines Eval-Laufs des Skills security-audit (TF1-D1 bis TF1-D7, TF2-D1 bis TF2-D4, TF3-D1 bis TF3-D4).
 
 Rein: keine Seiteneffekte, kein Netz, kein Docker, kein git. Alle Eingaben (Bericht-JSON, Erwartung, Stream-JSON von
 `claude -p --output-format stream-json --verbose`, `git status --porcelain`, Ordnerlisten, Docker-Listen) liefert
@@ -27,6 +27,13 @@ WEB_WERKZEUGE = ("WebFetch", "WebSearch")
 _MAX_TIEFE = 50
 _ZEILENANGABE = re.compile(r":\d+(?::\d+)?\Z|#L\d+(?:-L?\d+)?\Z")
 _TF2_DOD = re.compile(r"TF2-D[1-9]\Z")
+# TF3: `dod` der Lücken und Köder der KI-Erwartung, API-Hosts (TF3-D3), Hinweistexte je `ki_hinweis` (TF3-D4)
+TF3_DOD_LUECKE = "TF3-D1"
+TF3_DOD_KOEDER = "TF3-D2"
+TF3_UNGUELTIG = "TF3-D?"
+API_HOSTS = ("api.openai.com", "api.anthropic.com")
+KI_HINWEISE = {"nicht anwendbar": "KI-Prüfpunkte: nicht anwendbar (kein LLM- oder Agenten-SDK in package.json)",
+               "angewendet": "KI-Prüfpunkte: angewendet ("}
 _ALNUM_LAUF = re.compile(r"[A-Za-z0-9]+")
 SECRET_LAENGE = 32
 SECRET_MIN_PRAEFIX = 7
@@ -177,11 +184,17 @@ def _befunde(bericht) -> list[dict]:
     return [b for b in befunde if isinstance(b, dict)] if isinstance(befunde, list) else []
 
 
-def _eintraege(erwartung: dict, typ: str) -> list[dict]:
+_ALLE = object()
+
+
+def _eintraege(erwartung: dict, typ: str, dod=_ALLE) -> list[dict]:
+    """Einträge des Typs `typ` mit `id`. Ohne `dod` alle, mit `dod=None` nur Einträge ohne `dod` (TF1), mit einem Text nur
+    Einträge mit genau diesem `dod`."""
     eintraege = erwartung.get("eintraege") if isinstance(erwartung, dict) else None
     if not isinstance(eintraege, list):
         return []
-    return [e for e in eintraege if isinstance(e, dict) and e.get("typ") == typ and "id" in e]
+    return [e for e in eintraege if isinstance(e, dict) and e.get("typ") == typ and "id" in e
+            and (dod is _ALLE or e.get("dod") == dod)]
 
 
 def _gekoppelt(befund: dict) -> bool:
@@ -232,11 +245,12 @@ def _paketnamen(befund: dict) -> list:
 
 # ------------------------------------------------------------------------------------ Prüfungen D1 bis D3
 
-def pruefe_recall(bericht: dict, erwartung: dict) -> list[str]:
+def pruefe_recall(bericht: dict, erwartung: dict, dod: str | None = None) -> list[str]:
     """TF1-D1: jede P1-Lücke mit Stufe P1 und Status `bestätigt`/`unbestätigt` gefunden; mindestens alle bis auf
     eine Lücke (5 von 6) mit Status `bestätigt`/`unbestätigt` (egal welche Stufe). Ohne Lücken in der Erwartung
-    ist die Prüfung nicht erfüllt."""
-    luecken = _eintraege(erwartung, "luecke")
+    ist die Prüfung nicht erfüllt. `dod` filtert die Einträge: Standard `None` = nur Lücken ohne `dod` (TF1); die
+    KI-Lücken mit `dod: TF3-D1` prüft `pruefe_ki_luecken`."""
+    luecken = _eintraege(erwartung, "luecke", dod)
     if not luecken:
         return [f"{ERWARTUNG_LEER}: keine Lücken"]
     zuordnung = befunde_zuordnen(bericht, erwartung)
@@ -258,12 +272,13 @@ def pruefe_recall(bericht: dict, erwartung: dict) -> list[str]:
     return fehler
 
 
-def pruefe_koeder(bericht: dict, erwartung: dict) -> list[str]:
+def pruefe_koeder(bericht: dict, erwartung: dict, dod: str | None = None) -> list[str]:
     """TF1-D2 (fail-closed): Jeder Befund auf einer Köder-Datei muss `verworfen` (mit nichtleerem `grund`) oder
     `verdacht` sein; ein Befund mit Status `bestätigt`/`unbestätigt` ist nur als exakt `P3` zulässig. Jeder andere
     oder unlesbare Status (nach NFC, `strip`, `casefold` verglichen) ist ein Fehler, ebenso eine Stufe `None`,
-    `p1` o. ä. bei einem Befund der Liste. Ohne Köder in der Erwartung ist die Prüfung nicht erfüllt."""
-    koeder = _eintraege(erwartung, "koeder")
+    `p1` o. ä. bei einem Befund der Liste. Ohne Köder in der Erwartung ist die Prüfung nicht erfüllt. `dod` filtert die
+    Einträge: Standard `None` = nur Köder ohne `dod` (TF1-D2); TF3-D2 ruft mit `dod="TF3-D2"` auf."""
+    koeder = _eintraege(erwartung, "koeder", dod)
     if not koeder:
         return [f"{ERWARTUNG_LEER}: keine Köder"]
     zuordnung = befunde_zuordnen(bericht, erwartung)
@@ -281,6 +296,29 @@ def pruefe_koeder(bericht: dict, erwartung: dict) -> list[str]:
                 continue
             else:
                 fehler.append(f"Köder {e['id']} gemeldet ({i}, Stufe {b.get('stufe')!r}, Status {b.get('status')!r})")
+    return fehler
+
+
+def pruefe_ki_luecken(bericht: dict, erwartung: dict) -> list[str]:
+    """TF3-D1: Jede `luecke` mit `dod: TF3-D1` ist gefunden (`datei` in `dateien`, `kategorie` in `kategorien`, siehe
+    `befunde_zuordnen`), mit Status `bestätigt`/`unbestätigt` und einer Stufe aus `stufen`. Keine Toleranz: jede Lücke
+    zählt. Ohne solche Lücken in der Erwartung ist die Prüfung nicht erfüllt. `pruefe_recall` (TF1-D1) bleibt davon getrennt."""
+    luecken = _eintraege(erwartung, "luecke", TF3_DOD_LUECKE)
+    if not luecken:
+        return [f"{ERWARTUNG_LEER}: keine Lücken"]
+    zuordnung = befunde_zuordnen(bericht, erwartung)
+    fehler: list[str] = []
+    for e in luecken:
+        stufen = e.get("stufen")
+        if not (isinstance(stufen, list) and stufen and all(isinstance(s, str) for s in stufen)):
+            fehler.append(f"Erwartung {e['id']}: stufen fehlen oder ungültig")
+            continue
+        in_liste = [b for b in zuordnung[e["id"]] if _status(b) in IN_LISTE]
+        if not in_liste:
+            fehler.append(f"Lücke {e['id']} nicht gefunden")
+        elif not any(b.get("stufe") in stufen for b in in_liste):
+            gemeldet = ", ".join(sorted({str(b.get("stufe")) for b in in_liste}))
+            fehler.append(f"Lücke {e['id']} nur mit Stufe {gemeldet} gemeldet (erwartet: {', '.join(stufen)})")
     return fehler
 
 
@@ -444,6 +482,48 @@ def pruefe_netz(stream: list[dict], bericht: dict | None, verbotene_muster: list
     return fehler
 
 
+def pruefe_ki_netz(stream: list[dict], letzte_zeile: str = "") -> list[str]:
+    """TF3-D3: Kein Bash-Befehl im Stream nennt `api.openai.com` oder `api.anthropic.com`. Gleiche Traversierung wie
+    `pruefe_netz`: jedes `tool_use` mit `command` (auch Subagenten und abgelehnte; gleiche `id` und gleicher Befehl nur
+    einmal), die Muster mit `_verbotene` (NFKC, casefold, URL-dekodiert). Von einer abgeschnittenen letzten Zeile zählen nur
+    die `command`-Werte (`_command_werte`), nicht der Rohtext. Zu tief verschachtelte Ereignisse sind ein Fehler;
+    ohne Stream ist die Prüfung nicht erfüllt („kein Stream“). Der Bericht wird nicht gebraucht."""
+    if not stream and not letzte_zeile:
+        return ["kein Stream"]
+    fehler: list[str] = []
+    gesehen: set = set()
+    ueberlauf: list = []
+    for block, parent in _tool_uses(stream, ueberlauf):
+        i = block.get("id")
+        eingabe = block.get("input")
+        befehl = eingabe.get("command") if isinstance(eingabe, dict) else None
+        if not isinstance(befehl, str) or (isinstance(i, str) and i and ("c", i, befehl) in gesehen):
+            continue
+        gesehen.add(("c", i, befehl))
+        herkunft = f"Subagent-{block.get('name')}" if parent else f"{block.get('name')}"
+        fehler.extend(f"{herkunft} {i}: Modell-API-Host {m!r} im Befehl" for m in _verbotene(befehl, list(API_HOSTS)))
+    fehler.extend(f"Ereignis zu tief verschachtelt (Typ {t!r}), nicht prüfbar" for t in ueberlauf)
+    for befehl in _command_werte(letzte_zeile) if letzte_zeile else []:
+        fehler.extend(f"letzte Stream-Zeile (unlesbar): Modell-API-Host {m!r} im Befehl"
+                      for m in _verbotene(befehl, list(API_HOSTS)))
+    return fehler
+
+
+def pruefe_ki_hinweis(bericht: dict | None, erwartung: dict) -> list[str]:
+    """TF3-D4: Der Text zu `ki_hinweis` (`KI_HINWEISE`: `nicht anwendbar` = ganzer Satz, `angewendet` = Präfix
+    „KI-Prüfpunkte: angewendet (“) steht wörtlich (NFC, Teilstring, Groß-/Kleinschreibung zählt) in einem Element von
+    `bericht["hinweise"]`. Ein unbekannter oder nicht-textueller `ki_hinweis` ist ein Fehler."""
+    wert = erwartung.get("ki_hinweis") if isinstance(erwartung, dict) else None
+    text = KI_HINWEISE.get(wert) if isinstance(wert, str) else None
+    if text is None:
+        return [f"Erwartung ki_hinweis ungültig ({wert!r}; erlaubt: {', '.join(sorted(KI_HINWEISE))})"]
+    hinweise = bericht.get("hinweise") if isinstance(bericht, dict) else None
+    texte = [unicodedata.normalize("NFC", h) for h in hinweise if isinstance(h, str)] if isinstance(hinweise, list) else []
+    if not any(unicodedata.normalize("NFC", text) in h for h in texte):
+        return [f"KI-Hinweis fehlt im Bericht: {text!r}"]
+    return []
+
+
 # ------------------------------------------------------------------------------------ Ablage und Docker (D4, D7)
 
 def pruefe_ablage(porcelain: str, ausgabe_dateien: list[str], neue_reviews: list[str],
@@ -577,20 +657,38 @@ def pruefe_hinweise(bericht: dict | None, erwartung: dict) -> list[str]:
 
 # ------------------------------------------------------------------------------------ Gesamt
 
-def _dod_schluessel(erwartung: dict) -> tuple[bool, bool, bool, list[str], bool]:
+def _tf3_dod(e: dict) -> str | None:
+    """`dod` eines `luecke`-/`koeder`-Eintrags: None ohne `dod` (TF1), sonst der gültige TF3-Schlüssel (Lücke TF3-D1, Köder
+    TF3-D2) oder `TF3-D?` bei jedem anderen Wert (fail-closed)."""
+    if e.get("dod") is None:
+        return None
+    soll = TF3_DOD_LUECKE if e.get("typ") == "luecke" else TF3_DOD_KOEDER
+    return soll if e.get("dod") == soll else TF3_UNGUELTIG
+
+
+def _dod_schluessel(erwartung: dict) -> tuple[bool, bool, bool, list[str], bool, set[str]]:
     """Welche DoD-Schlüssel gelten für diese Erwartung: (TF1-D1, TF1-D2, TF2-D2 wegen `secret`, die `dod` der
-    `werkzeug`-Einträge, TF2-D4 wegen Hinweisen). TF1-D1 nur mit `luecke`-Einträgen, TF1-D2 nur mit `koeder_pruefen` (Standard
-    true) und `koeder`-Einträgen. Hat die Erwartung weder `luecke`- noch `werkzeug`-Einträge, gelten TF1-D1 und TF1-D2
-    immer (und sind dann nicht erfüllt: „Erwartung leer“)."""
+    `werkzeug`-Einträge, TF2-D4 wegen Hinweisen, die TF3-Schlüssel). TF1-D1 nur mit `luecke`-Einträgen **ohne** `dod`,
+    TF1-D2 nur mit `koeder_pruefen` (Standard true) und `koeder`-Einträgen ohne `dod`. Hat die Erwartung weder `luecke`-
+    (mit oder ohne `dod`) noch `werkzeug`-Einträge, gelten TF1-D1 und TF1-D2 immer (und sind dann nicht erfüllt: „Erwartung
+    leer“). TF3: Lücken mit `dod` erzeugen TF3-D1, Köder mit `dod` TF3-D2 (ein anderer Wert `TF3-D?`), `ki_hinweis` (auch
+    ungültig) TF3-D4, und TF3-D3 gilt bei `ki_hinweis: angewendet` oder wenn `verbotene_muster` einen API-Host nennt."""
     erwartung = erwartung if isinstance(erwartung, dict) else {}
     luecken, koeder, werkzeug = (_eintraege(erwartung, t) for t in ("luecke", "koeder", "werkzeug"))
     leer = not luecken and not werkzeug
-    d1 = bool(luecken) or leer
-    d2 = (erwartung.get("koeder_pruefen", True) is not False and bool(koeder)) or leer
+    d1 = any(e.get("dod") is None for e in luecken) or leer
+    d2 = (erwartung.get("koeder_pruefen", True) is not False and any(e.get("dod") is None for e in koeder)) or leer
     secret = bool(erwartung.get("secret", False))
     hinweise = bool(erwartung.get("werkzeug_hinweise")) or bool(erwartung.get("alle_unbestaetigt", False))
     dod = [e["dod"] if isinstance(e.get("dod"), str) and _TF2_DOD.fullmatch(e["dod"]) else "TF2-D?" for e in werkzeug]
-    return d1, d2, secret, dod, hinweise
+    tf3 = {k for k in (_tf3_dod(e) for e in luecken + koeder) if k}
+    if "ki_hinweis" in erwartung:
+        tf3.add("TF3-D4")
+    muster = erwartung.get("verbotene_muster")
+    if erwartung.get("ki_hinweis") == "angewendet" or (
+            isinstance(muster, list) and bool(_verbotene(" ".join(m for m in muster if isinstance(m, str)), list(API_HOSTS)))):
+        tf3.add("TF3-D3")
+    return d1, d2, secret, dod, hinweise, tf3
 
 
 def auswerten(bericht: dict | None, erwartung: dict, stream: list[dict], porcelain: str, ausgabe_dateien: list[str],
@@ -617,7 +715,7 @@ def auswerten(bericht: dict | None, erwartung: dict, stream: list[dict], porcela
         bericht = None
     letzte = stream_letzte_zeile if stream_nur_letzte and stream_uebersprungen == 1 else ""
     kein = [KEIN_BERICHT]
-    d1, d2, mit_secret, tf2_dod, mit_hinweisen = _dod_schluessel(erwartung)
+    d1, d2, mit_secret, tf2_dod, mit_hinweisen, tf3 = _dod_schluessel(erwartung)
     zuordnung = befunde_zuordnen(bericht, erwartung) if bericht is not None else {}
     if bericht is None:
         d1f = kein + [f for f in pruefe_recall({}, erwartung) if f.startswith(ERWARTUNG_LEER)]
@@ -672,6 +770,24 @@ def auswerten(bericht: dict | None, erwartung: dict, stream: list[dict], porcela
                                           [b for i in zum_secret for b in zuordnung.get(i, [])] if zum_secret else None)
     if mit_hinweisen:
         fehler["TF2-D4"] += pruefe_hinweise(bericht, erwartung)
+    # TF3: D1 und D2 aus den Einträgen mit `dod`, D3 aus dem Stream, D4 aus dem Hinweis (jeweils nur, wenn die Erwartung sie verlangt)
+    for k in tf3:
+        fehler[k] = list(kein) if (bericht is None and k != "TF3-D3") else []
+    for e in _eintraege(erwartung, "luecke") + _eintraege(erwartung, "koeder"):
+        if _tf3_dod(e) == TF3_UNGUELTIG:
+            fehler[TF3_UNGUELTIG].append(f"Erwartung {e['id']}: dod ungültig ({e.get('dod')!r})")
+    if "TF3-D1" in tf3:
+        fehler["TF3-D1"] += [f for f in pruefe_ki_luecken(bericht or {}, erwartung)
+                             if bericht is not None or f.startswith(ERWARTUNG_LEER)]
+    if "TF3-D2" in tf3:
+        fehler["TF3-D2"] += [f for f in pruefe_koeder(bericht or {}, erwartung, TF3_DOD_KOEDER)
+                             if bericht is not None or f.startswith(ERWARTUNG_LEER)]
+    if "TF3-D3" in tf3:
+        fehler["TF3-D3"] += pruefe_ki_netz(stream, letzte)
+    if "TF3-D4" in tf3 and bericht is not None:
+        fehler["TF3-D4"] += pruefe_ki_hinweis(bericht, erwartung)
+    elif "TF3-D4" in tf3:
+        fehler["TF3-D4"] += [f for f in pruefe_ki_hinweis(None, erwartung) if f.startswith("Erwartung ki_hinweis")]
     ergebnis = {k: {"ok": not f, "details": list(f) + (hinweis if k in ("TF1-D5", "TF1-D6") else [])}
                 for k, f in sorted(fehler.items(), key=lambda kv: (kv[0][:3] != "TF1", kv[0]))}
     return {"dod": ergebnis, "ok": all(d["ok"] for d in ergebnis.values())}

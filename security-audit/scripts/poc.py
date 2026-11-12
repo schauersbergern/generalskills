@@ -9,11 +9,21 @@ Wegwerf-Container im Netz der Rolle. Es gibt keine Host-Mounts und keine veröff
 nur, was `security-audit-<lauf>` heißt (Container, Netze, Images) und der eigene Zustandsordner.
 
 Aufruf (immer als einzelner einfacher Befehl, siehe Netzregel):
-  python3 -I poc.py neu | pruefen | vorbereiten | bauen | starten | ausfuehren | neustart | anfrage | aufraeumen | auflisten
+  python3 -I poc.py neu | pruefen | vorbereiten | bauen | starten | ausfuehren | neustart | anfrage | modell | aufraeumen | auflisten
 
 Exit-Codes: 0 ok, 2 ungültige Argumente, 3 Docker fehlt oder Daemon nicht erreichbar, 4 Bau/Start scheitert
 (erste stdout-Zeile `kategorie: <wert>`, danach höchstens die letzten 40 Zeilen der Docker-Ausgabe),
 1 sonstiger Fehler (Request fehlgeschlagen, Befehl im Container mit Exit ≠ 0, Aufräumen unvollständig).
+
+`starten --modell-mock openai,anthropic` startet vor der App den Modell-Mock `<netz>-llm` (Alias `llm`, Port 4010, nur im internen Netz)
+und setzt in der App die Variablen der gewählten APIs (Dummy-Schlüssel). `--env`: jeder Wert läuft durch die Netzregel (Exit 2 bei
+fremdem Host, die Meldung nennt nie den Wert); mit `--modell-mock` sind die Namen in `MOCK_RESERVIERT` für `--env`, `--start-befehl` und `--seed` reserviert.
+
+`modell --lauf <id> --rolle <r> (--antworten-datei <datei> | --protokoll [--suche <marker>])` steuert den Modell-Mock der Rolle
+(ein `docker exec` auf `<netz>-llm`, unter der geteilten Rollensperre, Budget 60 s, nur verkürzbar). `--antworten-datei` prüft die
+Antwortliste (höchstens 20 Einträge: `text` oder `werkzeug`, optional `wenn_enthaelt` nach `POCMARKER-…`, Netzregel über Rohtext und
+geparstes JSON) und setzt sie. `--protokoll` gibt das Protokoll aus; die Werte der `--env` der Rolle (ab 6 Zeichen) und die Mock-Schlüssel
+gehen per stdin an den Mock, der sie vor der Ausgabe durch `<ENV:NAME>` ersetzt. Ohne Modell-Mock in der Rolle Exit 1.
 
 `SECURITY_AUDIT_OHNE` (kommagetrennt): `docker` lässt `pruefen`, `bauen`, `starten` und `neustart` mit Exit 3 `docker-fehlt` enden.
 `bauen` verlangt den Schwärzungs-Marker (`schwaerz_marker`, gesetzt von `lieferkette.py secrets`; `vorbereiten` löscht ihn),
@@ -41,6 +51,7 @@ from typing import NamedTuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gitkopie  # noqa: E402
+import netzregel  # noqa: E402
 
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 DOCKER_DIR = os.path.join(SKILL_DIR, "docker")
@@ -59,6 +70,8 @@ SEED_TIMEOUT = 180
 PULL_TIMEOUT = 300
 EXEC_TIMEOUT = 120
 DB_WARTEN = 60
+MOCK_BEREIT = 30                 # höchstens so lange wartet starten/neustart auf die Bereitschaft des Modell-Mocks (nur verkürzbar)
+MODELL_BUDGET = 60               # Gesamtzeit von `modell` (ein docker exec; nur verkürzbar)
 START_BUDGET = 440               # Gesamtzeit der Arbeitsphase von starten/neustart (Skill-Bash-Limit: 600 s, Aufräumen folgt)
 AUFRAEUMEN_BUDGET = 440          # Gesamtzeit der Docker-Aufrufe von aufraeumen
 VORBEREITEN_BUDGET = 480         # Gesamtzeit von vorbereiten: Entfernen der alten Kopie, git-Aufrufe, Kopieren (Skill-Bash-Limit: 600 s)
@@ -74,6 +87,146 @@ AUSGABE_MAX = 64 * 1024         # was anfrage/ausfuehren höchstens auf stdout a
 APP_PORT_DB = 5432
 POSTGRES_IMAGE = "postgres:16-alpine"
 DB_URL = "postgres://poc:poc@db:5432/poc"
+ANTWORTEN_MAX = 20               # Einträge einer Antwortliste für den Modell-Mock
+ANTWORTEN_DATEI_MAX = 64 * 1024  # `--antworten-datei`: Größe der Datei (grobe Schranke; maßgeblich ist `STDIN_MAX_MOCK` für die Serialisierung)
+ANTWORT_TEXT_MAX = 16384         # UTF-16-Einheiten je `text` (Zählweise und Grenze des Mocks)
+MASKIER_WERTE_MAX = 200          # Grenze des Mocks für die Zahl der Werte (`modell --protokoll`); mehr: Exit 2
+MASKIER_WERT_MIN = 6             # kürzere --env-Werte werden nicht maskiert
+MASKIER_WERT_MAX = 4096          # Grenze des Mocks je Wert (Zeichen)
+MASKIER_NAME_MAX = 64            # Grenze des Mocks für den Namen
+STDIN_MAX_MOCK = 64 * 1024       # Grenze des Mocks für stdin (Bytes)
+MARKER_RE = re.compile(r"POCMARKER-[a-z0-9-]{1,40}")
+WERKZEUG_NAME_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+MOCK_PORT = 4010                 # API des Modell-Mocks im Netz der Rolle (Alias `llm`)
+MOCK_STEUER_PORT = 4011          # Steuerung: lauscht im Container nur auf 127.0.0.1
+MOCK_URL = f"http://llm:{MOCK_PORT}"
+# Modell-Mock je API: (Name, Wert) der Variablen, die `starten --modell-mock` im App-Container setzt (Dummy-Schlüssel, keine echten).
+MOCK_ENV = {
+    "openai": (("OPENAI_BASE_URL", f"{MOCK_URL}/v1"), ("OPENAI_API_KEY", "poc-dummy-openai")),
+    "anthropic": (("ANTHROPIC_BASE_URL", MOCK_URL), ("ANTHROPIC_API_KEY", "poc-dummy-anthropic")),
+}
+# Mit --modell-mock kein --env und keine Zuweisung oder Aufhebung im Start-Befehl und im Seed mit diesen Namen (Groß-/Kleinschreibung egal):
+# die Variablen des Mocks und weitere, mit denen ein SDK sonst am Mock vorbei zu einem anderen Endpunkt, Schlüssel oder Konto liefe.
+MOCK_RESERVIERT = frozenset({name for paare in MOCK_ENV.values() for name, _ in paare}
+                            | {"OPENAI_API_BASE", "OPENAI_API_HOST", "OPENAI_ORG_ID", "OPENAI_PROJECT_ID", "ANTHROPIC_AUTH_TOKEN",
+                               "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY"})
+_RESERVIERT_NAMEN = "|".join(sorted(MOCK_RESERVIERT))
+# `NAME=` und `NAME+=` (Anhängen), mit Wortgrenze davor (`NEXT_PUBLIC_OPENAI_BASE_URL=` ist ein anderer Name).
+MOCK_RESERVIERT_RE = re.compile(r"(?<![A-Za-z0-9_])(" + _RESERVIERT_NAMEN + r")\+?=", re.IGNORECASE)
+# Alles andere, was einen Namen aufhebt, überschreibt oder die Umgebung leert, erkennt `_segment_umgehung` an den Wörtern eines einfachen Befehls
+# (ein Durchgang, linear; die Prüfung läuft vor jedem Zeitbudget): `unset … NAME`, `env -u NAME` (auch gruppiert), `--unset NAME`, `read NAME`,
+# `for NAME in`, `printf -v NAME`, `export -n NAME`, `typeset +x NAME`, `declare -n x=NAME` und `env -i`.
+_NAME_ANFANG_RE = re.compile("(" + _RESERVIERT_NAMEN + r")(?![A-Za-z0-9_])", re.IGNORECASE)
+_SEGMENT_TRENNER_RE = re.compile(r"[;&|\n]")
+_DEKLARATION_FLAG_RE = re.compile(r"-[A-Za-z]*n[A-Za-z]*|\+[A-Za-z]*x[A-Za-z]*")     # export -n, typeset +x, declare -n (Namensreferenz)
+_OPTION_BUCHSTABEN_RE = re.compile(r"-([A-Za-z]*)")
+_PRINTF_OPTION_RE = re.compile(r"[-]v")      # Absicht: kein Anführungszeichen-Literal der Option im Quelltext (Wächtertest gegen Host-Mounts)
+_ENV_WORT_RE = re.compile(r"(?:.*/)?env")
+_ENV_KURZ_MIT_ARGUMENT = frozenset("uCPL")                                           # `env -u NAME`, `-C DIR`, `-P PATH`, `-L`
+_ENV_LANG_MIT_ARGUMENT = frozenset({"--unset", "--chdir", "--split-string", "--argv0", "--default-signal", "--ignore-signal",
+                                    "--block-signal"})
+_WORT_ANFANG = "$`({!"                                                               # `$(env -i …)`, `(read X)`, `! unset X`
+_FLAG_LAENGE_MAX = 16                                                                # längere Wörter sind keine Optionsbündel (Laufzeit)
+
+
+def _name_am_anfang(wort: str, pos: int = 0) -> str | None:
+    m = _NAME_ANFANG_RE.match(wort, pos)
+    return m.group(1) if m else None
+
+
+def _segment_umgehung(tokens: list[str]) -> str | None:
+    """Ein einfacher Befehl (Wörter ohne `;`, `&`, `|`, Zeilenende), ein Durchgang über die Wörter. Rückgabe: der gesperrte Name,
+    `""` für `env -i` (leert die Umgebung) oder None."""
+    nach_unset = nach_read = nach_printf = False
+    deklaration: bool | None = None          # None: kein export/typeset/declare/local; False: gesehen; True: danach `-n` oder `+x`
+    erwarte_name = False                     # das nächste Wort ist ein Name: `-u`, `--unset`, `printf -v`, `for`
+    for roh in tokens:
+        w = roh.lstrip(_WORT_ANFANG)
+        treffer = None
+        if erwarte_name or nach_unset or nach_read:
+            treffer = _name_am_anfang(w)
+        erwarte_name = False
+        if treffer is None and deklaration:
+            treffer = _name_am_anfang(w, w.find("=") + 1)
+        if treffer:
+            return treffer
+        if w == "unset":
+            nach_unset = True
+        elif w == "read":
+            nach_read = True
+        elif w == "printf":
+            nach_printf = True
+        elif w == "for":
+            erwarte_name = True
+        elif w in ("export", "typeset", "declare", "local"):
+            deklaration = False
+        elif deklaration is False and len(w) <= _FLAG_LAENGE_MAX and _DEKLARATION_FLAG_RE.fullmatch(w):
+            deklaration = True
+        if nach_printf and _PRINTF_OPTION_RE.match(w):                          # `printf -v NAME` und `printf -vNAME`
+            if len(w) == 2:
+                erwarte_name = True
+            elif (treffer := _name_am_anfang(w, 2)):
+                return treffer
+        if w == "--unset":
+            erwarte_name = True
+        elif w.startswith("--unset="):
+            treffer = _name_am_anfang(w, len("--unset="))
+            if treffer:
+                return treffer
+        elif len(w) > 1 and w[0] == "-" and w[1] != "-":                       # Optionsbündel: `-u NAME`, `-uNAME`, `-vu NAME`
+            for j, b in enumerate(_OPTION_BUCHSTABEN_RE.match(w).group(1)):
+                if b != "u":
+                    continue
+                if 2 + j == len(w):
+                    erwarte_name = True
+                elif (treffer := _name_am_anfang(w, 2 + j)):
+                    return treffer
+    return _env_leert_umgebung(tokens)
+
+
+def _env_leert_umgebung(tokens: list[str]) -> str | None:
+    """`""` bei `env -i`, `env -` oder `env --ignore-environment` an beliebiger Stelle der env-Optionen: Optionen mit Argument (`-u X`, `-C dir`,
+    `--unset X`) werden übersprungen, der Rest eines `-S…`-Bündels wird weitergelesen. Die Optionen enden am ersten Wort ohne `-` (Befehl
+    oder `NAME=wert`); das Wort `env` unter den bereits gelesenen Optionen ist ein Argument und startet keine zweite Suche."""
+    k = 0
+    while k < len(tokens):
+        if not _ENV_WORT_RE.fullmatch(tokens[k].lstrip(_WORT_ANFANG)):
+            k += 1
+            continue
+        k += 1
+        zurueck: list[str] = []                                                # Rest eines `-S…`-Bündels, noch zu lesen
+        while zurueck or k < len(tokens):
+            if zurueck:
+                w = zurueck.pop()
+            else:
+                w = tokens[k]
+                k += 1
+            if w == "-" or w == "--ignore-environment":
+                return ""
+            if w.startswith("--"):
+                if w in _ENV_LANG_MIT_ARGUMENT:
+                    k += 1
+                continue
+            if not w.startswith("-"):
+                break
+            kurz = w[1:]
+            for j, b in enumerate(kurz[:_FLAG_LAENGE_MAX]):
+                if b == "i":
+                    return ""
+                if b == "S":
+                    if len(kurz) > j + 1:
+                        zurueck.append(kurz[j + 1:])
+                    break
+                if b in _ENV_KURZ_MIT_ARGUMENT:
+                    if j + 1 == len(kurz):
+                        k += 1
+                    break
+                if not b.isalnum():
+                    break
+    return None
+
+
+_QUOTES_RE = re.compile(r"\\\r?\n|[\"'\\]")     # Zeilenfortsetzung, Anführungszeichen und Rückstrich: die Shell entfernt sie vor dem Lesen des Namens
 
 # Hinweis-Kategorien, die `bauen` ausgeben kann (`hinweis: <kategorie>`); SKILL.md und bericht-format.md nennen jede.
 HINWEIS_KATEGORIEN = ("native-module", "prisma-engines", "lockfile-ohne-paketliste", "node-range-zu-lang",
@@ -90,6 +243,9 @@ DAEMON_WEG = ("cannot connect to the docker daemon", "error during connect", "is
 HAERTUNG_APP = ["--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--memory", "1g", "--pids-limit", "256"]
 # Kein --cap-drop: der Postgres-Entrypoint braucht chown und den Benutzerwechsel.
 HAERTUNG_DB = ["--security-opt", "no-new-privileges", "--memory", "512m", "--pids-limit", "256"]
+# Modell-Mock: eigener Satz (kleiner als HAERTUNG_APP, kein doppeltes --memory), Dateisystem nur lesbar, /tmp ohne exec.
+HAERTUNG_MOCK = ["--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--memory", "256m", "--pids-limit", "64",
+                 "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m"]
 
 
 class PocFehler(Exception):
@@ -227,13 +383,16 @@ def _lade_rolle(lauf: str, rolle: str) -> dict:
             z = json.load(f)
         port, befehl = z["port"], z["start_befehl"]
         env, dienst, seed = z.get("env", []), z.get("dienst"), z.get("seed")
+        mock = z.get("modell_mock", [])       # fehlt bei Dateien ohne Modell-Mock: Rolle ohne Mock
         if not (isinstance(port, int) and 0 < port < 65536 and isinstance(befehl, str) and befehl
                 and isinstance(env, list) and all(isinstance(e, str) and "=" in e for e in env)
-                and dienst in (None, "postgres") and (seed is None or isinstance(seed, str))):
+                and dienst in (None, "postgres") and (seed is None or isinstance(seed, str))
+                and isinstance(mock, list) and all(isinstance(m, str) and m in MOCK_ENV for m in mock)
+                and len(set(mock)) == len(mock)):
             raise ValueError("Zustandsdatei ungültig")
     except (OSError, ValueError, KeyError, TypeError):
         raise PocFehler(f"Rolle {rolle} nicht gestartet (oder Zustand unlesbar): erst `poc.py starten`") from None
-    return {"start_befehl": befehl, "port": port, "env": env, "dienst": dienst, "seed": seed}
+    return {"start_befehl": befehl, "port": port, "env": env, "dienst": dienst, "seed": seed, "modell_mock": mock}
 
 
 # ------------------------------------------------------------------------------------ docker-Aufruf
@@ -257,16 +416,33 @@ _ENDE: float | None = None          # monotone Frist des laufenden Befehls (star
 _BUDGET_SEKUNDEN = 0
 
 
-def _frist_setzen(umgebungsvariable: str, standard: int) -> None:
-    """Gesamtbudget des Befehls: Docker-Aufrufe mit `budget=True` werden auf die Restzeit gekürzt, danach nicht mehr gestartet.
-    Die Umgebungsvariable überschreibt den Standard (Tests)."""
-    global _ENDE, _BUDGET_SEKUNDEN
+def _nur_verkuerzt(umgebungsvariable: str, standard: int) -> int:
+    """`standard`, über die Umgebungsvariable nur verkürzbar (nie verlängerbar; ungültig, 0 und negativ gelten nicht)."""
     try:
         sekunden = int(os.environ.get(umgebungsvariable, ""))
     except ValueError:
-        sekunden = standard
-    _BUDGET_SEKUNDEN = sekunden if sekunden > 0 else standard
+        return standard
+    return sekunden if 0 < sekunden < standard else standard
+
+
+def _frist_setzen(umgebungsvariable: str, standard: int, verkuerzbar: bool = False) -> None:
+    """Gesamtbudget des Befehls: Docker-Aufrufe mit `budget=True` werden auf die Restzeit gekürzt, danach nicht mehr gestartet.
+    Die Umgebungsvariable überschreibt den Standard (Tests); mit `verkuerzbar` nur nach unten."""
+    global _ENDE, _BUDGET_SEKUNDEN
+    if verkuerzbar:
+        _BUDGET_SEKUNDEN = _nur_verkuerzt(umgebungsvariable, standard)
+    else:
+        try:
+            sekunden = int(os.environ.get(umgebungsvariable, ""))
+        except ValueError:
+            sekunden = standard
+        _BUDGET_SEKUNDEN = sekunden if sekunden > 0 else standard
     _ENDE = time.monotonic() + _BUDGET_SEKUNDEN
+
+
+def _mock_bereit_sekunden() -> int:
+    """Wartezeit auf den Modell-Mock: `MOCK_BEREIT`, über SECURITY_AUDIT_MOCK_BEREIT nur verkürzbar (nie verlängerbar)."""
+    return _nur_verkuerzt("SECURITY_AUDIT_MOCK_BEREIT", MOCK_BEREIT)
 
 
 def _ohne_frist() -> None:
@@ -911,7 +1087,7 @@ def cmd_bauen(a: argparse.Namespace) -> int:
 def _rolle_entfernen(lauf: str, rolle: str) -> None:
     netz = _netz(lauf, rolle)
     # `-v`: auch das anonyme Volume des Postgres-Images; sonst bliebe je neustart ein Volume liegen
-    _docker(["rm", "-f", "-v", f"{netz}-app", f"{netz}-db"], KURZ_TIMEOUT, budget=False)  # fehlende Container sind kein Fehler
+    _docker(["rm", "-f", "-v", f"{netz}-app", f"{netz}-db", f"{netz}-llm"], KURZ_TIMEOUT, budget=False)  # fehlende Container sind kein Fehler
 
 
 def _anfrage_container(lauf: str, rolle: str, argumente: list[str], daten: bytes, timeout: int) -> Ergebnis:
@@ -925,7 +1101,8 @@ def _anfrage_container(lauf: str, rolle: str, argumente: list[str], daten: bytes
     return r
 
 
-def _start_fehler(lauf: str, rolle: str, text: str) -> int:
+def _start_fehler(lauf: str, rolle: str, text: str, container: str = "app") -> int:
+    """`container`: dessen Logs den Fehlertext ergänzen (`app`, bei einem Fehler des Modell-Mocks `llm`)."""
     try:
         _daemon_pruefen()  # Daemon-Störung ohne Marker im Text: docker-fehlt statt start-fehler
     except DockerFehlt:
@@ -934,11 +1111,34 @@ def _start_fehler(lauf: str, rolle: str, text: str) -> int:
         except DockerFehlt:
             pass                           # Daemon wirklich weg: `poc.py aufraeumen` holt es später nach
         raise
-    logs = _docker(["logs", "--tail", str(TAIL_ZEILEN), f"{_netz(lauf, rolle)}-app"], KURZ_TIMEOUT, budget=False)
+    logs = _docker(["logs", "--tail", str(TAIL_ZEILEN), f"{_netz(lauf, rolle)}-{container}"], KURZ_TIMEOUT, budget=False)
     _rolle_entfernen(lauf, rolle)
     if _budget_erschoepft():
         text = f"Zeitbudget von {_BUDGET_SEKUNDEN} s erschöpft (Bash-Limit des Skills: 600 s). {text}"
     return _fehler_ende("start-fehler", "\n".join(t for t in (_tail(text), _tail(logs.text) if logs.ok else "") if t))
+
+
+def _mock_starten(lauf: str, rolle: str) -> str | None:
+    """Modell-Mock `<netz>-llm` im internen Netz der Rolle starten und auf seine Bereitschaft warten (`exec --bereit`: Exit 0
+    heißt bereit, Exit 1 nicht; bei festen Ports schreibt der Server nichts auf stdout). Gibt die Fehlerbeschreibung zurück,
+    None bei Erfolg. Jede Abfrage bekommt höchstens die Restzeit der Bereitschaftsfrist als Timeout."""
+    netz = _netz(lauf, rolle)
+    llm = f"{netz}-llm"
+    r = _docker(["run", "-d", "--pull", "never", "--name", llm, "--network", netz, "--network-alias", "llm", *HAERTUNG_MOCK,
+                 _image(lauf), "node", "/poc/llm-mock.mjs", "--server", "--port", str(MOCK_PORT),
+                 "--steuer-port", str(MOCK_STEUER_PORT)], 120)
+    if not r.ok:
+        return f"nicht gestartet: {'Zeitüberschreitung' if r.rc is None else r.text}"
+    frist = _mock_bereit_sekunden()
+    ende = time.monotonic() + frist
+    while True:
+        rest = ende - time.monotonic()
+        if rest <= 0 or _budget_erschoepft():
+            return f"nicht bereit nach {frist} s"
+        r = _docker(["exec", "-i", llm, "node", "/poc/llm-mock.mjs", "--bereit"], min(KURZ_TIMEOUT, max(1, int(rest))))
+        if r.ok:
+            return None
+        time.sleep(min(1, max(0, ende - time.monotonic())))
 
 
 def _starte(lauf: str, rolle: str, p: dict) -> int:
@@ -953,6 +1153,10 @@ def _starte(lauf: str, rolle: str, p: dict) -> int:
         if not intern.ok or intern.text.strip() != "true":
             return _start_fehler(lauf, rolle, f"Netz {netz} existiert schon und ist nicht als intern bestätigt "
                                               f"(`network inspect`: {_tail(intern.text, 2) or 'keine Antwort'})")
+    if p["modell_mock"]:
+        fehler = _mock_starten(lauf, rolle)
+        if fehler is not None:
+            return _start_fehler(lauf, rolle, f"Modell-Mock: {fehler}", "llm")
     if p["dienst"] == "postgres":
         if not _docker(["image", "inspect", POSTGRES_IMAGE], KURZ_TIMEOUT).ok:
             r = _docker(["pull", POSTGRES_IMAGE], PULL_TIMEOUT)
@@ -975,6 +1179,9 @@ def _starte(lauf: str, rolle: str, p: dict) -> int:
     umgebung = ["-e", "HOST=0.0.0.0", "-e", f"PORT={p['port']}"]
     for e in p["env"]:
         umgebung += ["-e", e]
+    for api in p["modell_mock"]:
+        for name, wert in MOCK_ENV[api]:
+            umgebung += ["-e", f"{name}={wert}"]
     r = _docker(["run", "-d", "--pull", "never", "--name", app, "--network", netz, "--network-alias", "app", *HAERTUNG_APP, *umgebung,
                  _image(lauf), "sh", "-c", p["start_befehl"]], 120)
     if not r.ok:
@@ -990,14 +1197,78 @@ def _starte(lauf: str, rolle: str, p: dict) -> int:
     print(f"app: http://app:{p['port']} (Rolle {rolle}, Netz {netz})")
     if p["dienst"] == "postgres":
         print(f"db: {DB_URL}")
+    if p["modell_mock"]:
+        print(f"modell-mock: {MOCK_URL} ({', '.join(p['modell_mock'])})")
     return 0
 
 
+_URL_ANFANG_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://")
+
+
+def _fremde_hosts_env(wert: str) -> list[str]:
+    """Nicht erlaubte Hosts in einem `--env`-Wert. Die Netzregel liest die Authority bis `/`, `?`, `#` oder Leerzeichen; in einer Liste
+    `https://app:3000,http://localhost:5173` wäre das `app:3000,http:`. Enthält ein gefundener „Host“ `,` oder `;` (das kommt in keinem Host
+    vor) und beginnt jedes Listenelement mit einem URL-Schema, wird jedes Element für sich geprüft. Fehlt einem Element das Schema
+    (`http://app,evil.com`), bleibt es beim Ergebnis für den ganzen Wert: Die Netzregel sähe `evil.com` allein nicht als Host.
+    Die Bash-Prüfung (`netzregel.ist_poc_aufruf`) bleibt unberührt."""
+    fremd = netzregel.verstoesse_poc(wert)
+    if any("," in h or ";" in h for h in fremd):
+        teile = [t.strip() for t in re.split(r"[,;]", wert)]
+        if all(_URL_ANFANG_RE.match(t) for t in teile if t):
+            fremd = []
+            for teil in teile:
+                fremd += [h for h in netzregel.verstoesse_poc(teil) if h not in fremd]
+    return fremd
+
+
+def _env_pruefen(env: list[str], modell_mock: list[str]) -> None:
+    """Regeln für `--env` (Exit 2, Meldungen nennen nur Namen und Host, nie den Wert): jeder Wert läuft durch die Netzregel
+    (`netzregel.verstoesse_poc`: nur app, db, llm, localhost und Loopback); mit `--modell-mock` sind die Namen in `MOCK_RESERVIERT`
+    (auch die der nicht gewählten API) gesperrt, weil `starten` sie selbst setzt."""
+    for e in env:
+        name, _, wert = e.partition("=")
+        if modell_mock and name.upper() in MOCK_RESERVIERT:
+            raise PocFehler(f"--env {name}: reservierter Name bei --modell-mock")
+        fremd = _fremde_hosts_env(wert)
+        if fremd:
+            raise PocFehler(f"--env {name}: nicht erlaubter Host {_entschaerfen(fremd[0])[:100]}")
+
+
+def _start_befehl_pruefen(befehl: str, modell_mock: list[str], option: str = "--start-befehl") -> None:
+    """Regeln für `--start-befehl` und `--seed` (`option`; Exit 2, die Meldung nennt nur Namen oder Host, nie den Befehl): mit `--modell-mock`
+    darf der Befehl keinen Namen aus `MOCK_RESERVIERT` zuweisen oder aufheben (`NAME=`, `NAME+=`, auch nach `env` und `export`, `unset NAME`,
+    `env -u NAME` auch gruppiert, `read NAME`, `for NAME in`, `printf -v NAME`, `export -n NAME`, `typeset +x NAME`, `declare -n x=NAME`; Anführungszeichen,
+    Rückstriche und Zeilenfortsetzungen im Namen zählen nicht: `OPENAI_BASE_UR""L=` wird erkannt) und kein `env -i`, `env -` oder `env --ignore-environment` (leeren die Umgebung);
+    unabhängig davon läuft er durch die Netzregel (nur URL-Hosts). Nicht erkennbar ist, was die Shell erst beim Ausführen zusammensetzt
+    (`eval`, Variablennamen aus Variablen, `process.env[…]` in einem Skript) und weitere Builtins, die Variablen setzen (`mapfile`, `getopts`,
+    `let`, `${NAME:=…}`): die Sperre ist das interne Netz, nicht diese Prüfung."""
+    if modell_mock:
+        for text in (befehl, _QUOTES_RE.sub("", befehl)):
+            m = MOCK_RESERVIERT_RE.search(text)
+            if m:
+                raise PocFehler(f"{option}: reservierter Name {m.group(1)} bei --modell-mock")
+            for segment in _SEGMENT_TRENNER_RE.split(text):
+                r = _segment_umgehung(segment.split())
+                if r:
+                    raise PocFehler(f"{option}: reservierter Name {r} bei --modell-mock")
+                if r is not None:
+                    raise PocFehler(f"{option}: env -i leert die Umgebung samt der Mock-Variablen bei --modell-mock")
+    fremd = netzregel.url_verstoesse(befehl)
+    if fremd:
+        raise PocFehler(f"{option}: nicht erlaubter Host {_entschaerfen(fremd[0])[:100]}")
+
+
 def cmd_starten(a: argparse.Namespace) -> int:
+    modell_mock = a.modell_mock or []
+    _env_pruefen(a.env or [], modell_mock)
+    _start_befehl_pruefen(a.start_befehl, modell_mock)
+    if a.seed:
+        _start_befehl_pruefen(a.seed, modell_mock, "--seed")      # läuft per `docker exec app sh -c`, also wie der Start-Befehl
     _daemon_pruefen()
     _frist_setzen("SECURITY_AUDIT_START_BUDGET", START_BUDGET)
     ordner = _ordner(a.lauf, anlegen=True)
-    p = {"start_befehl": a.start_befehl, "port": a.port, "env": a.env or [], "dienst": a.dienst, "seed": a.seed}
+    p = {"start_befehl": a.start_befehl, "port": a.port, "env": a.env or [], "dienst": a.dienst, "seed": a.seed,
+         "modell_mock": modell_mock}
     with _rollen_sperre(a.lauf, a.rolle, exklusiv=True):
         _schreibe_atomar(os.path.join(ordner, f"rolle-{a.rolle}.json"), {"lauf": a.lauf, "rolle": a.rolle, **p})
         return _starte(a.lauf, a.rolle, p)
@@ -1047,6 +1318,150 @@ def cmd_anfrage(a: argparse.Namespace) -> int:
         print("anfrage: Zeitüberschreitung", file=sys.stderr)
         return 1
     return 0 if r.rc == 0 else 1
+
+
+# ------------------------------------------------------------------------------------ modell (Steuerung des Modell-Mocks)
+
+def _antworten_serialisieren(daten: object) -> str:
+    """Was der Mock auf stdin bekommt: kompaktes JSON (Trennzeichen ohne Leerzeichen), kein NaN und kein Infinity."""
+    return json.dumps(daten, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+
+
+def _antworten_lesen(pfad: str) -> list:
+    """Antwortliste aus `--antworten-datei`: höchstens 64 KiB (+ 1 Byte gelesen), sonst Exit 2. Prüft Form und Netzregel
+    (Rohtext und geparstes JSON) und gibt die geprüfte Liste zurück; jede Abweichung endet mit Exit 2 ohne Docker-Aufruf."""
+    try:
+        with open(pfad, "rb") as f:
+            roh = f.read(ANTWORTEN_DATEI_MAX + 1)
+    except OSError as e:
+        raise PocFehler(f"--antworten-datei nicht lesbar: {e}") from e
+    if len(roh) > ANTWORTEN_DATEI_MAX:
+        raise PocFehler(f"--antworten-datei größer als {ANTWORTEN_DATEI_MAX // 1024} KiB")
+    try:
+        text = roh.decode("utf-8")
+        daten = json.loads(text)
+    except (ValueError, RecursionError):
+        raise PocFehler("--antworten-datei: kein gültiges JSON (UTF-8)") from None
+    try:
+        neu = _antworten_serialisieren(daten)                  # NaN und Infinity (auch aus `1e999`) kennt JSON nicht
+        eingabe = neu.encode("utf-8")                          # ein einzelnes Surrogat (\ud800) ist kein UTF-8
+    except (ValueError, RecursionError):
+        raise PocFehler("--antworten-datei: kein gültiges JSON (UTF-8)") from None
+    if len(eingabe) > STDIN_MAX_MOCK:                          # so viele Bytes bekäme der Mock auf stdin (`1e2` wird zu `100.0`)
+        raise PocFehler(f"--antworten-datei: nach dem Serialisieren größer als {STDIN_MAX_MOCK // 1024} KiB")
+    for fremd in (netzregel.verstoesse_poc(text), netzregel.verstoesse_poc(neu)):        # Rohtext und geparster Inhalt
+        if fremd:
+            raise PocFehler(f"--antworten-datei: nicht erlaubter Host {_entschaerfen(fremd[0])[:100]}")
+    _antworten_pruefen(daten)
+    return daten
+
+
+def _antworten_pruefen(daten: object) -> None:
+    """Form der Antwortliste (Exit 2 bei Abweichung): Liste mit höchstens 20 Einträgen; je Eintrag genau `text` (String, höchstens 16 384 UTF-16-Einheiten) oder
+    `werkzeug` (`name` nach `[A-Za-z0-9_.-]{1,64}`, `argumente` ein Objekt, optional), optional `wenn_enthaelt` nach `POCMARKER-…`."""
+    def falsch(grund: str) -> PocFehler:
+        return PocFehler(f"--antworten-datei: {grund}")
+
+    if not isinstance(daten, list):
+        raise falsch("JSON-Liste erwartet")
+    if len(daten) > ANTWORTEN_MAX:
+        raise falsch(f"höchstens {ANTWORTEN_MAX} Einträge")
+    for i, e in enumerate(daten, 1):
+        if not isinstance(e, dict) or not set(e) <= {"text", "werkzeug", "wenn_enthaelt"}:
+            raise falsch(f"Eintrag {i}: Objekt mit text oder werkzeug (und wenn_enthaelt) erwartet")
+        if ("text" in e) == ("werkzeug" in e):
+            raise falsch(f"Eintrag {i}: genau eines von text und werkzeug")
+        if "text" in e and not (isinstance(e["text"], str) and _utf16_laenge(e["text"]) <= ANTWORT_TEXT_MAX):
+            raise falsch(f"Eintrag {i}: text muss ein String mit höchstens {ANTWORT_TEXT_MAX} Zeichen sein")
+        if "werkzeug" in e:
+            w = e["werkzeug"]
+            if not (isinstance(w, dict) and set(w) <= {"name", "argumente"}):
+                raise falsch(f"Eintrag {i}: werkzeug braucht name (und argumente)")
+            if not (isinstance(w.get("name"), str) and WERKZEUG_NAME_RE.fullmatch(w["name"])):
+                raise falsch(f"Eintrag {i}: werkzeug.name muss [A-Za-z0-9_.-]{{1,64}} sein")
+            if "argumente" in w and not isinstance(w["argumente"], dict):
+                raise falsch(f"Eintrag {i}: werkzeug.argumente muss ein Objekt sein")
+        if "wenn_enthaelt" in e and not (isinstance(e["wenn_enthaelt"], str) and MARKER_RE.fullmatch(e["wenn_enthaelt"])):
+            raise falsch(f"Eintrag {i}: wenn_enthaelt muss POCMARKER-[a-z0-9-]{{1,40}} sein")
+
+
+def _utf16_laenge(wert: str) -> int:
+    """Länge in UTF-16-Einheiten wie `String.length` im Mock (ein Emoji zählt 2); argv-Surrogate zählen je 1."""
+    return len(wert.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def _maskier_paare(z: dict) -> list[tuple[str, str]]:
+    """(Name, Wert) aller Werte der Rolle, die nicht ins Protokoll gehören: die `--env`-Werte und die Schlüssel des Mocks (`*_API_KEY`
+    der gewählten APIs). Quelle für die Maskierung im Mock (`_maskier_werte`) und für den Fehlerauszug (`_ohne_werte`)."""
+    paare: list[tuple[str, str]] = []
+    for e in z["env"]:
+        name, _, wert = e.partition("=")
+        paare.append((name, wert))
+    for api in z["modell_mock"]:
+        paare += [(name, wert) for name, wert in MOCK_ENV[api] if name.endswith("_API_KEY")]
+    return paare
+
+
+def _maskier_werte(z: dict) -> bytes:
+    """stdin für `llm-mock.mjs --protokoll`: `{"werte":[{name,wert}]}` mit den Werten aus `_maskier_paare` ab 6 Zeichen, längste zuerst.
+    Mehr als 200 Werte (Grenze des Mocks), ein Wert über 4096 UTF-16-Einheiten (Zählweise des Mocks), eine Liste über 64 KiB oder ein Wert
+    mit ungültigem UTF-8 lassen sich nicht maskieren: Exit 2 statt Werte wegzulassen."""
+    gesehen: set[tuple[str, str]] = set()
+    werte = []
+    for name, wert in _maskier_paare(z):
+        if len(wert) >= MASKIER_WERT_MIN and (name, wert) not in gesehen:
+            try:
+                wert.encode("utf-8")
+            except UnicodeEncodeError:                             # `starten` lässt das nicht zu (`_typ_env`); alte Rollendatei o. ä.
+                raise PocFehler(f"--env {name}: Wert ist kein gültiges UTF-8, lässt sich nicht maskieren") from None
+            gesehen.add((name, wert))
+            werte.append((name[:MASKIER_NAME_MAX], wert))
+    werte.sort(key=lambda p: -len(p[1]))                   # stabil: bei gleicher Länge die Reihenfolge von `--env`
+    for name, wert in werte:
+        if _utf16_laenge(wert) > MASKIER_WERT_MAX:
+            raise PocFehler(f"--env {name}: Wert länger als {MASKIER_WERT_MAX} Zeichen, lässt sich nicht maskieren")
+    if len(werte) > MASKIER_WERTE_MAX:
+        raise PocFehler(f"{len(werte)} Werte der Rolle zu maskieren, höchstens {MASKIER_WERTE_MAX} möglich: weniger --env-Werte übergeben")
+    nutzlast = json.dumps({"werte": [{"name": n, "wert": w} for n, w in werte]}, ensure_ascii=False).encode("utf-8", "replace")
+    if len(nutzlast) > STDIN_MAX_MOCK:
+        raise PocFehler(f"Maskierwerte der Rolle zusammen größer als {STDIN_MAX_MOCK // 1024} KiB, lassen sich nicht maskieren")
+    return nutzlast
+
+
+def _ohne_werte(text: str, z: dict) -> str:
+    """Fehlertext ohne die Werte, die maskiert werden sollen (Mock und Docker geben sie nie aus; das hier ist die zweite Sicherung)."""
+    for name, wert in sorted(_maskier_paare(z), key=lambda p: -len(p[1])):
+        if len(wert) >= MASKIER_WERT_MIN:
+            text = text.replace(wert, f"<ENV:{name}>")
+    return text
+
+
+def cmd_modell(a: argparse.Namespace) -> int:
+    antworten = _antworten_lesen(a.antworten_datei) if a.antworten_datei else None
+    _frist_setzen("SECURITY_AUDIT_MODELL_BUDGET", MODELL_BUDGET, verkuerzbar=True)
+    with _rollen_sperre(a.lauf, a.rolle, exklusiv=False):
+        z = _lade_rolle(a.lauf, a.rolle)
+        if not z["modell_mock"]:
+            raise PocFehler(f"Rolle {a.rolle} läuft ohne Modell-Mock (`starten --modell-mock`)", code=1)
+        if antworten is not None:
+            modus, eingabe = ["--setzen"], _antworten_serialisieren(antworten).encode("utf-8")
+        else:
+            modus = ["--protokoll"] + (["--suche", a.suche] if a.suche else [])
+            eingabe = _maskier_werte(z)
+        r = _docker(["exec", "-i", f"{_netz(a.lauf, a.rolle)}-llm", "node", "/poc/llm-mock.mjs", *modus,
+                     "--steuer-port", str(MOCK_STEUER_PORT)], MODELL_BUDGET, eingabe=eingabe, anfang=True)
+    if r.rc is None:
+        print("modell: Zeitüberschreitung (Modell-Mock antwortet nicht)", file=sys.stderr)
+        return 1
+    if r.rc != 0:
+        auszug = _tail(_ohne_werte(r.err.decode("utf-8", "replace"), z), 5)
+        print(f"modell: Modell-Mock endete mit Exit {r.rc}" + (f": {auszug}" if auszug else ""), file=sys.stderr)
+        return 1
+    if antworten is not None:
+        print(f"modell: {len(antworten)} Antworten gesetzt (Rolle {a.rolle})")
+    else:
+        sys.stdout.write(_entschaerfen(r.out.decode("utf-8", "replace")))      # unverändert, nicht gekürzt; Kundenstämmiges läuft durch _entschaerfen
+    return 0
 
 
 def _eigene_namen(lauf: str, text: str) -> list[str]:
@@ -1207,16 +1622,40 @@ def _typ_port(s: str) -> int:
     return int(s)
 
 
+def _utf8_pruefen(s: str, option: str) -> None:
+    """Ein argv-Surrogat (ungültiges UTF-8) lässt sich weder in der Rollendatei speichern noch dem Mock zum Maskieren übergeben: Exit 2
+    mit der Option, nie mit dem Wert (statt eines Tracebacks beim Schreiben oder eines still unmaskierten Werts)."""
+    try:
+        s.encode("utf-8")
+    except UnicodeEncodeError:
+        raise argparse.ArgumentTypeError(f"{option}: kein gültiges UTF-8") from None
+
+
 def _typ_env(s: str) -> str:
     name, gleich, _wert = s.partition("=")
     if not gleich or not ENV_NAME_RE.fullmatch(name) or "\x00" in s:
         raise argparse.ArgumentTypeError("--env: K=V erwartet (K: Buchstaben, Ziffern, _)")
+    _utf8_pruefen(s, "--env")
+    return s
+
+
+def _typ_modell_mock(s: str) -> list[str]:
+    apis = s.split(",")
+    if not all(api in MOCK_ENV for api in apis) or len(set(apis)) != len(apis):
+        raise argparse.ArgumentTypeError("--modell-mock: Liste aus openai und anthropic ohne Duplikate erwartet (openai,anthropic)")
+    return apis
+
+
+def _typ_marker(s: str) -> str:
+    if not MARKER_RE.fullmatch(s):
+        raise argparse.ArgumentTypeError("--suche: POCMARKER-[a-z0-9-]{1,40} erwartet")
     return s
 
 
 def _typ_text(s: str) -> str:
     if not s.strip() or "\x00" in s:
         raise argparse.ArgumentTypeError("leerer Wert oder NUL-Zeichen")
+    _utf8_pruefen(s, "Wert")
     return s
 
 
@@ -1262,6 +1701,8 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--env", action="append", type=_typ_env)
     s.add_argument("--dienst", choices=["postgres"])
     s.add_argument("--seed", type=_typ_text)
+    s.add_argument("--modell-mock", type=_typ_modell_mock,
+                   help="Modell-Mock `llm` im Netz der Rolle starten: openai, anthropic oder openai,anthropic")
     neu("neustart", cmd_neustart, rolle=True)
     neu("ausfuehren", cmd_ausfuehren, rolle=True)
     s = neu("anfrage", cmd_anfrage, rolle=True)
@@ -1270,6 +1711,11 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--header", action="append", type=_typ_header)
     s.add_argument("--daten")
     s.add_argument("--daten-datei")
+    s = neu("modell", cmd_modell, rolle=True)
+    betriebsart = s.add_mutually_exclusive_group(required=True)
+    betriebsart.add_argument("--antworten-datei", help="Antwortliste (JSON) für den Modell-Mock setzen")
+    betriebsart.add_argument("--protokoll", action="store_true", help="Protokoll der Requests an den Modell-Mock ausgeben")
+    s.add_argument("--suche", type=_typ_marker, help="mit --protokoll: nur Requests, deren Body den Marker POCMARKER-… enthält")
     neu("aufraeumen", cmd_aufraeumen)
     neu("auflisten", cmd_auflisten, lauf=False)
     return p
@@ -1288,6 +1734,8 @@ def main(argv: list[str]) -> int:
         a.kommando = befehl
     if a.unterbefehl == "anfrage" and a.daten is not None and a.daten_datei:
         parser.error("anfrage: --daten und --daten-datei schließen sich aus")
+    if a.unterbefehl == "modell" and a.suche is not None and not a.protokoll:
+        parser.error("modell: --suche gehört zu --protokoll")
     try:
         return a.fn(a)
     except DockerFehlt as e:

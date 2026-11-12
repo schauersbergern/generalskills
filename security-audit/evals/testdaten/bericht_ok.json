@@ -6,7 +6,9 @@
   "teilpfad": null,
   "projekt": null,
   "karte": [],
-  "hinweise": [],
+  "hinweise": [
+    "KI-Prüfpunkte: nicht anwendbar (kein LLM- oder Agenten-SDK in package.json)"
+  ],
   "befunde": [
     {
       "id": "S-1",

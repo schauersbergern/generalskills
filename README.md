@@ -17,7 +17,7 @@ Der aktuelle Stand des Repos umfasst zehn produktiv nutzbare Skills, den F&E-Ski
 | `fix-findings` | Fixer-Thread (Effort high, von `pr-review-loop` mit Sonnet gestartet): prueft eingefuegte Review-Befunde, setzt angenommene per Test → Fix → Commit um, vor dem Push nur Typecheck und abhaengige Tests (ganze Suite in der CI, ohne CI einmal vor dem Push), pusht, liefert Entscheidungstabelle; Merge/Deploy nur auf Befehlswort; nimmt auch die Befundliste aus `security-audit` ohne PR an (eigener Worktree vom geprueften SHA, Push des Branches ausser bei oeffentlichen Repos, PR-Link, kein PR) | `fix-findings/SKILL.md` |
 | `auto-feature` | Autonomer Feature-Workflow aus einem Feature-File ohne Zwischenhalt: Spec (Opus 5.5) → Opus-Review max. 2 → Plan (Opus 5.5) → Opus-Review max. 2 → Sonnet-5.5-Umsetzung → Haertung → PRs → harter Stopp (HITL); Effort xhigh, nur Re-Reviews, lesende Refactor-/UI-Reviews und mechanische Tasks mit `sonnet-high`; ganze Suite einmal je TF; Agent-Statistik Pflicht (Format gilt fuer alle Skills, Skript `scripts/agent-stats.py` fuer Eintrag, Auswertung (auch je Skill-Stand), Thread-Tokens aus Transkripten und den Stempel `Skills: generalskills@<sha>` im Kopf jeder Statistik); kein PR-Review-Loop, kein Merge; Format des Feature-Files mit DoD-IDs und Nachweis-Art in `references/feature-file.md`; Retro am Laufende (auch in `pr-review-loop` und `fix-findings`) legt Fehlerklassen-Kandidaten zur Freigabe ab, Rezept `references/retro.md`, Ablage per `scripts/fehlerklassen.py` | `auto-feature/SKILL.md`, `auto-feature/references/feature-file.md`, `auto-feature/references/retro.md`, `auto-feature/scripts/agent-stats.py`, `auto-feature/scripts/fehlerklassen.py` |
 | `feature-file` | Macht aus Kundenwunsch, Call-Notiz oder Idee ein Feature-File fuer `auto-feature`: Ist-Stand im Code zuerst, Interview nur fuer Entscheidungen von User oder Kunde, Recherche nur als Default mit Quelle, Builder-Check durch einen frischen `opus-xhigh`, Freigabe-Zeile erst nach OK | `feature-file/SKILL.md` |
-| `security-audit` | Auditiert ganze Node/TS-Repos auf ausnutzbare Luecken: Karte der Angriffsflaeche, bis zu 6 Opus-Reviewer, 2 Pruefer, die jeden P1/P2 widerlegen oder per Docker-PoC im internen Netz belegen; dazu Abhaengigkeiten (osv-scanner, CISA KEV, Erreichbarkeit im Code), Lieferkette (Lockfile, `npm install` statt `npm ci`, offene Install-Skripte) und Secrets in der Git-Historie (gitleaks, Arbeitskopie vor dem Lesen geschwaerzt, Werte nie im Bericht); Bericht ausserhalb des Repos unter `~/.claude/security-reviews/<repo>/`, Befundliste fuer `/fix-findings` (Eingang ohne PR ab TF5); aendert das Repo nie | `security-audit/SKILL.md`, `security-audit/references/*`, `security-audit/scripts/bericht.py`, `security-audit/scripts/poc.py`, `security-audit/scripts/netzregel.py`, `security-audit/scripts/gitkopie.py`, `security-audit/scripts/lieferkette.py`, `security-audit/evals/run_eval.py` |
+| `security-audit` | Auditiert ganze Node/TS-Repos auf ausnutzbare Luecken: Karte der Angriffsflaeche, bis zu 6 Opus-Reviewer, 2 Pruefer, die jeden P1/P2 widerlegen oder per Docker-PoC im internen Netz belegen; dazu Abhaengigkeiten (osv-scanner, CISA KEV, Erreichbarkeit im Code), Lieferkette (Lockfile, `npm install` statt `npm ci`, offene Install-Skripte) und Secrets in der Git-Historie (gitleaks, Arbeitskopie vor dem Lesen geschwaerzt, Werte nie im Bericht); KI- und Agenten-Apps: Erkennung ueber `package.json` (`ki.py`), eigene Pruefpunkte K1 bis K7 (fremde Inhalte steuern Agenten, Tools mit Wirkung, Modellausgabe in Senken, Geheimnisse im Prompt), belegt per Modell-Mock im internen Docker-Netz, nie gegen eine echte Modell-API; Bericht ausserhalb des Repos unter `~/.claude/security-reviews/<repo>/`, Befundliste fuer `/fix-findings` (Eingang ohne PR ab TF5); aendert das Repo nie | `security-audit/SKILL.md`, `security-audit/references/*`, `security-audit/scripts/bericht.py`, `security-audit/scripts/poc.py`, `security-audit/scripts/netzregel.py`, `security-audit/scripts/gitkopie.py`, `security-audit/scripts/lieferkette.py`, `security-audit/scripts/ki.py`, `security-audit/docker/llm-mock.mjs`, `security-audit/evals/run_eval.py` |
 | `architektur-rat` | **Forschung und Entwicklung, in keinen Workflow eingebunden, nur auf ausdruecklichen Wunsch.** Zwei unabhaengige `sonnet-high`-Voten (Pragmatiker, Risiko) zu einer offenen, schwer umkehrbaren Code-/Betriebsentscheidung; Hauptsession entscheidet und dokumentiert beide Voten. Test 2026-11-09: keine bessere Entscheidung als ohne Rat, ~360k Sonnet-Input-Aequivalent je Runde; nicht nach `~/.claude/skills/` verlinkt, fuer einen Versuch `ln -sfn ~/Projects/skillz/nikskills/architektur-rat ~/.claude/skills/architektur-rat` | `architektur-rat/SKILL.md` |
 | `agents/opus-xhigh`, `agents/sonnet-xhigh`, `agents/sonnet-high` | Subagent-Definitionen mit `effort: xhigh` fuer Reviews bzw. Umsetzung, genutzt von `pr-review-loop`, `auto-feature`, `feature-file` (Builder-Check) und `security-audit` (Reviewer und Pruefer); `sonnet-high` (`effort: high`) fuer die Delta-Reviews in `pr-review-loop`, die Abschlaege nach der Effort-Regel in `auto-feature` und die Voten im F&E-Skill `architektur-rat` | `agents/*.md` |
 
@@ -77,21 +77,26 @@ nikskills/
       Dockerfile.poc
       Dockerfile.poc.dockerignore
       anfrage.mjs
+      llm-mock.mjs
     evals/
       auswertung.py
       run_eval.py
       test_auswertung.py
       test_fixture.py
       expected/
+      fixture-ki/
       fixture-web/
+      sdk-vertrag/
       testdaten/
     references/
       agenten-briefings.md
       bericht-format.md
+      pruefpunkte-ki.md
       pruefpunkte-web.md
     scripts/
       bericht.py
       gitkopie.py
+      ki.py
       netzregel.py
       poc.py
       test_*.py
@@ -313,12 +318,21 @@ Werkzeuge fuer Abhaengigkeiten und Secrets: `brew install osv-scanner gitleaks`.
 weiter und der Bericht nennt „osv-scanner fehlt“ bzw. „gitleaks fehlt“. Netz nutzen nur die Skripte selbst
 (OSV-API ueber osv-scanner, CISA-KEV-Katalog).
 
+KI- und Agenten-Apps (TF3): `ki.py erkennen` findet LLM- und Agenten-SDKs in den `package.json` der Arbeitskopie
+und meldet „KI-Pruefpunkte: angewendet (…)“ bzw. „nicht anwendbar (…)“ im Bericht. Bei Treffern kommt eine Flaeche
+„KI/Agent“ dazu (Pruefpunkte `references/pruefpunkte-ki.md`). `poc.py starten --modell-mock openai,anthropic` startet
+einen Modell-Mock als Container `llm` im internen Netz der Rolle; die Pruefer belegen Befunde mit Marker und
+Protokoll (`poc.py modell`), der Befund traegt dann `annahme_modell` („Modell folgt“). Eine echte Modell-API wird nie
+aufgerufen. Azure, Bedrock, Vertex und Gemini laufen nicht ueber den Mock.
+
 Tests fuer `security-audit`:
 
 ```bash
 python3 -m pytest security-audit -q
 # Docker-Integration (braucht Docker)
 SECURITY_AUDIT_DOCKER=1 python3 -m pytest security-audit/scripts/test_poc_docker.py -q
+# Modell-Mock gegen die echten SDKs (braucht npm, Netz zur npm-Registry und Node ≥ 22)
+SECURITY_AUDIT_SDK_VERTRAG=1 SECURITY_AUDIT_SDK_NODE=<node ≥ 22> python3 -m pytest security-audit/scripts/test_llm_mock.py -k vertrag -q
 # Abnahme-Eval: startet `claude -p` mit Opus und bis zu 8 Subagenten,
 # grob 0,5–1 Mio. Tokens je Lauf; braucht Docker
 SECURITY_AUDIT_EVAL=1 python3 -m pytest security-audit/evals -q
@@ -326,6 +340,9 @@ SECURITY_AUDIT_EVAL=1 python3 -m pytest security-audit/evals -q
 SECURITY_AUDIT_EVAL=1 python3 security-audit/evals/run_eval.py --fixture fixture-deps
 SECURITY_AUDIT_EVAL=1 python3 security-audit/evals/run_eval.py --fixture fixture-web --ohne-lockfile --ohne gitleaks,osv-scanner,docker --erwartung expected/fixture-web-ohne.json
 ```
+
+`SECURITY_AUDIT_SDK_NODE` muss auf die echte Node-Binaerdatei zeigen, nicht auf einen Versions-Manager-Shim (nvm, volta,
+asdf, mise): Ein Shim setzt `PWD` und `SHLVL`, und der Lauf endet dann mit Exit 4 (Fehlalarm des Waechters).
 
 Aufruf mit Argumenten, z. B. `/pr-review-loop 214 215` (je PR ein neuer Fixer, keine Rundengrenze) oder `/pr-review-loop 214 "Fixer 214" runden=3`, `/fix-findings <Liste> [mergen] [deployen]`,
 `/auto-feature docs/features/<datei>.md`. Projektspezifische Befehle (Tests, Lint, Deploy)

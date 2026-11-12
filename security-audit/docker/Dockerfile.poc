@@ -1,6 +1,6 @@
 # Image für den Security-Audit-PoC. Bau über scripts/poc.py (DOCKER_BUILDKIT=1, keine `# syntax=`-Zeile):
 #   Kontext      = Arbeitskopie (<zustand>/quelle), Ausschlüsse in Dockerfile.poc.dockerignore
-#   zweiter Kontext poc = security-audit/docker (liefert anfrage.mjs)
+#   zweiter Kontext poc = security-audit/docker (liefert anfrage.mjs und llm-mock.mjs; Dockerfile.poc.dockerignore gilt nur für den Hauptkontext)
 # Kundencode läuft nur im Container: Abhängigkeiten ohne Install-Skripte, Build ohne Netz, alles als USER node.
 ARG NODE=22
 
@@ -17,3 +17,5 @@ COPY --chown=node:node . .
 RUN --network=none sh -c "$BUILD_BEFEHL"
 # Gehört root und liegt außerhalb von /app: der Kunden-Build läuft als node und kann die Datei nicht ändern.
 COPY --from=poc --chown=root:root anfrage.mjs /poc/anfrage.mjs
+# Modell-Mock (poc.py starten --modell-mock): ebenso root-eigen und erst nach dem Kunden-Build; nur node:-Builtins, kein ausgehender Request.
+COPY --from=poc --chown=root:root llm-mock.mjs /poc/llm-mock.mjs
