@@ -317,7 +317,7 @@ def test_subagenten_aus_datei(stream):
 
 def test_lade_stream():
     events, uebersprungen = auswertung.lade_stream(os.path.join(TESTDATEN, "stream_ok.jsonl"))
-    assert uebersprungen == 0 and len(events) == 8
+    assert uebersprungen == 0 and len(events) == 10
 
 
 def test_stream_abgeschnitten():
@@ -764,7 +764,9 @@ def docker_rest():
         json.dump(zustand, f)
 if modus == "haengt":
     print(json.dumps({{"type": "assistant", "parent_tool_use_id": None, "message": {{"content": [
-        {{"type": "tool_use", "id": "h1", "name": "Bash", "input": {{"command": "python3 /skill/security-audit/scripts/poc.py starten --lauf 0a1b2c3d --rolle p1"}}}}]}}}}), flush=True)
+        {{"type": "tool_use", "id": "h1", "name": "Bash", "input": {{"command": "python3 -I /skill/security-audit/scripts/poc.py neu"}}}}]}}}}), flush=True)
+    print(json.dumps({{"type": "user", "message": {{"content": [
+        {{"type": "tool_result", "tool_use_id": "h1", "content": "0a1b2c3d\\n"}}]}}}}), flush=True)
     if os.environ.get("FAKE_CLAUDE_DOCKER_REST"):
         docker_rest()
     kind = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
@@ -1270,11 +1272,41 @@ def test_aufraeumen_ohne_bekannte_laeufe_loescht_nichts_r1_3(ev):
     assert [c for c in ev.docker() if c[:1] == ["rm"]] == []
 
 
-def test_lauf_ids_aus_befehlen_r1_3(stream):
-    s = list(stream) + [bash("x1", "python3 /s/scripts/poc.py neu"), bash("x2", "python3 poc.py aufraeumen --lauf deadbeef"),
-                        bash("x3", "python3 poc.py anfrage --lauf nichthex --rolle p1"), tool_use("x4", "Grep", {"pattern": "--lauf cafebabe"})]
+def ergebnis(i, inhalt, **kw):
+    return {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": i, "content": inhalt, **kw}]}}
+
+
+NEU = "python3 -I /skill/security-audit/scripts/poc.py neu"
+
+
+def test_lauf_ids_aus_der_ausgabe_von_neu_r2_2():
+    """R2-2: Eigene Läufe = Ausgabe von `poc.py neu` (über die tool_use-ID), nicht abgeschriebene `--lauf`-Texte."""
+    s = [bash("n1", NEU), ergebnis("n1", "0a1b2c3d\n"),
+         bash("n2", NEU), ergebnis("n2", [{"type": "text", "text": "deadbeef\n"}]),
+         bash("n3", NEU), ergebnis("n3", "11111111\n", is_error=True),                 # Fehler: zählt nicht
+         bash("n4", NEU), ergebnis("n4", "kein id\n"),
+         bash("n5", NEU), ergebnis("n5", "22222222\n33333333\n")]                      # mehr als eine Zeile: zählt nicht
     assert auswertung.lauf_ids(s) == {"0a1b2c3d", "deadbeef"}
-    assert auswertung.lauf_ids(s, '{"type":"assistant","message":{"content":[{"type":"tool_use","input":{"command":"python3 poc.py starten --lauf 12345678 --ro') == {"0a1b2c3d", "deadbeef", "12345678"}
+
+
+@pytest.mark.parametrize("befehl", [
+    'echo "--lauf ffffffff"', "python3 -I /skill/security-audit/scripts/poc.py aufraeumen --lauf ffffffff",
+    "python3 -I /skill/security-audit/scripts/poc.py auflisten", "L=$(python3 -I /skill/security-audit/scripts/poc.py neu)",
+    "python3 -I /skill/security-audit/scripts/poc.py neu && ls", "cat /tmp/x neu", "python3 /x/scripts/poc.py neu",
+])
+def test_lauf_ids_fremde_id_in_anderem_befehl_zaehlt_nicht_r2_2(befehl):
+    """Eine aus `auflisten` abgeschriebene oder in einem `echo` genannte fremde ID wird nicht „eigen“, auch wenn ein
+    tool_result dazu eine ID enthält."""
+    s = [bash("a", befehl), ergebnis("a", "ffffffff\n"), bash("b", "python3 -I /skill/security-audit/scripts/poc.py anfrage --lauf ffffffff --rolle p1 --pfad /")]
+    assert auswertung.lauf_ids(s) == set()
+
+
+def test_lauf_ids_mit_quotes_und_variablen_ist_unabhaengig_vom_befehlstext_r2_2():
+    s = [bash("n1", NEU), ergebnis("n1", "0a1b2c3d\n"),
+         bash("a", "python3 -I /skill/security-audit/scripts/poc.py anfrage --lauf \"0a1b2c3d\" --rolle p1 --pfad /"),
+         bash("b", "python3 -I /skill/security-audit/scripts/poc.py aufraeumen --lauf  '0a1b2c3d'")]
+    assert auswertung.lauf_ids(s) == {"0a1b2c3d"}
+    assert auswertung.lauf_ids([]) == set() and auswertung.lauf_ids(None) == set()
 
 
 def test_fixture_unbekannt(ev):

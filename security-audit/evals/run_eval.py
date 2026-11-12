@@ -292,17 +292,17 @@ def docker_listen(laeufe: set[str] | None = None) -> dict[str, list[str]]:
 
 
 def _eigene_laeufe(stream_pfad: str) -> set[str]:
-    """Lauf-IDs aus dem Stream dieses Evals (leer, wenn der Stream fehlt: dann hat der Lauf nichts gestartet)."""
+    """Lauf-IDs aus den `poc.py neu`-Ausgaben im Stream dieses Evals (leer, wenn der Stream fehlt: dann hat der Lauf nichts gestartet)."""
     try:
-        ereignisse, _, _, letzte = auswertung.lade_stream_info(stream_pfad)
+        ereignisse, _, _, _ = auswertung.lade_stream_info(stream_pfad)
     except OSError:
         return set()
-    return auswertung.lauf_ids(ereignisse, letzte)
+    return auswertung.lauf_ids(ereignisse)
 
 
 def docker_aufraeumen(laeufe: set[str]) -> bool:
     """Entfernt Container, Netze und Images der Läufe `laeufe` (Namen `security-audit-<lauf>…`, nur diese; die Lauf-IDs
-    stammen aus den `--lauf`-Argumenten im Stream des Evals, so bleibt ein parallel laufendes echtes Audit unberührt).
+    stammen aus den Ausgaben von `poc.py neu` im Stream des Evals, so bleibt ein parallel laufendes echtes Audit unberührt).
     True, wenn nichts übrig blieb; False bei Fehlern beim Entfernen und wenn eine Liste nicht lesbar war (dann ist
     unbekannt, ob etwas übrig ist). Ohne Lauf-IDs gibt es nichts zu entfernen."""
     ok = True
