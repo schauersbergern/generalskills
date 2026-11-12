@@ -8,7 +8,7 @@
   bericht.py rendern <json>                       Schema prüfen, <basisname>.md neben das JSON schreiben
                                                   (Exit 2 mit Fehlerliste auf stderr)
 
-Die Befundliste im ersten Codeblock des Markdown nimmt /fix-findings an (Format wie pr-review-loop).
+Die Befundliste im ersten Codeblock des Markdown ist für /fix-findings gedacht (Format wie pr-review-loop; Eingang ohne PR ab TF5).
 Nur Standardbibliothek; git-Aufrufe über gitkopie.git.
 """
 import argparse
@@ -44,33 +44,13 @@ class KontextFehler(Exception):
 
 # ------------------------------------------------------------------------------------ kontext
 
-def _bereinigen(name: str) -> str | None:
-    """Repo-Name auf [A-Za-z0-9._-] beschränken; leer oder nur Punkte → None."""
-    name = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-")[:100]
-    return None if not name or re.fullmatch(r"\.+", name) else name
+_bereinigen = gitkopie.repo_bereinigen
 
 
 def _repo_name(wurzel: str) -> str:
-    try:
-        url = git(wurzel, "config", "--get", "remote.origin.url").stdout.decode(errors="replace").strip()
-    except GitFehler:
-        url = ""
-    if url:
-        basis = re.split(r"[/:\\]", url.rstrip("/\\"))[-1]
-        if basis.endswith(".git"):
-            basis = basis[:-4]
-        name = _bereinigen(basis)
-        if name:
-            return name
-    ordner = wurzel
-    try:
-        gemeinsam = os.fsdecode(git(wurzel, "rev-parse", "--path-format=absolute", "--git-common-dir")
-                                .stdout).rstrip("\n")
-        if os.path.basename(gemeinsam) == ".git":
-            ordner = os.path.dirname(gemeinsam)
-    except GitFehler:
-        pass
-    return _bereinigen(os.path.basename(ordner)) or "repo"
+    """Repo-Name für Dateinamen und Bericht (aus origin, ersatzweise Ordnername): `gitkopie.repo_name`, auch von `poc.py`
+    im Fertig-Marker genutzt, damit `auflisten` denselben Namen zeigt wie `kontext`."""
+    return gitkopie.repo_name(wurzel)
 
 
 def _teilpfad(wurzel: str, teilpfad: str, sha: str = "HEAD") -> str:
@@ -121,8 +101,10 @@ def _slug(teilpfad: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", teilpfad.lower()).strip("-") or "teil"
 
 
-def kontext(repo: str, teilpfad: str | None, jetzt: datetime | None = None) -> dict:
-    """Kontext des Repos unter dem Pfad `repo`; wirft KontextFehler (CLI: Exit 3)."""
+def kontext(repo: str, teilpfad: str | None, jetzt: datetime | None = None, repo_konfig_geprueft: bool = False) -> dict:
+    """Kontext des Repos unter dem Pfad `repo`; wirft KontextFehler (CLI: Exit 3). Bringt das Repo eigene Claude-Konfiguration
+    mit (`repo_konfiguration` nicht leer), bricht `kontext` ohne `repo_konfig_geprueft` vor der Namensreservierung ab: ein
+    späterer Aufruf mit dem Schalter bekommt denselben Basisnamen (kein `-2` durch den Abbruch)."""
     jetzt = jetzt or datetime.now()
     try:
         wurzel = os.fsdecode(git(repo, "rev-parse", "--show-toplevel").stdout).rstrip("\n")
@@ -137,11 +119,18 @@ def kontext(repo: str, teilpfad: str | None, jetzt: datetime | None = None) -> d
     slug = _slug(echt) if echt is not None else None
     # git-Teil vor der Reservierung: scheitert er (auch am Zeitbudget), bleibt keine `.reserviert`-Datei zurück
     try:
-        konfig = [_t(p) for p in gitkopie.repo_konfiguration(wurzel, sha)]
+        versioniert = gitkopie.repo_konfiguration(wurzel, sha)
+        konfig = [_t(p) for p in versioniert] + [f"{_t(p)} (nur im Arbeitsbaum, nicht im geprüften Commit)"
+                                                 for p in gitkopie.arbeitsbaum_konfiguration(wurzel, versioniert)]
     except ZeitbudgetFehler as e:
         raise KontextFehler(_zeitbudget_meldung(e)) from e
     except GitFehler as e:
         raise KontextFehler(f"Konfiguration in HEAD nicht lesbar: {_t(e)}") from e
+    if konfig and not repo_konfig_geprueft:
+        raise KontextFehler("Dieses Repo bringt eigene Claude-Konfiguration mit, die in dieser Session Code auf dem Host "
+                            "ausführen kann. Prüfe sie und starte die Session mit `claude --setting-sources user "
+                            "--strict-mcp-config`, dann `/security-audit … repo-konfig-geprueft`.\n"
+                            f"Gefunden: {', '.join(konfig)}")
     hinweise = gitkopie.repo_hinweise(wurzel, sha)      # git-Fehler werden dort zu Hinweisen; Zeitbudget unten geprüft
     if gitkopie.frist_erschoepft():
         raise KontextFehler(_zeitbudget_meldung(ZeitbudgetFehler("Prüfung des Repos nicht beendet")))
@@ -520,17 +509,22 @@ def _kontext_budget() -> float:
     return sekunden
 
 
-def main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(prog="bericht.py")
+def _parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(prog="bericht.py", allow_abbrev=False)
     sub = ap.add_subparsers(dest="befehl", required=True)
-    k = sub.add_parser("kontext")
+    k = sub.add_parser("kontext", allow_abbrev=False)
     k.add_argument("--teilpfad")
     k.add_argument("--repo", default=".")
-    rp = sub.add_parser("repo")
+    k.add_argument("--repo-konfig-geprueft", action="store_true", dest="repo_konfig_geprueft")
+    rp = sub.add_parser("repo", allow_abbrev=False)
     rp.add_argument("--repo", default=".")
-    r = sub.add_parser("rendern")
+    r = sub.add_parser("rendern", allow_abbrev=False)
     r.add_argument("json")
-    args = ap.parse_args(_argv_mit_werten(argv))
+    return ap
+
+
+def main(argv: list[str]) -> int:
+    args = _parser().parse_args(_argv_mit_werten(argv))
     if args.befehl == "rendern":
         return _rendern(args.json)
     if args.befehl == "repo":
@@ -543,7 +537,7 @@ def main(argv: list[str]) -> int:
         return 0
     try:
         gitkopie.frist_setzen(time.monotonic() + _kontext_budget())
-        ergebnis = kontext(args.repo, args.teilpfad)
+        ergebnis = kontext(args.repo, args.teilpfad, repo_konfig_geprueft=args.repo_konfig_geprueft)
     except KontextFehler as e:
         print(str(e), file=sys.stderr)
         return 3

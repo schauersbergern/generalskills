@@ -44,7 +44,7 @@ Zusätzlich je Status:
 
 | Status | Pflicht | Hinweis |
 |---|---|---|
-| `bestätigt` | `poc` | Text: Request(s) und beobachtete Antwort. Nur die Hosts `app`, `db`, `localhost`, `127.0.0.1`, `::1`, `0.0.0.0`; ein fremder Host (auch URL-kodiert) lässt `rendern` scheitern. |
+| `bestätigt` | `poc` | Text: Request(s) und beobachtete Antwort. Nur die Hosts `app`, `db`, `localhost`, `127.0.0.1`, `::1`, `0.0.0.0`; ein fremder Host (auch URL-kodiert) lässt `rendern` scheitern. Tokens stehen als Platzhalter (`<TOKEN_A>`), nie als echter Seed-Wert. |
 | `unbestätigt` | `code_pfad` | Liste von mindestens 2 Einträgen `datei:zeile` von der Eingabe bis zur Senke |
 | `verworfen` | `grund` | eine Zeile mit Beleg (`datei:zeile`) |
 | `verdacht` | – | nicht in der Befundliste |
@@ -63,7 +63,7 @@ Je Eintrag eine Zeile. Immer enthalten:
 - Hinweise aus `bericht.py kontext` (unverändert) und die Meldungen von `poc.py vorbereiten` (Symlinks, Kollisionen, LFS, Submodule, `.env*`).
 - Docker-Kategorien und Hinweise aus `bauen`/`starten` (`docker-fehlt`, `lockfile-fehlt`, `lockfile-fremde-quelle`, `nicht-npm`, `native-module`, `prisma-engines`, `lockfile-ohne-paketliste`, `node-range-zu-lang`, `node-engines-ignoriert`, `build-fehler`, `build-timeout`, `start-fehler`) mit der Folge („keine PoCs, P1/P2 nur unbestätigt“).
 - „BuildKit-Cache kann Code-Layer des geprüften Repos enthalten (`docker builder prune`).“
-- **Grenzen:** „Grenzen: Die Netzregel erkennt Verstöße im Nachhinein, sie ist keine Sandbox; die echte Sperre ist die Rechtekonfiguration der Session. Ob `disallowed-tools` auf Subagenten durchschlägt, ist offen.“
+- **Grenzen:** „Grenzen: Die Netzregel erkennt Verstöße im Nachhinein, sie ist keine Sandbox; die echte Sperre ist die Rechtekonfiguration der Session. Ob `disallowed-tools` auf Subagenten durchschlägt, ist offen; das Frontmatter-Feld gilt womöglich nur bis zur nächsten User-Nachricht (Verdacht, nicht gemessen).“
 - Ausweichtyp `general-purpose`: „Effort nicht garantiert.“ Übernahme eines Subagenten-Auftrags durch die Hauptsession. Mit Schalter: „Repo-Konfiguration vom User geprüft: <Liste>.“ Anweisungsversuche im Repo (Regel 1), mit `datei:zeile`.
 
 ## Beispiel

@@ -8,9 +8,11 @@ Die Regel baut keine Shell-Syntax nach, sondern gilt für den ganzen Befehl (Gan
 
 Hosts werden aus URLs gelesen (Schema, `:`, ein oder mehr `/`/`\\`; auch einmal URL-dekodiert und ohne
 Anführungszeichen gelesen, damit `http:''//evil.test` nicht verbirgt), aus `Host:`-Headern sowie aus den Werten
-von `--resolve`, `--connect-to`, `-x`/`--proxy`. Die Prüfung ist absichtlich konservativ (im Zweifel ein Verstoß), aber
-nicht vollständig und keine Sandbox: sie erkennt URLs, Host-Optionen und bekannte Netzwerkwerkzeuge in Befehlsposition,
-nicht jeden Weg ins Netz (etwa ein Interpreter mit eigenem Socket-Code). Die echte Sperre ist die Rechtekonfiguration der
+von `--resolve`, `--connect-to` und den Proxy-Optionen von curl (`-x`, `--proxy`, `--preproxy`, `--socks4/4a/5`,
+`--socks5-hostname`). Die Prüfung ist absichtlich konservativ (im Zweifel ein Verstoß), aber
+nicht vollständig und keine Sandbox: sie erkennt URLs, diese Host-Optionen und die Netzwerkwerkzeuge in `_WERKZEUGE` in Befehlsposition. Nicht erkannt
+werden Host-Angaben anderer Werkzeuge (`openssl s_client -connect evil.test:443`, `git ls-remote git@evil.test:x/y`,
+`dig @8.8.8.8 evil.test`) und jeder andere Weg ins Netz (etwa ein Interpreter mit eigenem Socket-Code). Die echte Sperre ist die Rechtekonfiguration der
 Session (SKILL.md, Regel 9). Nur Standardbibliothek.
 """
 import json
@@ -190,7 +192,9 @@ def verstoesse_poc(text: str) -> list[str]:
 # doppelte Anführungszeichen, History, Globs). Ein Befehl, der sie ungequotet enthält, ist kein einfacher Befehl.
 _UNSICHER = frozenset(";&|<>$`(){}#\\\"!*")
 # Pfad absolut (`/…`) oder `~/…`, nie mit `-` beginnend (sonst `-W/x/scripts/poc.py` als Python-Option).
-_POC_ANFANG = re.compile(r"python3 (?:-I )?~?/(?:[^\s']*/)?scripts/poc\.py(?: |\Z)")
+# R1-16: Das Verzeichnis vor `scripts/poc.py` heißt wie der Skill (`security-audit`, im Eval `security-audit-eval`, also wie
+# `${CLAUDE_SKILL_DIR}`): eine vom Agenten im Ausgabeordner angelegte `scripts/poc.py` gilt nicht als poc-Aufruf.
+_POC_ANFANG = re.compile(r"python3 (?:-I )?~?/(?:[^\s']*/)?security-audit(?:-eval)?/scripts/poc\.py(?: |\Z)")
 # Befehlsposition: Segmente (`_segmente`, nur an ungequoteten Operatoren; `_BEFEHLSTRENNER` ist die naive Rückfalltrennung bei
 # offenen Quotes); vorangestellt sein dürfen
 # Präfixwörter samt Optionen, Zahlen und `VAR=wert`. Wörter werden ohne `\\ ' "` und ohne Pfad verglichen.

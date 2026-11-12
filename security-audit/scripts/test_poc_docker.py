@@ -67,9 +67,11 @@ class Stack:
     def lauf_args(self, *args):
         return [args[0], "--lauf", self.lauf, *args[1:]]
 
-    def probe(self, netz, js, *args):
-        """Node-Probe im Container des App-Images direkt per docker run (kein Testmodus in poc.py)."""
-        r = docker("run", "--rm", "--network", netz, "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+    def probe(self, netz, js, *args, host_gateway=False):
+        """Node-Probe im Container des App-Images direkt per docker run (kein Testmodus in poc.py). Mit `host_gateway`
+        löst `host.docker.internal` auch auf einer Linux-Engine auf (Positivkontrolle im Default-Bridge-Netz)."""
+        zusatz = ["--add-host=host.docker.internal:host-gateway"] if host_gateway else []
+        r = docker("run", "--rm", "--network", netz, *zusatz, "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                    self.image, "node", "-e", js, *args, timeout=90)
         return r.stdout.strip()
 
@@ -114,8 +116,19 @@ def stack(tmp_path_factory):
 @pytest.fixture(scope="module")
 def host_listener():
     """TCP-Listener auf dem Host (127.0.0.1), den kein Container erreichen darf (außer der Positivkontrolle)."""
+    yield from _listener("127.0.0.1")
+
+
+@pytest.fixture(scope="module")
+def host_listener_alle():
+    """TCP-Listener auf dem Host an allen Adressen (0.0.0.0): auf einer Linux-Engine läge er auch auf der Gateway-IP
+    des Docker-Netzes (R1-7)."""
+    yield from _listener("0.0.0.0")
+
+
+def _listener(adresse):
     srv = socket.socket()
-    srv.bind(("127.0.0.1", 0))
+    srv.bind((adresse, 0))
     srv.listen(16)
     stop = threading.Event()
 
@@ -181,13 +194,26 @@ def test_04_container_haertung(stack):
 def test_05_host_und_internet_nicht_erreichbar(stack, host_listener):
     port = str(host_listener)
     # Positivkontrollen: die Probe funktioniert, wo eine Verbindung möglich ist.
-    assert stack.probe("bridge", TCP_PROBE, "host.docker.internal", port) == "ok", \
+    assert stack.probe("bridge", TCP_PROBE, "host.docker.internal", port, host_gateway=True) == "ok", \
         "Positivkontrolle: Host-Listener muss aus dem Default-Bridge-Netz per host.docker.internal erreichbar sein"
     assert stack.probe(stack.netz, TCP_PROBE, "app", "3000") == "ok"
     # Im internen Netz der Rolle: nichts davon.
-    assert stack.probe(stack.netz, TCP_PROBE, "host.docker.internal", port) == "fail"
+    assert stack.probe(stack.netz, TCP_PROBE, "host.docker.internal", port, host_gateway=True) == "fail"   # Name löst auf, Verbindung nicht
     assert stack.probe(stack.netz, TCP_PROBE, "1.1.1.1", "443") == "fail"
     assert stack.probe(stack.netz, DNS_PROBE) == "fail"
+
+
+def test_05b_gateway_ip_des_internen_netzes_nicht_erreichbar(stack, host_listener_alle):
+    """R1-7: Gateway-Adresse des `--internal`-Netzes (aus `docker network inspect`) erreicht einen Host-Listener auf
+    0.0.0.0 nicht. Gilt für die Engine, auf der der Test lief (Docker Desktop: Gateway liegt in der VM; Linux-Engine:
+    auf dem Host); andere Versionen können sich anders verhalten (Grenze, siehe Spec)."""
+    port = str(host_listener_alle)
+    gateway = docker("network", "inspect", stack.netz, "--format", "{{range .IPAM.Config}}{{.Gateway}} {{end}}").stdout.split()
+    assert gateway, "Netz ohne Gateway-Adresse: Probe nicht möglich"
+    # Positivkontrolle: derselbe Listener ist aus dem Default-Bridge-Netz erreichbar.
+    assert stack.probe("bridge", TCP_PROBE, "host.docker.internal", port, host_gateway=True) == "ok"
+    for adresse in gateway:
+        assert stack.probe(stack.netz, TCP_PROBE, adresse, port) == "fail", adresse
 
 
 def test_06_build_ohne_netz(stack):

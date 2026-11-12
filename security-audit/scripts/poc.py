@@ -454,6 +454,34 @@ def _lock_laden(quelle: str) -> dict | None:
 
 
 FREMDE_PRAEFIXE = ("git+", "git://", "github:", "gitlab:", "bitbucket:", "gist:", "file:", "link:", "ssh://")
+SPEC_FELDER = frozenset({"dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "requires", "overrides"})
+# Registry-Spec: Semver-Range oder dist-Tag (kein `:`, `/` oder `@`), optional `$name` (overrides) oder `npm:<name>[@<range>]`.
+_REGISTRY_RANGE = re.compile(r"[A-Za-z0-9._+*^~<>=|, -]*")
+_REGISTRY_ALIAS = re.compile(r"npm:(?:@[a-z0-9~][a-z0-9._~-]*/)?[a-z0-9~][a-z0-9._~-]*(?:@[A-Za-z0-9._+*^~<>=|, -]*)?")
+_REGISTRY_REF = re.compile(r"\$[A-Za-z0-9._~@/-]+")
+
+
+def _registry_spec(spec: object) -> bool:
+    """Spec-String zeigt nur auf die npm-Registry (Range, Tag, `npm:`-Alias, overrides-Verweis `$name`)."""
+    if not isinstance(spec, str):
+        return False
+    s = spec.strip()
+    return bool(_REGISTRY_RANGE.fullmatch(s) or _REGISTRY_ALIAS.fullmatch(s) or _REGISTRY_REF.fullmatch(s))
+
+
+def _specs_fremd(feld: dict) -> bool:
+    """Eine Spec-Map (name → Spec, bei overrides verschachtelt) enthält etwas außerhalb der Registry. Karten alter
+    Lockfiles (`dependencies` name → Objekt) werden vom Aufrufer weiter durchsucht, hier nur Strings geprüft."""
+    stapel: list[object] = [feld]
+    while stapel:
+        wert = stapel.pop()
+        if isinstance(wert, dict):
+            stapel.extend(wert.values())
+        elif isinstance(wert, list):
+            return True
+        elif isinstance(wert, str) and not _registry_spec(wert):
+            return True
+    return False
 
 
 def _fremde_quelle(daten: object) -> bool:
@@ -467,6 +495,17 @@ def _fremde_quelle(daten: object) -> bool:
                     return True
                 if k == "link" and v is True:
                     return True
+                if k in SPEC_FELDER and isinstance(v, dict):
+                    for name, spec in v.items():
+                        if isinstance(spec, dict):
+                            if k == "overrides":
+                                if _specs_fremd(spec):
+                                    return True
+                            else:
+                                stapel.append((name, spec))     # v1-Lockfile: dependencies name → Eintrag
+                        elif not _registry_spec(spec):
+                            return True
+                    continue
                 stapel.append((k, v))
         elif isinstance(wert, list):
             stapel.extend((schluessel, v) for v in wert)
@@ -479,6 +518,53 @@ def _fremde_quelle(daten: object) -> bool:
     return False
 
 
+_SEMVER = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?")
+_VERSION_ALIAS = re.compile(r"npm:(?:@[a-z0-9~][a-z0-9._~-]*/)?[a-z0-9~][a-z0-9._~-]*@" + _SEMVER.pattern)
+
+
+def _reine_version(version: object) -> bool:
+    """Reine Registry-Version: Semver oder `npm:<name>@<semver>`; alles andere (Git-Kurzform, URL, Range) nicht."""
+    return isinstance(version, str) and bool(_SEMVER.fullmatch(version) or _VERSION_ALIAS.fullmatch(version))
+
+
+def _ohne_resolved(daten: dict) -> bool:
+    """Ein Paket hat kein `resolved` und keine reine Registry-Version (gebündelte Pakete ausgenommen): npm ginge dann nach
+    einer Spec statt nach Registry-Name und -Version los. Gilt für `packages` unter `node_modules/` (v2/v3) und für die
+    `dependencies`-Einträge alter Lockfiles (v1, rekursiv). Einträge ohne `resolved` mit reiner Version kommen in echten
+    Lockfiles vor (dedupe) und holen `name@version` aus der Registry."""
+    pakete = daten.get("packages")
+    if isinstance(pakete, dict) and any(
+            isinstance(e, dict) and "node_modules/" in pfad and "resolved" not in e and e.get("inBundle") is not True
+            and not _reine_version(e.get("version")) for pfad, e in pakete.items()):
+        return True
+    stapel = [daten.get("dependencies")]
+    while stapel:                                      # iterativ: tiefe Verschachtelung sprengt nichts
+        karte = stapel.pop()
+        if not isinstance(karte, dict):
+            continue
+        for e in karte.values():
+            if not isinstance(e, dict):
+                continue
+            if "resolved" not in e and e.get("bundled") is not True and e.get("inBundle") is not True \
+                    and not _reine_version(e.get("version")):
+                return True
+            stapel.append(e.get("dependencies"))
+    return False
+
+
+def _package_json_fremd(quelle: str) -> bool:
+    pfad = os.path.join(quelle, "package.json")
+    if not os.path.isfile(pfad):
+        return False
+    try:
+        daten = _json_datei(pfad)
+    except (OSError, ValueError, RecursionError):
+        return True       # nicht lesbar: nicht bauen (kein stilles Durchwinken)
+    if not isinstance(daten, dict):
+        return True
+    return _fremde_quelle({k: v for k, v in daten.items() if k in SPEC_FELDER})
+
+
 def lockfile_pruefen(quelle: str) -> str | None:
     """Kategorie, wenn die Quelle nicht gebaut werden darf, sonst None."""
     lock = os.path.join(quelle, "package-lock.json")
@@ -489,7 +575,7 @@ def lockfile_pruefen(quelle: str) -> str | None:
     daten = _lock_laden(quelle)
     if daten is None:
         return "lockfile-fehlt"
-    if _fremde_quelle(daten):
+    if _fremde_quelle(daten) or _ohne_resolved(daten) or _package_json_fremd(quelle):
         return "lockfile-fremde-quelle"
     return None
 
@@ -708,9 +794,11 @@ def cmd_vorbereiten(a: argparse.Namespace) -> int:
 def _vorbereiten(a: argparse.Namespace, repo: str, ordner: str, quelle: str, marker: str) -> int:
     _entferne(marker, ordner)          # erst der Marker, dann die Kopie: ein Absturz dazwischen hinterlässt keine „fertige“ Kopie
     _entferne(quelle, ordner)          # lokale Dateioperation: wird nicht unterbrochen, zählt aber gegen das Budget
-    sha = a.sha or "HEAD"
     try:
-        meldungen = gitkopie.arbeitskopie(repo, quelle, sha)
+        # Der Commit wird einmal aufgelöst und genau dieser Hash kopiert und im Marker festgehalten: weder ein stiller
+        # Ersatzwert „HEAD“ noch ein Wandern von HEAD zwischen Kopie und rev-parse.
+        kopiert = gitkopie.git(repo, "rev-parse", "--verify", f"{a.sha or 'HEAD'}^{{commit}}").stdout.decode().strip()
+        meldungen = gitkopie.arbeitskopie(repo, quelle, kopiert)
     except gitkopie.GitFehler as e:
         print("kategorie: git-fehler")
         print(f"git-Fehler: {e}", file=sys.stderr)
@@ -724,15 +812,7 @@ def _vorbereiten(a: argparse.Namespace, repo: str, ordner: str, quelle: str, mar
     if any("Arbeitskopie unvollständig" in m for m in meldungen):
         print("kategorie: arbeitskopie-unvollstaendig")
         return 4
-    try:
-        kopiert = gitkopie.git(repo, "rev-parse", "--verify", f"{sha}^{{commit}}").stdout.decode().strip()
-    except gitkopie.ZeitbudgetFehler as e:         # keine „fertige“ Kopie ohne geklärten Commit nach Ablauf des Budgets
-        print("kategorie: git-fehler")
-        print(f"git-Fehler: {e}", file=sys.stderr)
-        return 4
-    except gitkopie.GitFehler:
-        kopiert = sha
-    _schreibe_atomar(marker, {"fertig": True, "sha": kopiert})
+    _schreibe_atomar(marker, {"fertig": True, "sha": kopiert, "repo": gitkopie.repo_name(repo)})
     print(quelle)
     return 0
 
@@ -812,6 +892,11 @@ def _starte(lauf: str, rolle: str, p: dict) -> int:
     r = _docker(["network", "create", "--internal", netz], KURZ_TIMEOUT)
     if not r.ok and "already exists" not in r.text:
         return _start_fehler(lauf, rolle, f"Netz {netz} nicht erstellt: {r.text}")
+    if not r.ok:       # Netz gab es schon (Rest eines früheren Starts): nur weiterverwenden, wenn es `--internal` ist
+        intern = _docker(["network", "inspect", "--format", "{{.Internal}}", netz], KURZ_TIMEOUT)
+        if not intern.ok or intern.text.strip() != "true":
+            return _start_fehler(lauf, rolle, f"Netz {netz} existiert schon und ist nicht als intern bestätigt "
+                                              f"(`network inspect`: {_tail(intern.text, 2) or 'keine Antwort'})")
     if p["dienst"] == "postgres":
         if not _docker(["image", "inspect", POSTGRES_IMAGE], KURZ_TIMEOUT).ok:
             r = _docker(["pull", POSTGRES_IMAGE], PULL_TIMEOUT)
@@ -997,12 +1082,47 @@ def cmd_auflisten(_a: argparse.Namespace) -> int:
     except DockerFehlt as e:
         unvollstaendig = True
         print(f"auflisten: Docker nicht erreichbar ({e}); nur Zustandsordner aufgelistet", file=sys.stderr)
+    laufend = _laufende_laeufe()
     for lauf in sorted(laeufe):
         e = laeufe[lauf]
-        print(f"{lauf} ordner={e['ordner']} container={e['container']} netze={e['netze']} images={e['images']}")
+        print(f"{lauf} ordner={e['ordner']} container={e['container']} netze={e['netze']} images={e['images']} "
+              f"{_lauf_angaben(lauf, laufend)}")
     if laeufe:
-        print("auflisten: je Lauf aufräumen mit `poc.py aufraeumen --lauf <id>` (nur eigene, beendete Läufe!)", file=sys.stderr)
+        print("auflisten: je Lauf aufräumen mit `poc.py aufraeumen --lauf <id>` (nur eigene Läufe mit laeuft=nein; ein "
+              "paralleles Audit sieht gleich aus: im Zweifel den User fragen)", file=sys.stderr)
     return 1 if unvollstaendig else 0
+
+
+def _laufende_laeufe() -> set[str] | None:
+    """Lauf-IDs mit mindestens einem laufenden Container; None, wenn Docker nicht lesbar ist."""
+    try:
+        r = _docker(["ps", "--format", "{{.Names}}"], KURZ_TIMEOUT)
+    except DockerFehlt:
+        return None
+    if not r.ok:
+        return None
+    treffer = (_LAUF_NAME.fullmatch(z.strip()) for z in r.out.decode("utf-8", "replace").splitlines())
+    return {m.group(1) for m in treffer if m}
+
+
+def _lauf_angaben(lauf: str, laufend: set[str] | None) -> str:
+    """`repo=<name> alter_min=<n> laeuft=ja|nein|?` aus Fertig-Marker (Repo), Zustandsordner (letzte Änderung) und `docker ps`.
+    Fehlende Angaben heißen `?`, nie geraten."""
+    ordner = zustand_ordner(lauf)
+    repo = alter = "?"
+    try:
+        alter = str(max(0, int((time.time() - os.lstat(ordner).st_mtime) // 60)))
+    except OSError:
+        pass
+    try:
+        with open(os.path.join(ordner, "quelle.fertig"), encoding="utf-8") as f:
+            marker = json.load(f)
+        if isinstance(marker, dict) and isinstance(marker.get("repo"), str):
+            repo = re.sub(r"\s", "_", _entschaerfen(marker["repo"]))[:60] or "?"   # Ordnername des Kunden: eine Zeile, entschärft
+    except (OSError, ValueError):
+        pass
+    laeuft = "?" if laufend is None else ("ja" if lauf in laufend else "nein")
+    return f"repo={repo} alter_min={alter} laeuft={laeuft}"
 
 
 # ------------------------------------------------------------------------------------ Argumente
