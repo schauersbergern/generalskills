@@ -7,6 +7,8 @@ Format und Spalten: Skill auto-feature, Abschnitt „Agent-Statistik“. Nur Sta
       --dauer 500731 --tool-uses 57 [--tf 171] [--bwk 0/1/3] [--angenommen 2] \
       [--betrieb "1: Stichwort"] [--fix-runden 1] [--status fertig] [--fortsetzung-von 3] \
       [--kopf "Repo: …" --kopf "PR: …"]
+  agent-stats.py import <datei> <local_…|cli-uuid|self> [--tf TF2 …] [--kopf "Repo: …"]
+  agent-stats.py bewerte <datei>  < JSON-Zeilen {"tf": "TF2", "rolle": "Spec-Review R1", "bwk": "0/1/3", …}
   agent-stats.py summarize <datei> [--write]
   agent-stats.py summarize-all [--root ~/.claude/agent-stats] [--seit 2026-10-22] [--nach-version]
   agent-stats.py stamp <datei> [--stand "generalskills@abc1234 (…)"] [--hinweis "…"] [--ersetzen]
@@ -25,6 +27,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import time
 
 SPALTEN = ["#", "Zeitpunkt", "TF", "Rolle", "Agent-Typ", "Modell", "Effort", "tokens",
            "Δ tokens", "duration_ms", "tool_uses", "B/W/K", "angenommen", "betriebsrelevant",
@@ -95,8 +98,16 @@ def agenten_ende(zeilen):
     return start + 1
 
 
+# Alles, was str.splitlines() als Zeilenende wertet: in einem Wert würde es die Tabellenzeile zerreißen.
+ZEILENENDE = re.compile(r"[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]+")
+
+
+def einzeilig(text):
+    return ZEILENENDE.sub(" ", str(text))
+
+
 def zeile_md(werte):
-    return "| " + " | ".join(str(w).replace("|", "\\|") for w in werte) + " |"
+    return "| " + " | ".join(einzeilig(w).replace("|", "\\|") for w in werte) + " |"
 
 
 # ---------- Skill-Stand ----------
@@ -241,7 +252,7 @@ def cmd_add(a):
     else:
         if not zeilen:
             zeilen = [f"# Agent-Statistik · {os.path.splitext(os.path.basename(pfad))[0]}", ""]
-            kopf = [f"- {k}" for k in a.kopf] + ([f"- Skills: {stand}"] if stand else [])
+            kopf = [f"- {einzeilig(k)}" for k in a.kopf] + ([f"- Skills: {stand}"] if stand else [])
             zeilen += kopf + ([""] if kopf else [])
         else:
             zeilen.append("")
@@ -516,6 +527,254 @@ def cmd_threads(a):
         sys.exit(f"Fehlend: {', '.join(fehlt)}")
 
 
+# ---------- import ----------
+
+IMPORTIERT = re.compile(r"^<!-- agent-stats:importiert(.*?)-->$")
+# Präfix der Agent-Beschreibung: „TF2 Spec-Review R1“, „FF Builder-Check“, „PR12 Review R1 Tests“, „audit Fix R1“.
+PRAEFIX = re.compile(r"^(TF\d+\w*|FF|audit|PR ?#?(\d+))[\s:]+(.+)$", re.I)
+# Wartezeiten über 10 min innerhalb eines Laufs (Hintergrundarbeit) und die Zeit zwischen Abschluss und
+# Fortsetzung zählen nicht zur Dauer: nur die Arbeitssegmente, wie sie auch <usage> je Aufruf meldet.
+PAUSE_MS = 600_000
+# Ein Agent ohne `finished`, dessen Transkript so lange unverändert ist, läuft nicht mehr (abgebrochen).
+STILL_S = 1800
+
+
+def tf_norm(tf):
+    """TF-Angaben vergleichbar machen: „PR12“, „#12“ und „12“ meinen dasselbe; „TF2“ bleibt „tf2“."""
+    return re.sub(r"^(?:PR\s*#?|#)", "", str(tf).strip(), flags=re.I).casefold()
+
+
+def zeitstempel(text):
+    try:
+        return dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return None
+
+
+def subagent_werte(pfad):
+    """Kennzahlen eines Subagenten aus seinem Transkript, wie sie <usage> meldet: tokens = Kontext des
+    letzten API-Aufrufs plus dessen Output; dazu Werkzeugaufrufe, aktive Dauer und Fortsetzungen."""
+    je_msg, werkzeuge, zeiten, forts = {}, set(), [], 0
+    for zeile in open(pfad, encoding="utf-8"):
+        try:
+            e = json.loads(zeile)
+        except ValueError:
+            continue
+        if not isinstance(e, dict):
+            continue
+        koord = e.get("type") == "user" and isinstance(e.get("origin"), dict) \
+            and e["origin"].get("kind") == "coordinator"
+        t = zeitstempel(e.get("timestamp"))
+        if t:
+            zeiten.append((t, koord))
+        if koord:
+            forts += 1  # Nachricht der Hauptsession per SendMessage
+        m = e.get("message")
+        if e.get("type") != "assistant" or not isinstance(m, dict) or m.get("model") == "<synthetic>":
+            continue
+        if isinstance(m.get("usage"), dict):
+            # Die Blöcke einer gestreamten Antwort stehen als eigene Einträge mit derselben Message-ID:
+            # Usage und stop_reason vom letzten, „Werkzeugaufruf dabei“ über alle.
+            mid = m.get("id") or e.get("uuid")
+            je_msg[mid] = (m["usage"], m.get("stop_reason"), je_msg.get(mid, (0, 0, False))[2])
+        for b in m.get("content") or []:
+            if isinstance(b, dict) and b.get("type") == "tool_use":
+                werkzeuge.add(b.get("id"))
+                if isinstance(m.get("usage"), dict):
+                    je_msg[mid] = (*je_msg[mid][:2], True)
+    if not je_msg:
+        return None
+    u, stop, mit_werkzeug = list(je_msg.values())[-1]
+    tokens = sum(u.get(k) or 0 for k in ("input_tokens", "cache_creation_input_tokens",
+                                         "cache_read_input_tokens", "output_tokens"))
+    dauer = 0.0
+    zeiten.sort(key=lambda x: x[0])  # attachment-Einträge tragen teils frühere Zeiten als der vorige Eintrag
+    for (a, _), (b, koord) in zip(zeiten, zeiten[1:]):
+        luecke = (b - a).total_seconds() * 1000
+        # Lücke vor einer Nachricht der Hauptsession (Warten auf die Fortsetzung) und Pausen über der
+        # Schwelle fallen ganz weg, sie werden nicht auf die Schwelle gekappt.
+        if not koord and 0 <= luecke <= PAUSE_MS:
+            dauer += luecke
+    ende = zeiten[-1][0].astimezone().strftime("%Y-%m-%d %H:%M") if zeiten else "n/a"
+    return {"tokens": tokens, "tool_uses": len(werkzeuge), "dauer": int(dauer), "ende": ende,
+            "forts": forts, "beendet": stop == "end_turn" or not mit_werkzeug}
+
+
+def lies_marke(zeilen):
+    """Marker der importierten Agenten: `<id>:<Zeilen-#>:<Transkriptgröße>`; eine nackte ID (älterer Stand)
+    gilt als importiert, ohne Zeile zum Aktualisieren."""
+    marke = next((i for i, z in enumerate(zeilen) if IMPORTIERT.match(z.strip())), None)
+    bekannt = {}
+    if marke is not None:
+        for t in IMPORTIERT.match(zeilen[marke].strip()).group(1).split():
+            aid, _, rest = t.partition(":")
+            nr, _, groesse = rest.partition(":")
+            bekannt[aid] = (int(nr), int(groesse)) if nr.isdigit() and groesse.isdigit() else None
+    return marke, bekannt
+
+
+def cmd_import(a):
+    sid, titel = cli_id(a.session)
+    dateien = glob.glob(os.path.join(PROJECTS, "*", f"{sid}.jsonl")) if sid else []
+    if not dateien:
+        sys.exit(titel if not sid else f"Transkript {sid}.jsonl nicht gefunden")
+    ordner = os.path.join(os.path.splitext(max(dateien, key=os.path.getsize))[0], "subagents")
+
+    pfad = os.path.expanduser(a.datei)
+    zeilen = open(pfad, encoding="utf-8").read().splitlines() if os.path.exists(pfad) else []
+    _, bekannt = lies_marke(zeilen)
+    nur_tf = {tf_norm(t) for t in a.tf}
+
+    neu, geaendert, offen, geschachtelt, ohne_praefix = [], [], 0, 0, []
+    for p in sorted(glob.glob(os.path.join(ordner, "agent-*.jsonl")), key=os.path.getmtime):
+        aid = os.path.basename(p)[len("agent-"):-len(".jsonl")]
+        groesse = os.path.getsize(p)
+        alt = bekannt.get(aid)
+        if aid in bekannt and (alt is None or alt[1] == groesse):
+            continue  # unverändert seit dem Import (eine Fortsetzung vergrößert das Transkript)
+        meta_pfad = os.path.splitext(p)[0] + ".meta.json"
+        meta = json.load(open(meta_pfad, encoding="utf-8")) if os.path.exists(meta_pfad) else {}
+        if meta.get("parentAgentId") or (meta.get("spawnDepth") or 1) > 1:
+            geschachtelt += 1  # läuft unter einem Subagenten; dessen <usage> enthält ihn nicht, die Statistik führt nur die Agenten der Hauptsession
+            continue
+        beschr = einzeilig((meta.get("description") or aid).strip())
+        m = PRAEFIX.match(beschr)
+        tf, rolle = ((m.group(2) or m.group(1)), m.group(3)) if m else ("–", beschr)
+        if m and not tf.isdigit():
+            tf = "audit" if tf.lower() == "audit" else tf.upper()
+        if nur_tf and tf_norm(tf) not in nur_tf:
+            if not m:
+                ohne_praefix.append(beschr)
+            continue
+        w = subagent_werte(p)
+        if w is None:
+            continue
+        if meta.get("finished"):
+            status = "fertig"
+        elif time.time() - os.path.getmtime(p) < STILL_S:
+            offen += 1  # Transkript wächst noch: läuft, beim nächsten Import
+            continue
+        else:  # nie `finished` gesetzt und still: regulär beendet (end_turn) oder abgebrochen (TaskStop, Absturz)
+            status = "fertig" if w["beendet"] else "abgebrochen"
+        typ = meta.get("agentType") or "?"
+        modell, effort = TYPEN.get(typ, (meta.get("model") or "?", "n/a"))
+        werte = [w["ende"], tf, rolle, typ, modell, effort, w["tokens"], w["tokens"], w["dauer"],
+                 w["tool_uses"], "–", "–", "–", w["forts"] or "–", status]
+        # Die Zeile gehört dem Agenten nur, wenn TF und Rolle noch passen (von Hand gelöscht oder ersetzt: neue Zeile).
+        zeile = next((i for i, z in enumerate(zeilen)
+                      if alt and ist_datenzeile(z) and zellen(z)[0] == str(alt[0])
+                      and zellen(z)[2:4] == [str(tf), rolle]), None)
+        if zeile is not None:
+            geaendert.append((aid, groesse, zeile, werte))
+        else:
+            neu.append((aid, groesse, werte))
+    if offen:
+        print(f"{offen} Subagenten noch nicht fertig, nicht importiert.", file=sys.stderr)
+    if ohne_praefix:  # mit --tf nie stumm verwerfen, was sich keinem TF zuordnen lässt
+        print(f"{len(ohne_praefix)} Agenten ohne erkanntes Präfix (TF<n>, PR<n>, FF, audit) übersprungen: "
+              + "; ".join(ohne_praefix[:5]) + (" …" if len(ohne_praefix) > 5 else ""), file=sys.stderr)
+    if geschachtelt:
+        print(f"{geschachtelt} verschachtelte Subagenten übersprungen (laufen unter einem Subagenten).",
+              file=sys.stderr)
+    if not neu and not geaendert:
+        print("Nichts Neues zu importieren.")
+        return
+
+    ids = dict(bekannt)
+    for aid, groesse, zeile, werte in geaendert:
+        c = zellen(zeilen[zeile])[:len(SPALTEN)]
+        # Neu aus dem Transkript: Zeit, Werte, Fortsetzungen; Urteilsspalten und Rolle bleiben stehen.
+        for spalte in (1, 7, 8, 9, 10, 14):
+            c[spalte] = str(werte[spalte - 1])
+        if c[15] in ("fertig", "abgebrochen"):
+            c[15] = werte[14]
+        zeilen[zeile] = zeile_md(c)
+        ids[aid] = (int(c[0]), groesse)
+        print(f"#{c[0]} aktualisiert: {c[2]} {c[3]} · {c[4]} · {c[7]} tokens")
+
+    daten = [zellen(z) for z in zeilen if ist_datenzeile(z)]
+    # Auch Nummern aus dem Marker zählen: eine von Hand gelöschte letzte Zeile wird nicht neu vergeben.
+    nr = max([int(z[0]) for z in daten] + [v[0] for v in ids.values() if v], default=0)
+    if neu:
+        stand = skills_stand()
+        tabelle = [zeile_md([nr + i + 1, *werte]) for i, (_, _, werte) in enumerate(neu)]
+        ende = agenten_ende(zeilen)
+        if ende is not None:
+            zeilen[ende:ende] = tabelle
+        else:
+            if not zeilen:
+                zeilen = [f"# Agent-Statistik · {os.path.splitext(os.path.basename(pfad))[0]}", ""]
+                kopf = [f"- {einzeilig(k)}" for k in a.kopf] + ([f"- Skills: {stand}"] if stand else [])
+                zeilen += kopf + ([""] if kopf else [])
+            else:
+                zeilen.append("")
+            zeilen += ["## Agenten", "", zeile_md(SPALTEN), zeile_md(["---"] * len(SPALTEN)), *tabelle]
+        bisher = staende(zeilen)
+        jetzt = stand or "unbekannt"
+        if (bisher and stand_kern(bisher[-1][1]) != stand_kern(jetzt)) or (not bisher and stand):
+            stand_einfuegen(zeilen, f"- Skills ab #{nr + 1}: {jetzt}")
+        for i, (aid, groesse, werte) in enumerate(neu):
+            ids[aid] = (nr + i + 1, groesse)
+            print(f"#{nr + i + 1} {werte[1]} {werte[2]} · {werte[3]} · {werte[6]} tokens · {werte[14]}")
+    text = " ".join(f"{aid}:{v[0]}:{v[1]}" if v else aid for aid, v in sorted(ids.items()))
+    marke = next((i for i, z in enumerate(zeilen) if IMPORTIERT.match(z.strip())), None)
+    if marke is None:
+        zeilen += ["", f"<!-- agent-stats:importiert {text} -->"]
+    else:
+        zeilen[marke] = f"<!-- agent-stats:importiert {text} -->"
+    schreibe(pfad, zeilen)
+
+
+# ---------- bewerte ----------
+
+# „Fix-Runden“ fehlt hier: Die Spalte führt `import` aus den Fortsetzungen im Transkript (bei Handeinträgen `add --fix-runden`).
+BEWERTBAR = {"bwk": 11, "angenommen": 12, "betrieb": 13, "status": 15}
+
+
+def cmd_bewerte(a):
+    """Urteilsspalten mehrerer Zeilen in einem Aufruf; erst alles prüfen, dann schreiben."""
+    pfad = os.path.expanduser(a.datei)
+    zeilen = open(pfad, encoding="utf-8").read().splitlines()
+    eintraege = []
+    for n, roh in enumerate(sys.stdin, 1):
+        if not roh.strip():
+            continue
+        try:
+            e = json.loads(roh)
+        except ValueError as ex:
+            sys.exit(f"Eingabezeile {n}: kein JSON ({ex}).")
+        if not isinstance(e, dict):
+            sys.exit(f"Eingabezeile {n}: JSON-Objekt erwartet.")
+        unbekannt = set(e) - set(BEWERTBAR) - {"nr", "tf", "rolle"}
+        if unbekannt:
+            sys.exit(f"Eingabezeile {n}: unbekannte Felder {sorted(unbekannt)}.")
+        # „tf“ vergleicht tf_norm: „PR12“ trifft die Zeile mit TF „12“.
+        passt = lambda c: ("rolle" not in e or c[3] == e["rolle"]) and ("tf" not in e or tf_norm(c[2]) == tf_norm(e["tf"]))
+        if "nr" in e:
+            treffer = [i for i, z in enumerate(zeilen) if ist_datenzeile(z) and zellen(z)[0] == str(e["nr"])]
+            if len(treffer) == 1 and not passt(zellen(zeilen[treffer[0]])):
+                c = zellen(zeilen[treffer[0]])
+                sys.exit(f"Eingabezeile {n}: „nr“ {e['nr']} ist Zeile {c[2]} {c[3]}, passt nicht zu "
+                         f"„tf“/„rolle“ der Eingabe. Nichts geschrieben.")
+        elif "rolle" in e:
+            treffer = [i for i, z in enumerate(zeilen) if ist_datenzeile(z) and passt(zellen(z))]
+        else:
+            sys.exit(f"Eingabezeile {n}: „nr“ oder „rolle“ (mit „tf“) angeben.")
+        if len(treffer) != 1:
+            sys.exit(f"Eingabezeile {n}: {len(treffer)} passende Zeilen statt genau einer.")
+        eintraege.append((treffer[0], e))
+    if not eintraege:
+        sys.exit("Keine Eingabe auf stdin.")
+    for i, e in eintraege:
+        c = zellen(zeilen[i])[:len(SPALTEN)]
+        for feld, spalte in BEWERTBAR.items():
+            if feld in e:
+                c[spalte] = str(e[feld])
+        zeilen[i] = zeile_md(c)
+    schreibe(pfad, zeilen)
+    print(f"{len(eintraege)} Zeilen bewertet.")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -563,6 +822,19 @@ def main():
     s.add_argument("--subagents", action="store_true", help="Subagenten je Thread einzeln aufführen")
     s.add_argument("--md", action="store_true", help="als Markdown-Tabelle")
     s.set_defaults(fn=cmd_threads)
+
+    s = sub.add_parser("import", help="fertige Subagenten einer Session aus den Transkripten eintragen")
+    s.add_argument("datei")
+    s.add_argument("session", help="local_…-ID der Desktop-App, CLI-Session-UUID oder self")
+    s.add_argument("--tf", action="append", default=[],
+                   help="nur Agenten dieses TF (TF2, 12 bzw. PR12, FF, audit; mehrfach): Pflicht, wenn die "
+                        "Session mehrere Statistik-Dateien führt")
+    s.add_argument("--kopf", action="append", default=[], help="Kopfzeile bei neuer Datei (mehrfach)")
+    s.set_defaults(fn=cmd_import)
+
+    s = sub.add_parser("bewerte", help="B/W/K, angenommen, betriebsrelevant u. a. aus JSON-Zeilen (stdin)")
+    s.add_argument("datei")
+    s.set_defaults(fn=cmd_bewerte)
 
     a = p.parse_args()
     a.fn(a)

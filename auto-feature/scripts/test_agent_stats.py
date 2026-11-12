@@ -425,5 +425,322 @@ class Threads(unittest.TestCase):
         self.assertIn("fehlt-uuid", r.stdout)
 
 
+class Import(Basis):
+    """import liest fertige Subagenten aus den Transkripten, bewerte trägt Urteile gebündelt nach."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = os.path.join(self.d, "home")
+        self.sub = os.path.join(self.home, ".claude", "projects", "p", "s1", "subagents")
+        os.makedirs(self.sub)
+        open(os.path.join(self.home, ".claude", "projects", "p", "s1.jsonl"), "w").close()
+
+    def agent(self, aid, beschr, typ="sonnet-xhigh", fertig=True, aufrufe=None, coordinator=0, nach=(),
+              synthetic=False, still=False, meta_extra=None, stop="end_turn"):
+        """nach: Fortsetzungen (Zeit der Nachricht, Zeit der Antwort, usage, Werkzeuge); still: Transkript
+        seit Stunden unverändert; synthetic: lokale <synthetic>-Nachricht am Ende."""
+        with open(os.path.join(self.sub, f"agent-{aid}.meta.json"), "w", encoding="utf-8") as f:
+            json.dump({"agentType": typ, "description": beschr, "model": "sonnet", "finished": fertig,
+                       **(meta_extra or {})}, f)
+        aufrufe = aufrufe or [("2026-11-10T10:00:00Z", {"input_tokens": 2, "cache_read_input_tokens": 1000,
+                                                          "cache_creation_input_tokens": 98, "output_tokens": 50}, 2)]
+        with open(os.path.join(self.sub, f"agent-{aid}.jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"type": "user", "timestamp": aufrufe[0][0], "message": {"content": "Auftrag"}}) + "\n")
+            for i, (ts, u, werkzeuge) in enumerate(aufrufe):
+                inhalt = [{"type": "tool_use", "id": f"{aid}-{i}-{k}"} for k in range(werkzeuge)]
+                # gestreamt: dieselbe Message-ID steht zweimal im Transkript
+                for _ in range(2):
+                    f.write(json.dumps({"type": "assistant", "timestamp": ts, "message": {
+                        "id": f"{aid}-m{i}", "model": "claude-sonnet-5-5", "usage": u, "content": inhalt,
+                        "stop_reason": stop}}) + "\n")
+            for k in range(coordinator):
+                f.write(json.dumps({"type": "user", "timestamp": aufrufe[-1][0], "isMeta": True,
+                                    "origin": {"kind": "coordinator"}, "message": {"content": "Fix"}}) + "\n")
+            for k, (t_msg, t_antwort, u, werkzeuge) in enumerate(nach):
+                f.write(json.dumps({"type": "user", "timestamp": t_msg, "isMeta": True,
+                                    "origin": {"kind": "coordinator"}, "message": {"content": "Fix"}}) + "\n")
+                f.write(json.dumps({"type": "assistant", "timestamp": t_antwort, "message": {
+                    "id": f"{aid}-n{k}", "model": "claude-sonnet-5-5", "usage": u, "stop_reason": "end_turn",
+                    "content": [{"type": "tool_use", "id": f"{aid}-n{k}-{j}"} for j in range(werkzeuge)]}}) + "\n")
+            if synthetic:
+                f.write(json.dumps({"type": "assistant", "timestamp": aufrufe[-1][0], "message": {
+                    "id": f"{aid}-syn", "model": "<synthetic>", "stop_reason": "stop_sequence",
+                    "usage": {"input_tokens": 0, "output_tokens": 0}, "content": []}}) + "\n")
+        if still:
+            alt = time.time() - 3 * 3600
+            os.utime(os.path.join(self.sub, f"agent-{aid}.jsonl"), (alt, alt))
+
+    def importiere(self, *extra, stand="gs@abc (2026-11-12 10:00, main)"):
+        r = lauf("import", self.datei, "s1", "--kopf", "Repo: x", *extra, home=self.home, stand=stand)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r
+
+    def test_zeile_aus_transkript(self):
+        self.agent("a1", "TF2 Spec-Review R1", typ="opus-xhigh", coordinator=1, aufrufe=[
+            ("2026-11-10T10:00:00Z", {"input_tokens": 1, "cache_read_input_tokens": 500, "output_tokens": 9}, 1),
+            ("2026-11-10T10:05:00Z", {"input_tokens": 2, "cache_read_input_tokens": 1000,
+                                      "cache_creation_input_tokens": 98, "output_tokens": 50}, 2)])
+        self.importiere()
+        z = self.zeilen()[1]
+        self.assertEqual(z[2:7], ["TF2", "Spec-Review R1", "opus-xhigh", "opus", "xhigh"])
+        self.assertEqual(z[7:11], ["1150", "1150", "300000", "3"])  # letzter Aufruf, Dauer, 3 Werkzeuge
+        self.assertEqual(z[14], "1")  # eine Fortsetzung per SendMessage
+        self.assertIn("- Repo: x", open(self.datei, encoding="utf-8").read())
+
+    def test_praefix_pr_und_ohne(self):
+        self.agent("a1", "PR12 Review R1 Tests")
+        self.agent("a2", "freie Beschreibung")
+        self.importiere()
+        z = self.zeilen()
+        self.assertEqual({(z[i][2], z[i][3]) for i in z}, {("12", "Review R1 Tests"), ("–", "freie Beschreibung")})
+
+    def test_pausen_zaehlen_nicht_zur_dauer(self):  # R1-3
+        u = {"input_tokens": 1, "output_tokens": 1}
+        self.agent("a1", "TF1 Impl T1", aufrufe=[("2026-11-10T10:00:00Z", u, 0), ("2026-11-10T10:01:00Z", u, 0),
+                                                 ("2026-11-10T13:00:00Z", u, 0)])
+        self.importiere()
+        self.assertEqual(self.zeilen()[1][9], "60000")  # 3 h Pause fällt weg, wird nicht auf 10 min gekappt
+
+    def test_wartezeit_auf_fortsetzung_zaehlt_nicht(self):  # R1-3
+        u = {"input_tokens": 1, "output_tokens": 1}
+        self.agent("a1", "TF1 Impl T1", aufrufe=[("2026-11-10T10:00:00Z", u, 0), ("2026-11-10T10:01:00Z", u, 0)],
+                   nach=[("2026-11-10T10:08:00Z", "2026-11-10T10:09:00Z", u, 0)])
+        self.importiere()
+        self.assertEqual(self.zeilen()[1][9], "120000")  # 60 s + 60 s, nicht 9 min
+
+    def test_fortsetzung_nach_dem_import_aktualisiert_die_zeile(self):  # R1-1
+        self.agent("a1", "TF2 Impl T1", aufrufe=[("2026-11-10T10:00:00Z", {"input_tokens": 10, "output_tokens": 1000}, 1)])
+        self.agent("a2", "TF2 Task-Review T1")
+        self.importiere()
+        eingabe = json.dumps({"nr": 1, "bwk": "0/1/0", "angenommen": 1})
+        subprocess.run([sys.executable, "-I", SKRIPT, "bewerte", self.datei], input=eingabe, text=True)
+        self.assertEqual(self.zeilen()[1][7:11], ["1010", "1010", "0", "1"])
+        self.agent("a1", "TF2 Impl T1", aufrufe=[("2026-11-10T10:00:00Z", {"input_tokens": 10, "output_tokens": 1000}, 1)],
+                   nach=[("2026-11-10T10:30:00Z", "2026-11-10T10:31:00Z",
+                          {"input_tokens": 10, "cache_read_input_tokens": 49000, "output_tokens": 1000}, 7)])
+        r = self.importiere()
+        self.assertIn("#1 aktualisiert", r.stdout)
+        z = self.zeilen()
+        self.assertEqual(len(z), 2)  # keine neue Zeile
+        self.assertEqual(z[1][7:11], ["50010", "50010", "60000", "8"])
+        self.assertEqual(z[1][11:13], ["0/1/0", "1"])  # Urteile bleiben
+        self.assertEqual(z[1][14], "1")  # Fix-Runden aus der Fortsetzung
+        self.assertIn("Nichts Neues", self.importiere().stdout)  # danach wieder stabil
+
+    def test_filter_tf_trennt_dateien_einer_session(self):  # R1-2
+        self.agent("a1", "PR12 Review R1 Korrektheit")
+        self.agent("a2", "PR13 Review R1 Korrektheit")
+        self.agent("a3", "FF Builder-Check")
+        self.importiere("--tf", "PR12")
+        self.assertEqual([z[2] for z in self.zeilen().values()], ["12"])
+        datei2 = self.datei
+        self.datei = os.path.join(self.d, "pr13.md")
+        self.importiere("--tf", "13")
+        self.assertEqual([z[2] for z in self.zeilen().values()], ["13"])
+        self.datei = datei2
+        self.importiere("--tf", "TF9", "--tf", "ff")  # mehrfach; Groß/Klein egal; TF9 gibt es nicht
+        self.assertEqual(sorted(z[2] for z in self.zeilen().values()), ["12", "FF"])
+
+    def test_abgebrochener_agent_wird_als_abgebrochen_eingetragen(self):  # R1-4
+        self.agent("a1", "TF1 Härtung", fertig=False, still=True, stop="tool_use")
+        self.agent("a2", "TF1 Task-Review T1", fertig=False, still=True)  # regulär beendet, nur ohne finished
+        self.agent("a3", "TF1 Impl T2", fertig=False)  # läuft (Transkript frisch)
+        r = self.importiere()
+        self.assertIn("1 Subagenten noch nicht fertig", r.stderr)
+        z = self.zeilen()
+        self.assertEqual([(z[i][3], z[i][15]) for i in sorted(z)], [("Härtung", "abgebrochen"), ("Task-Review T1", "fertig")])
+        self.assertNotIn("noch nicht fertig", self.importiere().stderr.replace("1 Subagenten noch nicht fertig", ""))
+
+    def test_verschachtelte_agenten_werden_uebersprungen(self):  # R1-4
+        self.agent("a1", "TF1 Impl T1")
+        self.agent("a2", "TF1 Sucher", fertig=False, still=True, meta_extra={"spawnDepth": 2, "parentAgentId": "a1"})
+        r = self.importiere()
+        self.assertIn("1 verschachtelte Subagenten übersprungen", r.stderr)
+        self.assertEqual([z[3] for z in self.zeilen().values()], ["Impl T1"])
+
+    def test_zeilenumbruch_in_description_zerreisst_die_tabelle_nicht(self):  # R1-5
+        self.agent("a1", "TF1 Impl T1\nzweite Zeile\u2028dritte")
+        self.agent("a2", "TF1 Task-Review T1")
+        self.importiere()
+        self.assertEqual([z[3] for z in self.zeilen().values()], ["Impl T1 zweite Zeile dritte", "Task-Review T1"])
+        eingabe = json.dumps({"nr": 1, "betrieb": "2: Leck\nAbsturz\r\nAus"})
+        r = subprocess.run([sys.executable, "-I", SKRIPT, "bewerte", self.datei], input=eingabe,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.zeilen()[1][13], "2: Leck Absturz Aus")
+        self.assertEqual(lauf("summarize", self.datei).returncode, 0)
+
+    def test_stand_wechsel_beim_import_steht_in_der_datei(self):  # R1-7a
+        self.add("Eval fixture-web", 1000, "--tf", "x")
+        # add schreibt ohne Stand nichts; Stand per Stempel, dann Import unter neuem Stand
+        lauf("stamp", self.datei, "--stand", "gs@alt (2026-11-01 10:00, main)", home=self.home)
+        self.agent("a1", "TF1 Impl T1")
+        self.importiere(stand="gs@neu (2026-11-12 10:00, main)")
+        text = open(self.datei, encoding="utf-8").read()
+        self.assertIn("- Skills ab #2: gs@neu", text)
+        self.agent("a2", "TF1 Impl T2")
+        self.importiere(stand="gs@neu (2026-11-12 11:00, main)")  # gleicher Kern: kein weiterer Eintrag
+        self.assertEqual(open(self.datei, encoding="utf-8").read().count("- Skills ab #"), 1)
+
+    def test_import_nach_summarize_write_landet_in_der_tabelle(self):  # R1-7b
+        self.agent("a1", "TF1 Impl T1")
+        self.importiere()
+        self.assertEqual(lauf("summarize", self.datei, "--write").returncode, 0)
+        self.agent("a2", "TF1 Task-Review T1")
+        self.importiere()
+        zeilen = open(self.datei, encoding="utf-8").read().splitlines()
+        marke = next(i for i, z in enumerate(zeilen) if "agent-stats:auswertung" in z)
+        zeile2 = next(i for i, z in enumerate(zeilen) if z.startswith("| 2 |"))
+        self.assertLess(zeile2, marke)
+
+    def test_synthetic_nachricht_verfaelscht_tokens_nicht(self):  # R1-7c
+        self.agent("a1", "TF1 Impl T1", synthetic=True)
+        self.importiere()
+        self.assertEqual(self.zeilen()[1][7], "1150")
+
+    def test_idempotent_und_unfertige_spaeter(self):
+        self.agent("a1", "TF1 Impl T1")
+        self.agent("a2", "TF1 Task-Review T1", fertig=False)
+        r = self.importiere()
+        self.assertIn("1 Subagenten noch nicht fertig", r.stderr)
+        self.assertEqual(len(self.zeilen()), 1)
+        self.agent("a2", "TF1 Task-Review T1")
+        self.importiere()
+        r = self.importiere()
+        self.assertIn("Nichts Neues", r.stdout)
+        self.assertEqual([z[3] for z in self.zeilen().values()], ["Impl T1", "Task-Review T1"])
+
+    def test_haengt_an_add_zeilen_an(self):
+        self.add("Eval fixture-web", 1000)
+        self.agent("a1", "TF1 Impl T1")
+        self.importiere()
+        self.assertEqual(sorted(self.zeilen()), [1, 2])
+
+    def test_fertig_ohne_stop_reason_bei_reiner_textantwort(self):  # R1-4 (Runde 2)
+        u = {"input_tokens": 1, "output_tokens": 1}
+        self.agent("a1", "TF1 Impl T1", fertig=False, still=True, stop=None,
+                   aufrufe=[("2026-11-10T10:00:00Z", u, 2), ("2026-11-10T10:01:00Z", u, 0)])  # letzte Antwort nur Text
+        self.agent("a2", "TF1 Impl T2", fertig=False, still=True, stop=None,
+                   aufrufe=[("2026-11-10T10:00:00Z", u, 2)])  # endet mit tool_use: abgebrochen
+        self.importiere()
+        z = self.zeilen()
+        self.assertEqual([(z[i][3], z[i][15]) for i in sorted(z)], [("Impl T1", "fertig"), ("Impl T2", "abgebrochen")])
+
+    def test_rueckwaerts_laufende_zeitstempel_zaehlen_einmal(self):  # R2-1
+        u = {"input_tokens": 1, "output_tokens": 1}
+        self.agent("a1", "TF1 Impl T1", aufrufe=[("2026-11-10T10:00:00Z", u, 0), ("2026-11-10T10:00:10Z", u, 0),
+                                                 ("2026-11-10T10:00:20Z", u, 0)])
+        pfad = os.path.join(self.sub, "agent-a1.jsonl")
+        zeilen = open(pfad, encoding="utf-8").read().splitlines()
+        zeilen.insert(5, json.dumps({"type": "attachment", "timestamp": "2026-11-10T10:00:07Z"}))  # vor dem Eintrag davor
+        open(pfad, "w", encoding="utf-8").write("\n".join(zeilen) + "\n")
+        self.importiere()
+        self.assertEqual(self.zeilen()[1][9], "20000")
+
+    def test_tf_filter_praefix_variationen_und_hinweis(self):  # R2-2
+        self.agent("a1", "TF2: Spec-Review R1")
+        self.agent("a2", "tf2 Plan-Review R1")
+        self.agent("a3", "Freitext ohne Präfix")
+        r = self.importiere("--tf", "TF2")
+        z = self.zeilen()
+        self.assertEqual(sorted((z[i][2], z[i][3]) for i in z), [("TF2", "Plan-Review R1"), ("TF2", "Spec-Review R1")])
+        self.assertIn("1 Agenten ohne erkanntes Präfix", r.stderr)
+        self.assertIn("Freitext ohne Präfix", r.stderr)
+
+    def test_import_ueberschreibt_keine_fix_runden_von_hand(self):  # R2-3
+        self.agent("a1", "TF2 Impl T1")
+        self.importiere()
+        r = subprocess.run([sys.executable, "-I", SKRIPT, "bewerte", self.datei],
+                           input=json.dumps({"nr": 1, "fix_runden": "2"}), capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)  # Spalte führt der Import, nicht bewerte
+        self.assertIn("unbekannte Felder", r.stderr)
+        self.agent("a1", "TF2 Impl T1", nach=[("2026-11-10T10:30:00Z", "2026-11-10T10:31:00Z", {"input_tokens": 5, "output_tokens": 5}, 0)])
+        self.importiere()
+        self.assertEqual(self.zeilen()[1][14], "1")
+
+    def test_update_ueberschreibt_fremde_zeile_nicht(self):  # R2-4
+        self.agent("a1", "TF1 Impl T1")
+        self.agent("a2", "TF1 Impl T2")
+        self.importiere()
+        text = open(self.datei, encoding="utf-8").read()
+        zeilen = text.splitlines()
+        i = next(k for k, z in enumerate(zeilen) if z.startswith("| 2 |"))
+        del zeilen[i]  # letzte Zeile von Hand gelöscht, Marker bleibt
+        open(self.datei, "w", encoding="utf-8").write("\n".join(zeilen) + "\n")
+        self.agent("a3", "TF1 Impl T3")
+        self.importiere()
+        self.assertEqual(sorted(self.zeilen()), [1, 3])  # #2 wird nicht neu vergeben (a3 → #3)
+        z = open(self.datei, encoding="utf-8").read().replace("| Impl T1 |", "| Fremde Rolle |")
+        open(self.datei, "w", encoding="utf-8").write(z)
+        self.agent("a1", "TF1 Impl T1", nach=[("2026-11-10T10:30:00Z", "2026-11-10T10:31:00Z", {"input_tokens": 5, "output_tokens": 5}, 0)])
+        self.importiere()
+        z = self.zeilen()
+        self.assertEqual(z[1][3], "Fremde Rolle")  # nicht überschrieben
+        self.assertEqual(z[1][14], "–")
+        self.assertEqual(sorted(z), [1, 3, 4])
+        self.assertEqual(z[4][3], "Impl T1")  # stattdessen neue Zeile
+
+    def test_alter_marker_mit_nackter_id_bleibt_uebersprungen(self):  # Hinweis Runde 2
+        self.agent("a1", "TF1 Impl T1")
+        self.importiere()
+        text = open(self.datei, encoding="utf-8").read()
+        text = re.sub(r"<!-- agent-stats:importiert .*? -->", "<!-- agent-stats:importiert a1 -->", text)
+        open(self.datei, "w", encoding="utf-8").write(text)
+        self.agent("a1", "TF1 Impl T1", nach=[("2026-11-10T10:30:00Z", "2026-11-10T10:31:00Z", {"input_tokens": 5, "output_tokens": 5}, 0)])
+        self.assertIn("Nichts Neues", self.importiere().stdout)
+
+    def test_bewerte_gebuendelt(self):
+        self.agent("a1", "TF2 Spec-Review R1", typ="opus-xhigh")
+        self.agent("a2", "TF3 Spec-Review R1", typ="opus-xhigh")
+        self.importiere()
+        eingabe = "\n".join([json.dumps({"tf": "TF2", "rolle": "Spec-Review R1", "bwk": "1/2/3",
+                                         "angenommen": 3, "betrieb": "1: Leck | Pfad"}),
+                             json.dumps({"nr": 2, "bwk": "0/0/1"})])
+        r = subprocess.run([sys.executable, "-I", SKRIPT, "bewerte", self.datei], input=eingabe,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        z = self.zeilen()
+        self.assertEqual(z[1][11:13], ["1/2/3", "3"])
+        self.assertIn("| 1: Leck \\| Pfad |", open(self.datei, encoding="utf-8").read())  # Strich maskiert
+        self.assertEqual(z[2][11], "0/0/1")
+        r = lauf("summarize", self.datei)
+        self.assertIn("| Spec-Review | opus-xhigh | 2 |", r.stdout)
+        self.assertIn("1/2/4", r.stdout)
+
+    def test_bewerte_mehrdeutig_schreibt_nichts(self):
+        self.agent("a1", "TF2 Spec-Review R1")
+        self.agent("a2", "TF3 Spec-Review R1")
+        self.importiere()
+        vorher = open(self.datei, encoding="utf-8").read()
+        eingabe = json.dumps({"nr": 1, "bwk": "0/0/1"}) + "\n" + json.dumps({"rolle": "Spec-Review R1", "bwk": "1/1/1"})
+        r = subprocess.run([sys.executable, "-I", SKRIPT, "bewerte", self.datei], input=eingabe,
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("2 passende Zeilen", r.stderr)
+        self.assertEqual(open(self.datei, encoding="utf-8").read(), vorher)
+
+    def test_bewerte_nr_widerspricht_rolle_schreibt_nichts(self):  # R1-14
+        self.agent("a1", "TF2 Spec-Review R1")
+        self.agent("a2", "TF3 Spec-Review R1")
+        self.importiere()
+        vorher = open(self.datei, encoding="utf-8").read()
+        for falsch in ({"nr": 1, "rolle": "Spec-Review R1", "tf": "TF3", "bwk": "1/1/1"},
+                       {"nr": 1, "rolle": "Plan-Review R1", "bwk": "1/1/1"}):
+            r = subprocess.run([sys.executable, "-I", SKRIPT, "bewerte", self.datei], input=json.dumps(falsch),
+                               capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("passt nicht", r.stderr)
+            self.assertEqual(open(self.datei, encoding="utf-8").read(), vorher)
+
+    def test_bewerte_tf_pr_schreibweise(self):  # R1-12b
+        self.agent("a1", "PR12 Review R1 Korrektheit")
+        self.importiere()
+        eingabe = json.dumps({"tf": "PR12", "rolle": "Review R1 Korrektheit", "bwk": "0/1/0"})
+        r = subprocess.run([sys.executable, "-I", SKRIPT, "bewerte", self.datei], input=eingabe,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.zeilen()[1][11], "0/1/0")
+
+
 if __name__ == "__main__":
     unittest.main()
