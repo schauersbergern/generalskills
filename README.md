@@ -17,7 +17,7 @@ Der aktuelle Stand des Repos umfasst zehn produktiv nutzbare Skills, den F&E-Ski
 | `fix-findings` | Fixer-Thread (Effort high, von `pr-review-loop` mit Sonnet gestartet): prueft eingefuegte Review-Befunde, setzt angenommene per Test → Fix → Commit um, vor dem Push nur Typecheck und abhaengige Tests (ganze Suite in der CI, ohne CI einmal vor dem Push), pusht, liefert Entscheidungstabelle; Merge/Deploy nur auf Befehlswort; nimmt auch die Befundliste aus `security-audit` ohne PR an (eigener Worktree vom geprueften SHA, Push des Branches ausser bei oeffentlichen Repos, PR-Link, kein PR) | `fix-findings/SKILL.md` |
 | `auto-feature` | Autonomer Feature-Workflow aus einem Feature-File ohne Zwischenhalt: Spec (Opus 5.5) → Opus-Review max. 2 → Plan (Opus 5.5) → Opus-Review max. 2 → Sonnet-5.5-Umsetzung → Haertung → PRs → harter Stopp (HITL); Effort xhigh, nur Re-Reviews, lesende Refactor-/UI-Reviews und mechanische Tasks mit `sonnet-high`; ganze Suite einmal je TF; Agent-Statistik Pflicht (Format gilt fuer alle Skills, Skript `scripts/agent-stats.py` fuer Eintrag, Auswertung (auch je Skill-Stand), Thread-Tokens aus Transkripten und den Stempel `Skills: generalskills@<sha>` im Kopf jeder Statistik); kein PR-Review-Loop, kein Merge; Format des Feature-Files mit DoD-IDs und Nachweis-Art in `references/feature-file.md`; Retro am Laufende (auch in `pr-review-loop` und `fix-findings`) legt Fehlerklassen-Kandidaten zur Freigabe ab, Rezept `references/retro.md`, Ablage per `scripts/fehlerklassen.py` | `auto-feature/SKILL.md`, `auto-feature/references/feature-file.md`, `auto-feature/references/retro.md`, `auto-feature/scripts/agent-stats.py`, `auto-feature/scripts/fehlerklassen.py` |
 | `feature-file` | Macht aus Kundenwunsch, Call-Notiz oder Idee ein Feature-File fuer `auto-feature`: Ist-Stand im Code zuerst, Interview nur fuer Entscheidungen von User oder Kunde, Recherche nur als Default mit Quelle, Builder-Check durch einen frischen `opus-xhigh`, Freigabe-Zeile erst nach OK | `feature-file/SKILL.md` |
-| `security-audit` | Auditiert ganze Node/TS-Repos auf ausnutzbare Luecken: Karte der Angriffsflaeche, bis zu 6 Opus-Reviewer, 2 Pruefer, die jeden P1/P2 widerlegen oder per Docker-PoC im internen Netz belegen; dazu Abhaengigkeiten (osv-scanner, CISA KEV, Erreichbarkeit im Code), Lieferkette (Lockfile, `npm install` statt `npm ci`, offene Install-Skripte) und Secrets in der Git-Historie (gitleaks, Arbeitskopie vor dem Lesen geschwaerzt, Werte nie im Bericht); KI- und Agenten-Apps: Erkennung ueber `package.json` (`ki.py`), eigene Pruefpunkte K1 bis K7 (fremde Inhalte steuern Agenten, Tools mit Wirkung, Modellausgabe in Senken, Geheimnisse im Prompt), belegt per Modell-Mock im internen Docker-Netz, nie gegen eine echte Modell-API; Bericht ausserhalb des Repos unter `~/.claude/security-reviews/<repo>/`, Befundliste fuer `/fix-findings` (Eingang ohne PR ab TF5); aendert das Repo nie | `security-audit/SKILL.md`, `security-audit/references/*`, `security-audit/scripts/bericht.py`, `security-audit/scripts/poc.py`, `security-audit/scripts/netzregel.py`, `security-audit/scripts/gitkopie.py`, `security-audit/scripts/lieferkette.py`, `security-audit/scripts/ki.py`, `security-audit/docker/llm-mock.mjs`, `security-audit/evals/run_eval.py` |
+| `security-audit` | Auditiert ganze Node/TS-Repos auf ausnutzbare Luecken: Karte der Angriffsflaeche, bis zu 6 Opus-Reviewer, 2 Pruefer, die jeden P1/P2 widerlegen oder per Docker-PoC im internen Netz belegen; dazu Abhaengigkeiten (osv-scanner, CISA KEV, Erreichbarkeit im Code), Lieferkette (Lockfile, `npm install` statt `npm ci`, offene Install-Skripte) und Secrets in der Git-Historie (gitleaks, Arbeitskopie vor dem Lesen geschwaerzt, Werte nie im Bericht); KI- und Agenten-Apps: Erkennung ueber `package.json` (`ki.py`), eigene Pruefpunkte K1 bis K7 (fremde Inhalte steuern Agenten, Tools mit Wirkung, Modellausgabe in Senken, Geheimnisse im Prompt), belegt per Modell-Mock im internen Docker-Netz, nie gegen eine echte Modell-API; Bericht ausserhalb des Repos unter `~/.claude/security-reviews/<repo>/`, Befundliste fuer `/fix-findings` (Eingang ohne PR ab TF5); dazu ein Kundenbericht (Markdown und PDF, Sie-Form, Kundenstufen, Risiko und Massnahme je Befund, ohne Exploit-Details; Kopf mit dem Projektnamen aus `projekt=`); aendert das Repo nie | `security-audit/SKILL.md`, `security-audit/references/*`, `security-audit/scripts/bericht.py`, `security-audit/scripts/poc.py`, `security-audit/scripts/netzregel.py`, `security-audit/scripts/gitkopie.py`, `security-audit/scripts/lieferkette.py`, `security-audit/scripts/ki.py`, `security-audit/scripts/kundenbericht.py`, `security-audit/scripts/kundenbericht.html5`, `security-audit/docker/llm-mock.mjs`, `security-audit/evals/run_eval.py` |
 | `architektur-rat` | **Forschung und Entwicklung, in keinen Workflow eingebunden, nur auf ausdruecklichen Wunsch.** Zwei unabhaengige `sonnet-high`-Voten (Pragmatiker, Risiko) zu einer offenen, schwer umkehrbaren Code-/Betriebsentscheidung; Hauptsession entscheidet und dokumentiert beide Voten. Test 2026-11-09: keine bessere Entscheidung als ohne Rat, ~360k Sonnet-Input-Aequivalent je Runde; nicht nach `~/.claude/skills/` verlinkt, fuer einen Versuch `ln -sfn ~/Projects/skillz/nikskills/architektur-rat ~/.claude/skills/architektur-rat` | `architektur-rat/SKILL.md` |
 | `agents/opus-xhigh`, `agents/sonnet-xhigh`, `agents/sonnet-high` | Subagent-Definitionen mit `effort: xhigh` fuer Reviews bzw. Umsetzung, genutzt von `pr-review-loop`, `auto-feature`, `feature-file` (Builder-Check) und `security-audit` (Reviewer und Pruefer); `sonnet-high` (`effort: high`) fuer die Delta-Reviews in `pr-review-loop`, die Abschlaege nach der Effort-Regel in `auto-feature` und die Voten im F&E-Skill `architektur-rat` | `agents/*.md` |
 
@@ -97,6 +97,8 @@ nikskills/
       bericht.py
       gitkopie.py
       ki.py
+      kundenbericht.html5
+      kundenbericht.py
       netzregel.py
       poc.py
       test_*.py
@@ -325,6 +327,12 @@ einen Modell-Mock als Container `llm` im internen Netz der Rolle; die Pruefer be
 Protokoll (`poc.py modell`), der Befund traegt dann `annahme_modell` („Modell folgt“). Eine echte Modell-API wird nie
 aufgerufen. Azure, Bedrock, Vertex und Gemini laufen nicht ueber den Mock.
 
+Kundenbericht (TF4): `kundenbericht.py erstellen --json <ausgabe_ordner>/<basisname>.json` schreibt `<basisname>-kunde.md` und
+`<basisname>-kunde.pdf` neben das Bericht-JSON. Das PDF entsteht in zwei Stufen ohne Netz und ohne Dateizugriff aus Daten (pandoc
+`--sandbox`, HTML-Pruefung, weasyprint `--allowed-protocols ''`). Mindestversionen: pandoc ≥ 2.15 (fuer `--sandbox`), weasyprint mit
+Option `--allowed-protocols` (geprueft mit 68.1). Fehlt eines der Werkzeuge, bleibt das Markdown (Exit 3). Der Projektname im Kopf
+kommt aus `projekt="…"` im Aufruf von `/security-audit`; ohne ihn steht dort der Ordner- bzw. Repo-Name samt Hinweis.
+
 Tests fuer `security-audit`:
 
 ```bash
@@ -334,8 +342,10 @@ SECURITY_AUDIT_DOCKER=1 python3 -m pytest security-audit/scripts/test_poc_docker
 # Modell-Mock gegen die echten SDKs (braucht npm, Netz zur npm-Registry und Node ≥ 22)
 SECURITY_AUDIT_SDK_VERTRAG=1 SECURITY_AUDIT_SDK_NODE=<node ≥ 22> python3 -m pytest security-audit/scripts/test_llm_mock.py -k vertrag -q
 # Abnahme-Eval: startet `claude -p` mit Opus und bis zu 8 Subagenten,
-# grob 0,5–1 Mio. Tokens je Lauf; braucht Docker
+# grob 0,5–1 Mio. Tokens je Lauf; braucht Docker sowie pandoc und weasyprint (ohne sie ist TF4-D6 rot: das PDF fehlt)
 SECURITY_AUDIT_EVAL=1 python3 -m pytest security-audit/evals -q
+# Kundenbericht mit den echten Werkzeugen pandoc und weasyprint (ohne Docker, ohne Netz; die Standard-Suite stubbt sie)
+SECURITY_AUDIT_PDF=1 python3 -m pytest security-audit/scripts/test_kundenbericht.py -q
 # TF2-Evals einzeln: Lieferkette/Secrets, Regression, Lauf ohne Werkzeuge
 SECURITY_AUDIT_EVAL=1 python3 security-audit/evals/run_eval.py --fixture fixture-deps
 SECURITY_AUDIT_EVAL=1 python3 security-audit/evals/run_eval.py --fixture fixture-web --ohne-lockfile --ohne gitleaks,osv-scanner,docker --erwartung expected/fixture-web-ohne.json

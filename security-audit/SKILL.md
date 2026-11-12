@@ -1,6 +1,6 @@
 ---
 name: security-audit
-description: Use when the user asks for a security audit of a whole repo or a subpath of a Node/TypeScript web app, including AI and agent apps with LLM calls, tools and prompts ("security-audit", "Sicherheitsprüfung", "prüf das Repo auf Lücken", "ausnutzbare Schwachstellen", "Pentest-Review", "KI-App prüfen", "Prompt-Injection", "/security-audit src/"). Reviewers find candidate vulnerabilities, verifiers try to refute every P1/P2 and prove the survivors with a Docker PoC (AI and agent findings against a model mock, never a real model API); the report's finding list is meant for /fix-findings (entry without a PR from TF5). Never changes the audited repo and never runs its code on the host.
+description: Use when the user asks for a security audit of a whole repo or a subpath of a Node/TypeScript web app, including AI and agent apps with LLM calls, tools and prompts ("security-audit", "Sicherheitsprüfung", "prüf das Repo auf Lücken", "ausnutzbare Schwachstellen", "Pentest-Review", "KI-App prüfen", "Prompt-Injection", "/security-audit src/", "Kundenbericht"). Reviewers find candidate vulnerabilities, verifiers try to refute every P1/P2 and prove the survivors with a Docker PoC (AI and agent findings against a model mock, never a real model API); the report's finding list is meant for /fix-findings (entry without a PR from TF5). Also writes a customer report (Markdown and PDF) in plain business language. Never changes the audited repo and never runs its code on the host.
 argument-hint: '[teilpfad] [projekt="…"] [repo-konfig-geprueft]'
 model: opus
 effort: xhigh
@@ -11,7 +11,7 @@ disallowed-tools: WebFetch, WebSearch
 
 Argumente: `$ARGUMENTS`.
 - **`teilpfad`** (erstes Argument ohne `=`): Befunde nur unter diesem Pfad, Kontext außerhalb darf gelesen werden. Ungültig oder leer meldet `bericht.py kontext` (Exit 3).
-- **`projekt="…"`**: Projektname, landet im Bericht-JSON (`projekt`).
+- **`projekt="…"`**: Projektname, landet im Bericht-JSON (`projekt`) und im Kopf des Kundenberichts („Manibase · Sicherheitsprüfung <Projekt>“).
 - **`repo-konfig-geprueft`** (Schalter): Der User hat die Claude-Konfiguration des Repos geprüft (Schritt 1).
 
 **Kern:** Ein P1/P2 in der Befundliste ist entweder per PoC gegen die App im isolierten Container bestätigt oder als „unbestätigt“ mit Code-Pfad belegt. Jeden geprüften P1/P2 hat ein zweiter Agent ohne Kenntnis der Herleitung zu widerlegen versucht. Wo das nicht geschah (P3, Rest über dem Prüfer-Budget, Werkzeugbefund aus Schritt 1b, von der Hauptsession übernommener Auftrag), steht der Grund in `beschreibung`. Widerlegtes steht unter „Verworfen“. Dieser Skill ändert nie Code im geprüften Repo und führt Kundencode nie auf dem Host aus. Die Befundliste im Bericht nimmt `/fix-findings` an.
@@ -29,7 +29,8 @@ Argumente: `$ARGUMENTS`.
    - `poc.py`, `lieferkette.py` und `ki.py` immer als **einzelner einfacher Befehl**: kein `&&`, `|`, `;`, `2>&1`, `$(…)`, keine Umlaute oder Nicht-ASCII-Zeichen. Argumente mit Sonderzeichen (auch Leerzeichen) in `'…'`. Request-Body nur über `--daten-datei`, Antworten für den Modell-Mock nur über `--antworten-datei` (Datei vorher mit Write im Ausgabeordner anlegen).
    - `poc.py vorbereiten`, `poc.py bauen`, `poc.py starten`, `poc.py neustart`, `poc.py ausfuehren`, `poc.py aufraeumen`, `bericht.py kontext`, `lieferkette.py secrets` und `lieferkette.py abhaengigkeiten` mit Bash-`timeout: 600000`. Jeder dieser Aufrufe begrenzt seine Arbeitsphase durch ein eigenes Zeitbudget und meldet dessen Ablauf, statt still zu hängen: `bericht.py kontext` 300 s (`SECURITY_AUDIT_KONTEXT_TIMEOUT`; Exit 3 mit „Zeitbudget“ in der Meldung), `poc.py vorbereiten` 480 s (Exit 4 mit „Zeitbudget“ in der Meldung, kein Fertig-Marker; einzelne lokale Löschvorgänge werden nicht unterbrochen), `poc.py starten` 440 s und `poc.py neustart` 440 s (`start-fehler` mit „Zeitbudget“), `poc.py aufraeumen` 440 s (Exit 1), `poc.py bauen` 540 s (`build-timeout`), `poc.py ausfuehren` 120 s (Exit 1), `lieferkette.py secrets` 300 s (davon `gitleaks dir` zuerst höchstens 120 s ab Start, nach den Vorsuchen mindestens 60 s, die Schwärzung danach bis zum Gesamtbudget; bei Ablauf einer der beiden Exit 4 `schwaerzung-fehlgeschlagen` und Abbruch; läuft das Budget der Historienprüfung ab, Hinweis „Secret-Prüfung abgebrochen (Zeitbudget)“), `lieferkette.py abhaengigkeiten` 300 s (Hinweis „Abhängigkeitsprüfung abgebrochen (Zeitbudget)“) und `lieferkette.py lieferkette` 60 s (rein statisch, ohne langen Timeout; Hinweis „Lieferketten-Prüfung abgebrochen (Zeitbudget)“). Das Bash-Limit von 600 s ist damit nur für `kontext`, `vorbereiten`, `secrets` und `abhaengigkeiten` zugesichert; bei hängendem Docker kann das Aufräumen nach dem Ablauf (`starten`, `neustart`) länger dauern, und ein vom Bash-Limit abgebrochener Aufruf lässt Container zurück, die `poc.py aufraeumen` entfernt.
    - **Kurze Budgets ohne langen Bash-Timeout:** `ki.py erkennen` 30 s (`SECURITY_AUDIT_KI_BUDGET`; läuft es ab, bevor ein SDK gefunden ist, endet es mit Exit 1, sonst mit Exit 0 und dem Hinweis „KI-Erkennung abgebrochen (Zeitbudget)“) und `poc.py modell` 60 s (`SECURITY_AUDIT_MODELL_BUDGET`; bei Ablauf Exit 1). Beide Budgets lassen sich über die Umgebung nur verkürzen.
-   - Bash sonst nur für `bericht.py`, `lieferkette.py`, `ki.py`, `agent-stats.py` und `ls`. Write nur im Ausgabeordner.
+   - **Kurzes Budget für den Kundenbericht ohne langen Bash-Timeout:** `kundenbericht.py erstellen` 90 s (`SECURITY_AUDIT_KUNDE_BUDGET`, nur verkürzbar; unter dem Bash-Standard von 120 s), davon pandoc höchstens 20 s und weasyprint höchstens 60 s. Es ist ein einzelner einfacher Befehl wie die übrigen Skripte. Läuft das Budget ab, endet es mit Exit 4 (`pdf-fehler`) und lässt das Markdown liegen. Mindestversionen der Werkzeuge: pandoc ≥ 2.15 (für `--sandbox`), weasyprint mit Option `--allowed-protocols` (geprüft mit 68.1). Fehlt ein Werkzeug, endet es mit Exit 3 (`pdf-werkzeug-fehlt`), ebenfalls mit Markdown. Eine zu alte Version (Option `--sandbox` bzw. `--allowed-protocols` unbekannt) endet mit Exit 4 (`pdf-fehler`), ebenfalls mit Markdown.
+   - Bash sonst nur für `bericht.py`, `kundenbericht.py`, `lieferkette.py`, `ki.py`, `agent-stats.py` und `ls`. Write nur im Ausgabeordner.
 9. **Die Netzregel ist Erkennung, keine Sandbox:** Das Eval und `bericht.py rendern` melden Verstöße im Nachhinein. Die echte Sperre ist die Rechtekonfiguration der Session. Ob `disallowed-tools` auf Subagenten durchschlägt, ist offen; dort gilt die Sperre per Briefing. Verdacht (nur aus dem Schema-Text des installierten CLI gelesen, nicht gemessen): `disallowed-tools` im Frontmatter gilt nur bis zur nächsten User-Nachricht; schreibt der User während des Audits, können WebFetch und WebSearch wieder verfügbar sein. Verlässlich ist nur die Rechtekonfiguration der Session (`--disallowedTools`). Schema und Eval prüfen bei `bestätigt` nur, dass ein `poc`-Text mit erlaubten Hosts vorhanden ist, nicht, dass der Request lief: `bestätigt` beruht auf dem Ergebnis des Prüfers und dem Gegenlesen der Hauptsession (Schritt 6).
 
 ## Ablauf
@@ -41,7 +42,7 @@ python3 -I ${CLAUDE_SKILL_DIR}/scripts/bericht.py kontext [--teilpfad '<teilpfad
 ```
 
 - Exit 3 (kein Repo/HEAD, ungültiger Teilpfad, Ausgabeordner im geprüften Repo): stderr dem User melden, Ende.
-- Die JSON-Ausgabe liefert `repo`, `wurzel`, `sha`, `sha7`, `datum`, `teilpfad`, `teilpfad_slug`, `ausgabe_ordner`, `basisname`, `hinweise`, `repo_konfiguration`, `agent_stats_datei`. **Halte `ausgabe_ordner`, `basisname`, `agent_stats_datei`, `sha`, `repo`, `datum`, `teilpfad` direkt als Notiz fest (TodoWrite oder Text).** Rufe `kontext` nach einem erfolgreichen Aufruf nicht erneut auf: Der erste Aufruf reserviert den Namen, jeder weitere liefert einen anderen `basisname` (`-2`).
+- Die JSON-Ausgabe liefert `repo`, `ordner`, `wurzel`, `sha`, `sha7`, `datum`, `teilpfad`, `teilpfad_slug`, `ausgabe_ordner`, `basisname`, `hinweise`, `repo_konfiguration`, `agent_stats_datei`. `ordner` ist der Ordnername der Hauptkopie des Repos (im Worktree der Hauptordner; nicht der Ausgabeordner) und kann `null` sein. **Halte `ausgabe_ordner`, `basisname`, `agent_stats_datei`, `sha`, `repo`, `ordner`, `datum`, `teilpfad` direkt als Notiz fest (TodoWrite oder Text).** Rufe `kontext` nach einem erfolgreichen Aufruf nicht erneut auf: Der erste Aufruf reserviert den Namen, jeder weitere liefert einen anderen `basisname` (`-2`).
 - **Repo-Konfiguration:** Gib `--repo-konfig-geprueft` nur mit, wenn der Schalter `repo-konfig-geprueft` gesetzt ist. Bringt das Repo eigene Claude-Konfiguration mit und fehlt der Schalter, bricht `kontext` selbst mit Exit 3 ab, vor der Namensreservierung (der Neustart mit Schalter bekommt denselben `basisname`): kein `neu`, kein `vorbereiten`, gib dem User die Meldung von stderr (sie nennt Prüfung, Startbefehl `claude --setting-sources user --strict-mcp-config`, `/security-audit … repo-konfig-geprueft` und die Zeile „Gefunden: <Liste>“) unverändert wieder. Mit Schalter läufst du weiter und vermerkst im Bericht, dass der User sie geprüft hat. Bereits geladene Hooks kann der Skill nicht abschalten. Gemeldet werden die versionierten Dateien des geprüften Commits und Dateien im Wurzelordner des Arbeitsbaums (nur Existenz, nie Inhalt; Zusatz „nur im Arbeitsbaum“); schon eine ungetrackte `.claude/settings.local.json` löst den Abbruch aus, bei vielen Repos der Normalfall: `.mcp.json`, `.claude/settings*.json`, `.claude/skills|agents|commands`. Konfiguration in übergeordneten Ordnern oder im User-Verzeichnis sieht der Skill nicht.
 - `hinweise` (uncommittete Änderungen, Symlinks, LFS-Pointer, Submodule) kommen unverändert in die `hinweise` des Berichts.
 
@@ -128,7 +129,7 @@ Alle Werkzeugbefunde: `status` `unbestätigt`, `werkzeug` gesetzt, `code_pfad` m
 - **Felder aus der Ausgabe (Abhängigkeiten):** `paket` → `pakete[].name`, `version` → `pakete[].version`, `advisories[].id` → `pakete[].advisories` (Liste der IDs als Texte); `lockfile`:`zeile` → erster Eintrag von `code_pfad`. `behoben_in` und `kev` gehen nur in `erwartet` und die Stufe ein, nicht in `pakete`. `titel`: „Verwundbare Abhängigkeit <name>@<version>“; `szenario`: „Ein Angreifer löst die bekannte Lücke in <name> aus, sofern die Anwendung die betroffene Funktion mit Eingaben des Angreifers aufruft“; `klasse`: „Abhängigkeit mit bekannter Lücke“; `ohne_anmeldung` und `mandantenuebergreifend` je `false` (das Werkzeug sagt dazu nichts, ohne Request-Beleg bleibt es bei `false`).
 - **Secrets (`secrets`):** Ein Befund je Eintrag aus `befunde_roh` (je Regel und Datei), **P1**, `kategorie` `A07`, `werkzeug` `gitleaks`. `commits` sind die **vollen SHAs** aus der Ausgabe, `datei`/`zeile` aus dem Eintrag, `code_pfad: ["<datei>:<zeile>"]`. `erwartet` wörtlich: „Secret beim Anbieter rotieren (nicht im Code behebbar); Historie erst nach Rotation manuell bereinigen“; bei `in_head: false` zusätzlich „Datei existiert in HEAD nicht mehr“; bei `in_head: null` (unbekannt) kein Zusatz zu HEAD. Nie einen Secret-Wert lesen oder ausgeben; Regel, Datei, Zeile und Commits genügen.
 - **Felder aus der Ausgabe (Secrets):** `regel`, `datei`, `zeile`, `commits` aus dem Eintrag von `befunde_roh`. `titel`: „Secret in der Git-Historie (<regel>)“; `szenario`: „Wer Zugriff auf das Repo oder einen Klon hat, liest das Secret aus der Historie und nutzt es gegen den Dienst“; `klasse`: „Secret in der Git-Historie“; `ohne_anmeldung`, `mandantenuebergreifend` je `false` (Begründung wie bei den Abhängigkeiten).
-- **Lieferkette (`lieferkette`):** Die Entwürfe aus `entwuerfe` unverändert übernehmen (sie sind vollständige Befunde mit `werkzeug` `lieferkette`, `kategorie` `A03` und `klasse`); du vergibst nur die IDs. `enableScripts` ist kein Schutz und kein Ausweg: Die Schutzmaßnahmen prüft das Skript je Lockfile-Typ.
+- **Lieferkette (`lieferkette`):** Die Entwürfe aus `entwuerfe` unverändert übernehmen (sie sind vollständige Befunde mit `werkzeug` `lieferkette`, `kategorie` `A03` und `klasse`); du vergibst nur die IDs. Einzige Ausnahme ist ein `titel`, den der Kundenbericht in Schritt 7 beanstandet (Exit 2): Die Titelkorrektur dort geht „unverändert übernehmen“ vor. `enableScripts` ist kein Schutz und kein Ausweg: Die Schutzmaßnahmen prüft das Skript je Lockfile-Typ.
 
 ### 6. Prüfer (bis zu 2)
 
@@ -176,15 +177,51 @@ python3 -I ${CLAUDE_SKILL_DIR}/scripts/poc.py modell --lauf <id> --rolle <rolle>
 
 ### 7. Bericht
 
-Schreibe das JSON (Werte aus der Notiz von Schritt 1, `kontext` nicht erneut aufrufen) nach `<ausgabe_ordner>/<basisname>.json` (Format: `references/bericht-format.md`), dann:
+Schreibe das JSON (Werte aus der Notiz von Schritt 1 einschließlich `ordner`, `kontext` nicht erneut aufrufen) nach `<ausgabe_ordner>/<basisname>.json` (Format: `references/bericht-format.md`). Die Felder `zusammenfassung` und `massnahme` werden für jeden Befund mit Status `bestätigt` oder `unbestätigt` geschrieben, auch für Werkzeug- und KI-Befunde (Schreibregeln am Ende dieses Schritts). Dann:
 
 ```
 python3 -I ${CLAUDE_SKILL_DIR}/scripts/bericht.py rendern <ausgabe_ordner>/<basisname>.json
 ```
 
-Exit 2 liefert die Fehlerliste auf stderr: JSON korrigieren und erneut. Das Markdown entsteht nur so, nie von Hand.
+Exit 2 liefert die Fehlerliste auf stderr: JSON korrigieren und erneut. Das Markdown entsteht nur so, nie von Hand. `rendern` warnt bei Verstößen der Kundenfelder gegen die Schreibregeln nur auf stderr („Kundenbericht wird scheitern: …“, Exit 0). Du darfst die Felder schon vor `erstellen` korrigieren, das kostet keine Korrekturrunde; entschieden wird im nächsten Befehl.
 
 KI-Befunde tragen `owasp_ki` (vom Reviewer) und gegebenenfalls `annahme_modell` (Schritt 6); beide Felder sind optional (Format: `references/bericht-format.md`). `rendern` zeigt im Detailabschnitt `OWASP KI: …` und bei `annahme_modell` die Statuszeile „bestätigt (Modell-Mock, Annahme: Modell folgt)“; die Befundliste (Codeblock) bleibt unverändert, und `kategorie` bleibt A01 bis A10 (bei K1 A01 oder A05). `bericht.hinweise` enthält genau einen Erkennungshinweis von `ki.py`, im Fehlerfall den Fehlerhinweis aus Schritt 1b.
+
+**Kundenbericht** (nach `rendern`, auch wenn es Warnungen gab):
+
+```
+python3 -I ${CLAUDE_SKILL_DIR}/scripts/kundenbericht.py erstellen --json <ausgabe_ordner>/<basisname>.json
+```
+
+Das Skript schreibt `<basisname>-kunde.md` und `<basisname>-kunde.pdf` neben das JSON. Bei Exit ≠ 0 ist die erste stdout-Zeile `kategorie: <wert>`, danach folgt `kunde-md: <pfad>`, wenn das Markdown schon liegt (möglich bei Exit 1, 3, 4 und 5); bei Exit 0 stehen `kunde-md:` und `kunde-pdf:` auf stdout. Die Meldungen sind stdout-Zeilen der Form `<id> <feld>: Regel <regel>[ (<detail>)]`, höchstens 30 Meldungszeilen, danach eine Zeile „… und <n> weitere“ (weitere Treffer zeigt erst der nächste Lauf nach der Korrektur der genannten). Sie nennen den Treffertext nie, außer dem Du-Wort (`du`) und dem Token bei Regel `a`.
+
+- **Exit 0:** Die Pfade aus `kunde-md:` und `kunde-pdf:` kommen in die Schlussmeldung.
+- **Exit 2** (`inhalt`): Ein Kundenfeld fehlt oder verstößt gegen eine Regel, es liegen keine Kundendateien vor. Korrigiere nur `zusammenfassung`, `massnahme` und `titel` der genannten Befunde nach der Legende unten, schreibe das JSON neu, führe `rendern` und `erstellen` erneut aus, höchstens 2 Korrekturrunden (also höchstens 3 Aufrufe von `erstellen`). Alle anderen Felder bleiben unverändert (auch `stufe`, `status`, `datei`). Scheitert auch die zweite Korrekturrunde, steht „Kundenbericht nicht erstellt (inhalt)“ in der Schlussmeldung (nicht in `bericht.hinweise`).
+  - Meldet Regel `a` „zu viele Token zum Prüfen“, helfen Feldkorrekturen nicht; den `poc` kürzen. Das ist die einzige Ausnahme von „Alle anderen Felder bleiben unverändert“.
+  - Trifft eine Meldung `titel`, formulierst du den Titel um, ohne Pfad, Zeile, Request, Token aus einem `poc`, Backtick, `{ } =`, URL und E-Mail (`<` und `>` sind im Titel erlaubt, die Schreibregeln verbieten sie weiter). Das gilt auch für Titel, die aus `lieferkette`-Entwürfen oder den festen Werkzeugtiteln aus 5b stammen. Die Korrektur geht der Regel „unverändert übernehmen“ vor, `stufe`, `status`, `datei` und alle anderen Felder bleiben.
+  - Legende der `regel`-Werte:
+    - `du`: Du-Form, Detail ist das Wort (prüft `titel` nicht)
+    - `a`: Text aus einem `poc`, Detail ist das Token
+    - `b`: Request oder Pfad mit führendem Schrägstrich
+    - `c`: Zeichen `{ } < > =` oder Backtick (im `titel` nur Backtick, `{ }` und `=`)
+    - `d`: Datei mit Zeile, `#L…` oder „Zeile n“
+    - `e`: Dateipfad oder Code-Pfad eines Befunds, auch der eigene
+    - `url`: URL oder `www.`
+    - `email`: E-Mail-Adresse
+    - `fehlt`: Pflichtfeld des Befunds fehlt, `zusammenfassung` oder `massnahme` ist zu ergänzen
+    - `schema`: Typ, Einzeiligkeit, unsichtbare Zeichen oder Länge verletzt, Detail ist die Schemameldung ohne den Wert
+- **Exit 3, 4, 5 oder 1** (`pdf-werkzeug-fehlt`, `pdf-fehler`, `eingabe`, `intern`): Keine Korrektur der Felder. Steht nach `kategorie:` eine Zeile `kunde-md:`, liegt das Markdown (das PDF fehlt) und die Schlussmeldung lautet „Kundenbericht nur als Markdown (<kategorie>)“, sonst „Kundenbericht nicht erstellt (<kategorie>)“. Exit 3 und 4 haben immer `kunde-md:`, Exit 5 und 1 nur, wenn das Markdown schon geschrieben war.
+  - Meldet Exit 5 `- projekt: Regel a` (oder `b`; auch `ordner`, `repo`, `teilpfad`), enthält diese Kopfangabe Text aus einem `poc` (Regel `a`) oder einen Request (Regel `b`). Der Kundenbericht entsteht nicht; nenne die Meldung in der Schlussmeldung. Der Name kommt vom Nutzer, ändere ihn nicht selbst.
+
+**Schreibregeln** für `zusammenfassung` und `massnahme` (und für einen umformulierten `titel`):
+
+- Sie-Form mit festem Satzmuster: „Aktualisieren Sie …“, „Lassen Sie …“ oder „Wir empfehlen, …“. Die Du-Form (auch Imperative wie „Aktualisiere …“) ist verboten.
+- Das Risiko als Geschäftsfolge formulieren: Datenabfluss, fremder Zugriff, Ausfall, Kosten, Vertrauensverlust. Die Maßnahme konkret, ohne Code.
+- Keine Datei- und Pfadnamen (die betroffene Datei zeigt der Bericht selbst), keine Zeilenangaben, keine Requests, kein Code und keine Bezeichner aus dem Code, keine Backticks und keines der Zeichen `{ } < > =`. Auch kein Schrägstrich vor einem Wort: Regel `b` meldet jeden Pfad mit führendem Schrägstrich, also auch „500 €/Monat“, „01.01./31.12.“, „5 %/Jahr“ und „bzw./oder“; schreibe „pro Monat“, „bzw.“, „oder“.
+- Keine URL- oder E-Mail-Adressen.
+- Nichts aus `advisories[].zusammenfassung` übernehmen (der OSV-Text enthält Technik und Links); die Kundensprache schreibst du selbst.
+- Längen und Form: `zusammenfassung` 40 bis 600 Zeichen, `massnahme` 20 bis 400 Zeichen; beide Felder sind einzeilig.
+- Ein `titel` enthält kein `=`, keine Pfade und keine Bezeichner aus dem `poc`; statt „(alg=none)“ schreibst du „Algorithmus none“.
 
 ### 8. Aufräumen (immer, auch nach Abbruch und Fehlern ab Schritt 1)
 
@@ -210,7 +247,7 @@ Beim Ausweichtyp `--typ general-purpose --modell opus`. Fehlt `<usage>`, setze `
 
 ## Schlussmeldung
 
-Pfade von `.md` und `.json`, Zahl der Befunde je Stufe und Status, Zahl der Verworfenen und Verdachtsfälle, die Hinweise mit Kategorie (z. B. `docker-fehlt`: keine PoCs, alle P1/P2 nur `unbestätigt`), Zahl der Subagenten. Danach die Befundliste (Codeblock aus der `.md`, unverändert), gedacht für `/fix-findings` (Eingang ohne PR ab TF5). `/fix-findings` gleicht das Repo der Liste mit `python3 -I ${CLAUDE_SKILL_DIR}/scripts/bericht.py repo --repo <pfad>` ab (nur Name auf stdout, legt nichts an; Exit 3: kein Repo).
+Pfade von `.md` und `.json`, die Pfade der Kundendateien `-kunde.md` und `-kunde.pdf` mit dem Satz „Vor Weitergabe lesen.“ (fehlte `projekt`, zusätzlich „Projektname fehlte“; im Kopf steht dann der Ordner- oder Repo-Name samt Hinweis), bei Exit ≠ 0 und ≠ 2 mit einer Zeile `kunde-md:` nach `kategorie:` „Kundenbericht nur als Markdown (<kategorie>)“, ohne diese Zeile „Kundenbericht nicht erstellt (<kategorie>)“, bei Exit 2 nach 2 Korrekturrunden „Kundenbericht nicht erstellt (inhalt)“ (alle drei Fälle stehen in der Schlussmeldung, nicht in `bericht.hinweise`), Zahl der Befunde je Stufe und Status, Zahl der Verworfenen und Verdachtsfälle, die Hinweise mit Kategorie (z. B. `docker-fehlt`: keine PoCs, alle P1/P2 nur `unbestätigt`), Zahl der Subagenten. Danach die Befundliste (Codeblock aus der `.md`, unverändert), gedacht für `/fix-findings` (Eingang ohne PR ab TF5). `/fix-findings` gleicht das Repo der Liste mit `python3 -I ${CLAUDE_SKILL_DIR}/scripts/bericht.py repo --repo <pfad>` ab (nur Name auf stdout, legt nichts an; Exit 3: kein Repo).
 
 ## Typische Fehler
 
@@ -229,4 +266,5 @@ Pfade von `.md` und `.json`, Zahl der Befunde je Stufe und Status, Zahl der Verw
 - `neustart` nach `modell --antworten-datei` oder nach dem Befüllen der Quelle: Er leert Warteschlange und Protokoll und setzt die App auf den Seed zurück, Antwort und Quelle sind weg (Ablauf in Schritt 6).
 - `annahme_modell` für K3, K5, K6 oder K7 gesetzt, vom Prüfer statt von der Hauptsession, oder bei einem anderen Status als `bestätigt` (das Schema lehnt `true` bei K3, K5, K6, K7 und bei einem anderen Status als `bestätigt` ab; ob die Hauptsession oder der Prüfer es gesetzt hat, sieht es nicht).
 - Eine Modell-API als Ziel in einem Befehl oder Suchmuster: nie, als Modellziel gilt nur `llm`.
+- Kundenfelder mit Dateinamen, Backticks, Bezeichnern, URLs oder Du-Form geschrieben oder `kundenbericht.py` mit Korrekturen an anderen Feldern als `zusammenfassung`, `massnahme` und `titel` wiederholt: Es gibt dann keinen Kundenbericht (Schritt 7).
 - Aufräumen vergessen, wenn der Lauf vorher scheiterte.

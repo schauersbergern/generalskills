@@ -4,6 +4,7 @@
     "fixture.invalid"
   ],
   "ki_hinweis": "nicht anwendbar",
+  "kundenbericht": true,
   "start": {
     "befehl": "node src/server.js",
     "port": 3000

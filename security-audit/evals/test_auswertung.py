@@ -23,13 +23,20 @@ HIER = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HIER)
 import auswertung  # noqa: E402
 import run_eval  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(HIER), "scripts"))
+from kundenbericht import escape as kundenbericht_escape  # noqa: E402
 
 TESTDATEN = os.path.join(HIER, "testdaten")
 SKILL = os.path.dirname(HIER)
 POC = "python3 /skill/security-audit/scripts/poc.py"
 MUSTER = ["fixture.invalid"]
-# Plan-Nachtrag R1 B2: fixture-web hat TF1-D1 bis D7 und wegen `ki_hinweis` TF3-D4
-DOD_WEB = {f"TF1-D{i}" for i in range(1, 8)} | {"TF3-D4"}
+# Plan-Nachtrag R1 B2: fixture-web hat TF1-D1 bis D7 und wegen `ki_hinweis` TF3-D4; TF4 R1-W4: wegen `kundenbericht` auch TF4-D6
+DOD_WEB = {f"TF1-D{i}" for i in range(1, 8)} | {"TF3-D4", "TF4-D6"}
+# TF4-D6: Kundendaten, wie `run_eval` sie übergibt (Markdown mit Kopf ohne Projekt, PDF-Anfang)
+# (TF4 Härtung, Review 5 Minor 1: das PDF gilt erst mit Mindestgröße 1 KiB und `%%EOF` in den letzten 1024 Bytes)
+KUNDE_OK = {"md": "# Manibase · Sicherheitsprüfung Projekt\n\n**Datum:** 2026-11-10\n", "md_abgeschnitten": False, "pdf_anfang": b"%PDF-1.7",
+            "pdf_groesse": 35000, "pdf_ende": b"endobj\ntrailer\nstartxref\n123\n%%EOF\n", "projekt": None}
+KUNDE_LEER = {"md": None, "md_abgeschnitten": False, "pdf_anfang": None, "pdf_groesse": None, "pdf_ende": None, "projekt": None}
 # W6: Namen der Test-App `fixture-deps` dürfen im Skill-Text, in den references und im kopierten Skill nicht stehen
 VERBOTENE_NAMEN_TF2 = ("config/keys.js", "src/routes/vorlage.js", "_.template", "variable:", "lodash", "minimist")
 # R2 B1-neu: Namen und Marker der Test-App `fixture-ki` (dazu alle `dateien` der Erwartung außer generischen Namen) dürfen im
@@ -380,8 +387,8 @@ def test_docker_leer():
 
 def alles(bericht, erwartung, stream, **ueberschreibe):
     args = dict(bericht=bericht, erwartung=erwartung, stream=stream, porcelain="",
-                ausgabe_dateien=["x.md", "x.json", "x-agent-stats.md"], neue_reviews=[], neue_stats=[],
-                docker_listen={"container": [], "netze": [], "images": []})
+                ausgabe_dateien=["x.md", "x.json", "x-agent-stats.md", "x-kunde.md", "x-kunde.pdf"], neue_reviews=[], neue_stats=[],
+                docker_listen={"container": [], "netze": [], "images": []}, kunde=copy.deepcopy(KUNDE_OK))
     args.update(ueberschreibe)
     return auswertung.auswerten(**args)
 
@@ -745,7 +752,7 @@ def test_bericht_kein_dict(erwartung, stream, kaputt):
 # ====================================================================================== Teil 2: run_eval.py
 
 FAKE_CLAUDE = """#!{python}
-import json, os, subprocess, sys, time
+import json, os, re, subprocess, sys, time
 args = sys.argv[1:]
 modus = os.environ.get("FAKE_CLAUDE_MODUS", "ok")
 smoke = "--output-format" in args and args[args.index("--output-format") + 1] == "json"
@@ -791,6 +798,12 @@ if modus in ("bericht", "docker_rest"):
     for name in ("x.md", "x-agent-stats.md"):
         with open(os.path.join(ordner, name), "w") as f:
             f.write("x\\n")
+    treffer = re.search(r'projekt="([^"]*)"', args[1])           # Projektname aus dem Prompt, `_` wie in kundenbericht.escape
+    name = treffer.group(1).replace("_", "\\\\_") if treffer else "Projekt"
+    with open(os.path.join(ordner, "x-kunde.md"), "w", encoding="utf-8") as f:
+        f.write("# Manibase · Sicherheitsprüfung " + name + "\\n")
+    with open(os.path.join(ordner, "x-kunde.pdf"), "wb") as f:
+        f.write(b"%PDF-1.7\\n" + b"x" * 2048 + b"\\n%%EOF\\n")
 if modus == "docker_rest":
     docker_rest()
 home = os.path.expanduser("~")
@@ -906,7 +919,7 @@ def test_regeln_passen_zu_skill():
     regeln = run_eval.erlaubte_regeln(skill, aus, home)
     bash = [r for r in regeln if r.startswith("Bash(")]
     zeilen = _aufrufzeilen()
-    gesehen = {"poc": 0, "kontext": 0, "repo": 0, "rendern": 0, "add": 0, "lieferkette": 0, "ki": 0}
+    gesehen = {"poc": 0, "kontext": 0, "repo": 0, "rendern": 0, "add": 0, "lieferkette": 0, "ki": 0, "kundenbericht": 0}
     assert len(zeilen) >= 5
     for z in zeilen:
         z = z.replace("${CLAUDE_SKILL_DIR}", skill).replace("<SKILL_DIR>", skill)
@@ -915,7 +928,8 @@ def test_regeln_passen_zu_skill():
             continue
         assert any(_regel_passt(r, z) for r in bash), f"keine Regel für: {z}"
         for schluessel, marke in (("poc", "/poc.py "), ("kontext", "bericht.py kontext"), ("repo", "bericht.py repo"), ("rendern", "bericht.py rendern "),
-                                  ("add", "agent-stats.py add "), ("lieferkette", "/lieferkette.py "), ("ki", "/ki.py ")):
+                                  ("add", "agent-stats.py add "), ("lieferkette", "/lieferkette.py "), ("ki", "/ki.py "),
+                                  ("kundenbericht", "/kundenbericht.py erstellen ")):
             gesehen[schluessel] += marke in z
     assert all(gesehen.values()), gesehen                                # jede Form kommt im Skill-Text vor
     assert f"Bash(python3 -I {skill}/scripts/poc.py *)" in regeln
@@ -926,6 +940,7 @@ def test_regeln_passen_zu_skill():
     assert f"Bash(python3 -I {skill}/scripts/bericht.py repo)" in regeln
     assert f"Bash(python3 -I {skill}/scripts/bericht.py repo *)" in regeln
     assert f"Bash(python3 -I {skill}/scripts/bericht.py rendern {aus}/*)" in regeln
+    assert f"Bash(python3 -I {skill}/scripts/kundenbericht.py erstellen --json {aus}/*)" in regeln
     assert f"Bash(python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py add {aus}/*)" in regeln
     assert f"Bash(python3 {home}/.claude/skills/auto-feature/scripts/agent-stats.py add {aus}/*)" in regeln
     assert "Bash(ls *)" in regeln and "Bash(ls)" in regeln
@@ -933,6 +948,14 @@ def test_regeln_passen_zu_skill():
     for gefaehrlich in (f"python3 -I {skill}/scripts/bericht.py rendern /etc/x.json",
                         f"python3 -I {skill}/scripts/bericht.py rendern {aus}x/y.json",
                         f"python3 -I {skill}/scripts/bericht.py schreiben {aus}/a",
+                        # TF4 (R1-W3): `kundenbericht.py` nur als `erstellen --json <Ausgabeordner>/…`
+                        f"python3 -I {skill}/scripts/kundenbericht.py erstellen --json /etc/x.json",
+                        f"python3 -I {skill}/scripts/kundenbericht.py erstellen --json {aus}x/y.json",
+                        f"python3 -I {skill}/scripts/kundenbericht.py schreiben --json {aus}/a.json",
+                        f"python3 -I {skill}/scripts/kundenbericht.py erstellen {aus}/a.json",
+                        f"python3 {skill}/scripts/kundenbericht.py erstellen --json {aus}/a.json",
+                        f"python3 -I /etc/scripts/kundenbericht.py erstellen --json {aus}/a.json",
+                        f"python3 -I {skill}/scripts/kundenbericht.pyx erstellen --json {aus}/a.json",
                         f"python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py add /Users/test/.zshrc --x",
                         f"python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py init",
                         f"python3 {home}/.claude/skills/auto-feature/scripts/agent-stats.py add /etc/x"):
@@ -2292,7 +2315,7 @@ def test_auswertung_fixture_web_ohne_tf1_d1(bericht, erw_ohne, stream):
 
 def test_auswertung_regression_nur_tf1(bericht, erwartung, stream):
     """TF2-D6: TF1 vollständig, kein TF2-Schlüssel. Mit der Erwartung `fixture-web.json` gelten TF1-D1 bis TF1-D7 (und wegen
-    `ki_hinweis` TF3-D4), auch wenn der Bericht Werkzeugbefunde enthält; der Name bleibt (Plan-Nachtrag R2 K6)."""
+    `ki_hinweis` TF3-D4 und wegen `kundenbericht` TF4-D6), auch wenn der Bericht Werkzeugbefunde enthält; der Name bleibt (Plan-Nachtrag R2 K6)."""
     assert erwartung["fixture"] == "fixture-web"
     for _ in range(2):
         e = alles(bericht, erwartung, stream)
@@ -3113,3 +3136,352 @@ def test_ungekoppelter_werkzeugbefund_zaehlt_nie_als_luecke_r1_10d(bericht, erwa
     bericht["befunde"].append(extra)
     z = auswertung.befunde_zuordnen(bericht, erwartung)
     assert [b["id"] for b in z["L1"]] == ["S-1"]
+
+
+# ====================================================================================== Teil 3: TF4 Kundenbericht (TF4-D6)
+
+def _kunde(**ueberschreibe):
+    return {**copy.deepcopy(KUNDE_OK), **ueberschreibe}
+
+
+def test_erwartungen_kundenbericht(erwartung, erw_deps, erw_ohne, erw_ki):
+    """Nur fixture-web verlangt den Kundenbericht; TF2- und TF3-Erwartungen bleiben ohne TF4-D6."""
+    assert erwartung["kundenbericht"] is True
+    for erw in (erw_deps, erw_ohne, erw_ki):
+        assert "kundenbericht" not in erw
+
+
+def test_bericht_ok_traegt_die_kundenfelder(bericht):
+    """Jeder Befund mit Status bestätigt oder unbestätigt trägt beide Kundenfelder (Sie-Form, Prüfung bestanden)."""
+    for b in bericht["befunde"]:
+        if b["status"] in ("bestätigt", "unbestätigt"):
+            assert isinstance(b.get("zusammenfassung"), str) and isinstance(b.get("massnahme"), str), b["id"]
+    assert bericht_schema.pruefe_schema(bericht) == []
+    assert bericht_schema.kunden_verstoesse(bericht) == []
+
+
+def test_auswertung_tf4_d6_ok(bericht, erwartung, stream):
+    e = alles(bericht, erwartung, stream)
+    assert e["dod"]["TF4-D6"] == {"ok": True, "details": []}
+    assert e["ok"] is True
+    assert list(e["dod"]) == sorted(e["dod"], key=lambda k: (k[:3] != "TF1", k))      # feste Reihenfolge, TF4 zuletzt
+
+
+def test_auswertung_tf4_d6_nur_mit_kundenbericht(bericht, erwartung, stream):
+    """Ohne `kundenbericht: true` gibt es keinen TF4-D6, auch mit Kundendaten; `false` zählt nicht."""
+    for wert in (None, False, "ja", 1):
+        erw = {k: v for k, v in erwartung.items() if k != "kundenbericht"}
+        if wert is not None:
+            erw["kundenbericht"] = wert
+        assert "TF4-D6" not in alles(bericht, erw, stream)["dod"]
+
+
+def test_auswertung_tf4_d6_ohne_kunde_rot(bericht, erwartung, stream):
+    """R1-W4: `kunde=None` ist bei `kundenbericht: true` rot mit „keine Kundendaten“."""
+    e = alles(bericht, erwartung, stream, kunde=None)
+    assert e["dod"]["TF4-D6"]["ok"] is False and e["dod"]["TF4-D6"]["details"] == ["keine Kundendaten"]
+    assert e["ok"] is False
+    e = alles(bericht, erwartung, stream, kunde="x")
+    assert e["dod"]["TF4-D6"]["ok"] is False
+
+
+def test_auswertung_tf4_d6_pdf_fehlt_rot(bericht, erwartung, stream):
+    e = alles(bericht, erwartung, stream, kunde=_kunde(pdf_anfang=None))
+    assert e["dod"]["TF4-D6"]["ok"] is False and any("PDF" in d for d in e["dod"]["TF4-D6"]["details"])
+    assert e["ok"] is False
+    for falsch in (b"<html>", b"", b"%PD", "kein pdf"):                 # kein PDF-Anfang
+        e = alles(bericht, erwartung, stream, kunde=_kunde(pdf_anfang=falsch))
+        assert e["dod"]["TF4-D6"]["ok"] is False, falsch
+    assert alles(bericht, erwartung, stream, kunde=_kunde(pdf_anfang=b"%PDF-1.4"))["dod"]["TF4-D6"]["ok"] is True
+
+
+def test_auswertung_tf4_d6_pdf_attrappe_rot_review5_minor1(bericht, erwartung, stream):
+    """TF4 Review 5 (Minor 1): ein `%PDF-1.7` mit nichts dahinter ist kein PDF: Mindestgröße 1 KiB und `%%EOF` am Ende."""
+    for ueberschreibe, teil in ((dict(pdf_groesse=9), "kleiner"), (dict(pdf_groesse=1023), "kleiner"), (dict(pdf_ende=b"endobj\n"), "%%EOF"),
+                                (dict(pdf_ende=b""), "%%EOF"), (dict(pdf_ende=None), "%%EOF"), (dict(pdf_groesse=None), "kleiner"),
+                                (dict(pdf_groesse=True), "kleiner"), (dict(pdf_groesse="5000"), "kleiner")):
+        d = alles(bericht, erwartung, stream, kunde=_kunde(**ueberschreibe))["dod"]["TF4-D6"]
+        assert d["ok"] is False and any(teil in x and "PDF" in x for x in d["details"]), (ueberschreibe, d)
+    for fehlt in ("pdf_groesse", "pdf_ende"):                               # unbekannt heißt nicht geprüft: rot
+        kunde = _kunde()
+        del kunde[fehlt]
+        assert alles(bericht, erwartung, stream, kunde=kunde)["dod"]["TF4-D6"]["ok"] is False, fehlt
+    assert alles(bericht, erwartung, stream, kunde=_kunde(pdf_groesse=1024))["dod"]["TF4-D6"]["ok"] is True
+    assert alles(bericht, erwartung, stream, kunde=_kunde(pdf_ende=b"x" * 1019 + b"%%EOF"))["dod"]["TF4-D6"]["ok"] is True
+
+
+def test_auswertung_tf4_d6_markdown_abgeschnitten_rot_haertung(bericht, erwartung, stream):
+    """Ein Markdown über der Lesegrenze wäre nur teilweise auf Spuren geprüft: das sagt die Auswertung, statt still zu bestehen."""
+    d = alles(bericht, erwartung, stream, kunde=_kunde(md_abgeschnitten=True))["dod"]["TF4-D6"]
+    assert d["ok"] is False and any("Markdown" in x and "nicht vollständig geprüft" in x for x in d["details"])
+
+
+def test_auswertung_tf4_d6_pruefung_scheitert_ist_rot_haertung(bericht, erwartung, stream, monkeypatch):
+    """Scheitert `bericht.kunden_verstoesse` selbst, ist das nicht „keine Verstöße“ (früher gab es dann `[]` und der Eval bestand)."""
+    def kaputt(*_a, **_k):
+        raise RuntimeError("geheimer Text")
+    monkeypatch.setattr(bericht_schema, "_regex_treffer", kaputt)
+    d = alles(bericht, erwartung, stream)["dod"]["TF4-D6"]
+    assert d["ok"] is False and d["details"] == ["Kundenprüfung nicht möglich (RuntimeError)"]
+
+
+def test_auswertung_tf4_d6_code_pfad_ohne_zeile_im_md_review5_minor4(bericht, erwartung, stream):
+    """TF4 Review 5 (Minor 4): auch ein `code_pfad`-Eintrag ohne Zeile (Schema-Verstoß, aber Rohdaten) und sein escapter Name im
+    Markdown fallen auf; ohne diesen Test waren der `code_pfad`-Abgleich und das Entfernen der Backslashes ohne Wirkung."""
+    befund(bericht, "src/routes/projects.js")["code_pfad"] = ["src/a.js", "web/mein_modul.ts"]
+    kopf = KUNDE_OK["md"]
+    for zusatz in ("Stelle src/a.js im Code", "Stelle web/mein\\_modul.ts im Code"):
+        d = alles(bericht, erwartung, stream, kunde=_kunde(md=kopf + zusatz + "\n"))["dod"]["TF4-D6"]
+        assert d["ok"] is False and "Kundenbericht: Code-Pfad aus dem Bericht im Markdown" in d["details"], zusatz
+        assert not any("src/" in x or "modul" in x for x in d["details"])
+    assert alles(bericht, erwartung, stream, kunde=_kunde(md=kopf + "Stelle im Code\n"))["dod"]["TF4-D6"]["ok"] is True
+
+
+def test_auswertung_tf4_d6_md_fehlt_rot(bericht, erwartung, stream):
+    e = alles(bericht, erwartung, stream, kunde=_kunde(md=None))
+    assert e["dod"]["TF4-D6"]["ok"] is False and any("Markdown" in d for d in e["dod"]["TF4-D6"]["details"])
+    assert e["ok"] is False
+    # falscher Kopf: die erste Zeile muss mit dem Kopf beginnen
+    for md in ("", "# Sicherheitsprüfung Projekt\n", "Text\n# Manibase · Sicherheitsprüfung Projekt\n",
+               "## Manibase · Sicherheitsprüfung Projekt\n"):
+        e = alles(bericht, erwartung, stream, kunde=_kunde(md=md))
+        assert e["dod"]["TF4-D6"]["ok"] is False and any("Kopf" in d for d in e["dod"]["TF4-D6"]["details"]), md
+
+
+@pytest.mark.parametrize("name", ["Testportal", "Test_Portal", "Mein Projekt 2.0", "a-b_c"])
+def test_auswertung_tf4_d6_projekt_im_kopf(bericht, erwartung, stream, name):
+    """Mit `projekt` steht der escapte Name in der ersten Zeile (R2-K-14: `_` wird zu `\\_`)."""
+    kopf = "# Manibase · Sicherheitsprüfung " + kundenbericht_escape(name) + "\n\n**Datum:** 2026-11-10\n"
+    e = alles(bericht, erwartung, stream, kunde=_kunde(md=kopf, projekt=name))
+    assert e["dod"]["TF4-D6"] == {"ok": True, "details": []}, e["dod"]["TF4-D6"]
+
+
+def test_auswertung_tf4_d6_projekt_fehlt_rot(bericht, erwartung, stream):
+    """Der Kopf trägt einen anderen Namen (Fallback `Projekt`, Repo-Name) oder den ungeescapten Namen: rot, ohne den Kopf zu zitieren."""
+    for md in ("# Manibase · Sicherheitsprüfung Projekt\n", "# Manibase · Sicherheitsprüfung fixture-web\n",
+               "# Manibase · Sicherheitsprüfung Test_Portal\n", "# Manibase · Sicherheitsprüfung Test\\_Portal und mehr\n"):
+        e = alles(bericht, erwartung, stream, kunde=_kunde(md=md, projekt="Test_Portal"))
+        d = e["dod"]["TF4-D6"]
+        assert d["ok"] is False and any("Projektname" in x for x in d["details"]), md
+        assert not any("fixture-web" in x or "Test" in x for x in d["details"])       # nie Markdown zitieren
+    assert alles(bericht, erwartung, stream, kunde=_kunde(projekt="Test_Portal"))["dod"]["TF4-D6"]["ok"] is False
+    assert alles(bericht, erwartung, stream, kunde=_kunde(projekt=None))["dod"]["TF4-D6"]["ok"] is True
+
+
+def test_auswertung_tf4_d6_kundenverstoss_rot(bericht, erwartung, stream):
+    """`bericht.kunden_verstoesse` auf dem Bericht-JSON ist nicht leer: rot, mit Befund, Feld und Regel, ohne Treffertext."""
+    befund(bericht, "src/routes/projects.js")["zusammenfassung"] = \
+        "Beschäftigte können fremde Projekte einsehen, siehe Datei src/routes/projects.js im Quellcode."
+    befund(bericht, "src/routes/search.js")["massnahme"] = "Prüfe die Suche und aktualisiere deine Version."
+    d = alles(bericht, erwartung, stream)["dod"]["TF4-D6"]
+    assert d["ok"] is False
+    text = "\n".join(d["details"])
+    assert "S-1" in text and "zusammenfassung" in text and "S-2" in text and "massnahme" in text
+    assert "src/routes/projects.js" not in text and "deine" not in text.casefold() and "Prüfe" not in text
+
+
+def test_auswertung_tf4_d6_kundenverstoss_gekappt(bericht, erwartung, stream):
+    for b in bericht["befunde"]:
+        if b["status"] != "verworfen":
+            b["massnahme"] = "Sichern Sie deine Daten bitte sofort und gründlich."
+    d = alles(bericht, erwartung, stream)["dod"]["TF4-D6"]
+    assert d["ok"] is False and len(d["details"]) <= 6 and any("weitere" in x for x in d["details"])
+
+
+def test_auswertung_tf4_d6_code_pfad_im_md_rot(bericht, erwartung, stream):
+    """Ein `code_pfad`-Eintrag (auch mit escapten Zeichen) oder ein `datei:zahl` im Markdown ist rot; das Markdown wird nie zitiert."""
+    kopf = KUNDE_OK["md"]
+    for zusatz in ("Stelle src/a.js:3 im Code", "Stelle src/b.js:7", "Datei Dockerfile:6", "Datei src/routes/x.js:12 betroffen",
+                   "Datei web/mein\\_modul.ts:9"):
+        e = alles(bericht, erwartung, stream, kunde=_kunde(md=kopf + zusatz + "\n"))
+        d = e["dod"]["TF4-D6"]
+        assert d["ok"] is False and any("Code-Pfad" in x or "Zeilenangabe" in x for x in d["details"]), zusatz
+        assert not any("src/" in x or "Dockerfile" in x for x in d["details"])
+    erlaubt = kopf + "Termin 14:30 Uhr, Version 2.3.1, datei: src/dir/x.ts ohne Zeile.\n"
+    assert alles(bericht, erwartung, stream, kunde=_kunde(md=erlaubt))["dod"]["TF4-D6"]["ok"] is True
+
+
+def test_auswertung_tf4_d6_meldungsgrenze_genau_fuenf_haertung(bericht, erwartung, stream):
+    """Genau 5 Verstöße werden alle genannt (kein „… und 0 weitere“), der sechste ergibt die Zeile „… und 1 weitere“."""
+    gelistet = [b for b in bericht["befunde"] if b["status"] != "verworfen"]
+    assert len(gelistet) >= 6
+    for b in gelistet:
+        b["massnahme"] = "Wir empfehlen, den Zugriff zu begrenzen."
+    for b in gelistet[:5]:
+        b["massnahme"] = "Wir empfehlen, den Zugriff zu begrenzen, bring dir den Nachweis."
+    d = alles(bericht, erwartung, stream)["dod"]["TF4-D6"]["details"]
+    assert len(d) == 5 and not any("weitere" in x for x in d)
+    gelistet[5]["massnahme"] = "Wir empfehlen, den Zugriff zu begrenzen, bring dir den Nachweis."
+    d = alles(bericht, erwartung, stream)["dod"]["TF4-D6"]["details"]
+    assert len(d) == 6 and d[-1] == "… und 1 weitere Verstöße der Kundenfelder"
+
+
+def test_auswertung_tf4_d6_projekt_kein_text_wird_ignoriert_haertung(bericht, erwartung, stream):
+    for projekt in (5, ["x"], "", None):
+        d = alles(bericht, erwartung, stream, kunde=_kunde(projekt=projekt))["dod"]["TF4-D6"]
+        assert d == {"ok": True, "details": []}, projekt
+
+
+def test_auswertung_tf4_d6_code_pfad_eintraege_ohne_text_werden_ignoriert_haertung(bericht, erwartung, stream):
+    """Nicht-Text, leere und blanke `code_pfad`-Einträge sind keine Pfade: kein Absturz, kein Fehlalarm (ein leerer Pfad steckt in jedem Text)."""
+    befund(bericht, "src/routes/projects.js")["code_pfad"] = [5, None, "", "   ", ["x"], {"a": 1}]
+    assert alles(bericht, erwartung, stream)["dod"]["TF4-D6"] == {"ok": True, "details": []}
+
+
+def test_auswertung_tf4_d6_bericht_none(erwartung, stream):
+    e = alles(None, erwartung, stream)
+    assert e["dod"]["TF4-D6"]["ok"] is False and "kein Bericht" in e["dod"]["TF4-D6"]["details"]
+
+
+def test_auswertung_tf4_d6_mehrere_fehler(bericht, erwartung, stream):
+    e = alles(bericht, erwartung, stream, kunde=_kunde(md="Nichts\n", pdf_anfang=None))
+    assert len(e["dod"]["TF4-D6"]["details"]) >= 2
+    json.dumps(e)
+
+
+def test_auswertung_tf4_regression_andere_erwartungen(bericht, erw_deps, erw_ohne, erw_ki, stream):
+    """TF2 und TF3 behalten ihre Schlüsselmengen: kein TF4-D6, auch nicht mit Kundendaten."""
+    for erw in (erw_deps, erw_ohne, erw_ki):
+        for kunde in (None, copy.deepcopy(KUNDE_OK)):
+            assert "TF4-D6" not in alles(ohne_bericht(copy.deepcopy(bericht)), erw, stream, kunde=kunde)["dod"]
+
+
+def test_pruefe_ablage_ignoriert_kunde():
+    """`-kunde.md` und `-kunde.pdf` sind keine technischen Berichte (R1-W9)."""
+    fehler = auswertung.pruefe_ablage("", ["x-kunde.md", "x.json", "x-agent-stats.md"], [], [])
+    assert fehler == ["Ausgabeordner: kein Bericht (.md)"]
+    fehler = auswertung.pruefe_ablage("", ["x-kunde.md", "x-kunde.pdf"], [], [])
+    assert "Ausgabeordner: kein Bericht (.md)" in fehler and len(fehler) == 3
+    assert auswertung.pruefe_ablage("", ["x.md", "x.json", "x-agent-stats.md", "x-kunde.md", "x-kunde.pdf"], [], []) == []
+    assert auswertung.pruefe_ablage("", ["x-2.md", "x.json", "x-agent-stats.md", "x-kunde.md"], [], []) == []
+
+
+def test_run_eval_kunde_lesen(tmp_path):
+    json_pfad = tmp_path / "b.json"
+    (tmp_path / "b-kunde.md").write_text("# Manibase · Sicherheitsprüfung X\nümlaut\n", encoding="utf-8")
+    (tmp_path / "b-kunde.pdf").write_bytes(b"%PDF-1.7\nrest rest rest")
+    assert run_eval._kunde_lesen(str(json_pfad), "X") == {"md": "# Manibase · Sicherheitsprüfung X\nümlaut\n", "md_abgeschnitten": False,
+                                                          "pdf_anfang": b"%PDF-1.7", "pdf_groesse": 23,
+                                                          "pdf_ende": b"%PDF-1.7\nrest rest rest", "projekt": "X"}
+    assert run_eval._kunde_lesen(None, None) is None                    # ohne Bericht-Pfad: kunde=None
+    leer = run_eval._kunde_lesen(str(tmp_path / "andere.json"), None)
+    assert leer == KUNDE_LEER                                           # fehlende Dateien: None
+
+
+def test_run_eval_kunde_lesen_pdf_ende_und_groesse_haertung(tmp_path):
+    """Größe aus `fstat`, Ende = die letzten 1024 Bytes (Review 5, Minor 1)."""
+    (tmp_path / "p-kunde.pdf").write_bytes(b"%PDF-1.7\n" + b"a" * 5000 + b"\n%%EOF\n")
+    k = run_eval._kunde_lesen(str(tmp_path / "p.json"), None)
+    assert k["pdf_groesse"] == 9 + 5000 + 7 and len(k["pdf_ende"]) == 1024 and k["pdf_ende"].endswith(b"%%EOF\n")
+    assert k["pdf_anfang"] == b"%PDF-1.7"
+
+
+def test_run_eval_kunde_lesen_grenzen(tmp_path):
+    """O_NOFOLLOW und nur reguläre Dateien (R2-K-15); das Markdown wird auf 1 MiB begrenzt gelesen."""
+    (tmp_path / "ziel.txt").write_text("# geheim\n", encoding="utf-8")
+    os.symlink(str(tmp_path / "ziel.txt"), str(tmp_path / "s-kunde.md"))
+    os.symlink(str(tmp_path / "ziel.txt"), str(tmp_path / "s-kunde.pdf"))
+    assert run_eval._kunde_lesen(str(tmp_path / "s.json"), None) == KUNDE_LEER
+    os.mkdir(tmp_path / "v-kunde.md")
+    os.mkdir(tmp_path / "v-kunde.pdf")
+    assert run_eval._kunde_lesen(str(tmp_path / "v.json"), None) == KUNDE_LEER
+    os.mkfifo(tmp_path / "f-kunde.md")           # Review 5, Minor 5: keine Datei, nichts zu lesen, und es hängt nicht (kein Prozess, kein Signal)
+    os.mkfifo(tmp_path / "f-kunde.pdf")
+    assert run_eval._kunde_lesen(str(tmp_path / "f.json"), None) == KUNDE_LEER
+    (tmp_path / "g-kunde.md").write_bytes(b"a" * (3 * 1024 * 1024))
+    gross = run_eval._kunde_lesen(str(tmp_path / "g.json"), None)
+    assert len(gross["md"]) == 1024 * 1024 and gross["md_abgeschnitten"] is True          # nicht mehr still: die Auswertung erfährt es
+    (tmp_path / "e-kunde.md").write_bytes(b"a" * (1024 * 1024))
+    assert run_eval._kunde_lesen(str(tmp_path / "e.json"), None)["md_abgeschnitten"] is False      # genau die Grenze ist noch vollständig
+    (tmp_path / "u-kunde.md").write_bytes(b"\xff\xfe# x\n")              # kein UTF-8: ersetzt, nicht abgebrochen
+    assert isinstance(run_eval._kunde_lesen(str(tmp_path / "u.json"), None)["md"], str)
+    (tmp_path / "k-kunde.pdf").write_bytes(b"%P")
+    assert run_eval._kunde_lesen(str(tmp_path / "k.json"), None)["pdf_anfang"] == b"%P"
+    assert run_eval._kunde_lesen(str(tmp_path / "k.json"), None)["pdf_groesse"] == 2
+
+
+def test_run_eval_projekt_im_prompt(ev, capsys):
+    """`--projekt` hängt `projekt="<name>"` an den Prompt (slash und text), und der Lauf besteht TF4-D6 mit dem Namen im Kopf."""
+    ev.modus("bericht")
+    assert run_eval.main(["--fixture", "fixture-web", "--projekt", "Test_Portal 2.0", "--behalten"]) == 0
+    e = json.loads(capsys.readouterr().out)
+    assert e["lauf"]["prompt"] == '/security-audit-eval repo-konfig-geprueft projekt="Test_Portal 2.0"'
+    assert ev.aufrufe(smoke=False)[0]["args"][:2] == ["-p", '/security-audit-eval repo-konfig-geprueft projekt="Test_Portal 2.0"']
+    assert e["dod"]["TF4-D6"] == {"ok": True, "details": []} and e["ok"] is True
+    assert ev.aufrufe(smoke=True)[0]["args"][:2] == ["-p", "Antworte nur mit ok."]       # der Smoke-Test bleibt unberührt
+    assert run_eval.main(["--fixture", "fixture-web", "--projekt", "Testportal", "--prompt-art", "text"]) == 0
+    e = json.loads(capsys.readouterr().out)
+    assert e["lauf"]["prompt"] == 'Nutze den Skill security-audit-eval auf diesem Repo mit dem Schalter repo-konfig-geprueft mit projekt="Testportal".'
+    assert ev.aufrufe(smoke=False)[1]["args"][1] == e["lauf"]["prompt"]
+    assert e["dod"]["TF4-D6"]["ok"] is True
+
+
+def test_run_eval_ohne_projekt_prompt_unveraendert(ev, capsys):
+    ev.modus("bericht")
+    assert run_eval.main(["--fixture", "fixture-web"]) == 0
+    e = json.loads(capsys.readouterr().out)
+    assert e["lauf"]["prompt"] == "/security-audit-eval repo-konfig-geprueft"           # nur der Schalter aus #9, kein `projekt=`
+    assert ev.aufrufe(smoke=False)[0]["args"][1] == "/security-audit-eval repo-konfig-geprueft"
+    assert e["dod"]["TF4-D6"]["ok"] is True
+
+
+def test_run_eval_projekt_falscher_kopf_rot(ev, capsys, monkeypatch):
+    """Schreibt der Lauf einen Kopf mit anderem Namen, ist TF4-D6 rot und der Exit 1."""
+    ev.modus("bericht")
+    echtes = run_eval._kunde_lesen
+    monkeypatch.setattr(run_eval, "_kunde_lesen", lambda pfad, projekt: echtes(pfad, "Anderer Name"))
+    assert run_eval.main(["--fixture", "fixture-web", "--projekt", "Testportal"]) == 1
+    e = json.loads(capsys.readouterr().out)
+    assert e["dod"]["TF4-D6"]["ok"] is False and e["ok"] is False
+
+
+def test_run_eval_ohne_bericht_kunde_none(ev, capsys, monkeypatch):
+    """Ohne Bericht-JSON (kein `bericht_pfad`) übergibt `run_eval` `kunde=None`: TF4-D6 rot („keine Kundendaten“ und „kein Bericht“)."""
+    ev.modus("ok")                                                     # Fake-claude schreibt weder Stream noch Bericht
+    erhalten = []
+    echtes = auswertung.auswerten
+    monkeypatch.setattr(auswertung, "auswerten", lambda *a, **k: (erhalten.append(k.get("kunde", "fehlt")), echtes(*a, **k))[1])
+    assert run_eval.main(["--fixture", "fixture-web", "--projekt", "Testportal"]) == 1
+    assert erhalten == [None]
+    assert json.loads(capsys.readouterr().out)["dod"]["TF4-D6"]["ok"] is False
+
+
+@pytest.mark.parametrize("name", ["", " x", "-x", ".x", "x/y", "x\ny", 'a"b', "a" * 61, "a;b", "ä", "x$(id)", "x\n"])
+def test_run_eval_projekt_ungueltig(ev, capsys, name):
+    """R1-K10: `[A-Za-z0-9][A-Za-z0-9 ._-]{0,59}`; alles andere ist Exit 2, ohne dass claude oder docker gestartet wird."""
+    assert run_eval.main(["--fixture", "fixture-web", "--projekt", name]) == 2
+    assert ev.aufrufe() == [] and ev.docker() == []
+    assert "projekt" in capsys.readouterr().err.lower()
+
+
+@pytest.mark.parametrize("name", ["a", "Testportal", "Mein Projekt 2.0", "a-b_c.d", "A" + "b" * 59, "9x"])
+def test_run_eval_projekt_gueltig(name):
+    assert run_eval._projekt_arg(name) == name
+
+
+# ------------------------------------------------------------------------------------ Review R1-10: Mutanten in pruefe_kundenbericht
+
+def test_auswertung_tf4_d6_md_abgeschnitten_fehlt_oder_none_ist_rot_r1_10(bericht, erwartung, stream):
+    """`md_abgeschnitten` ist nur dann in Ordnung, wenn es `False` ist; fehlt es oder ist es `None`, ist die Vollständigkeit unbekannt."""
+    kunde = _kunde()
+    del kunde["md_abgeschnitten"]
+    for k in (kunde, _kunde(md_abgeschnitten=None)):
+        d = alles(bericht, erwartung, stream, kunde=k)["dod"]["TF4-D6"]
+        assert d["ok"] is False and any("nicht vollständig geprüft" in x for x in d["details"]), k
+
+
+def test_auswertung_tf4_d6_md_kein_text_ist_ungueltig_r1_10(bericht, erwartung, stream):
+    for md in (b"# Manibase", 123, ["# Manibase"]):
+        d = alles(bericht, erwartung, stream, kunde=_kunde(md=md))["dod"]["TF4-D6"]
+        assert d["ok"] is False and "Kundenbericht (Markdown) ungültig" in d["details"], md
+
+
+def test_auswertung_tf4_d6_kopf_nfc_und_zeilenende_r1_10(bericht, erwartung, stream):
+    """Der Kopf zählt nach NFC (zerlegtes „ü“) und mit CRLF am Zeilenende; `projekt` ebenso."""
+    zerlegt = "# Manibase · Sicherheitsprüfung Projekt\n\n**Datum:** 2026-11-10\n"
+    assert alles(bericht, erwartung, stream, kunde=_kunde(md=zerlegt))["dod"]["TF4-D6"]["ok"] is True
+    crlf = "# Manibase · Sicherheitsprüfung Testportal\r\n\r\n**Datum:** 2026-11-10\r\n"
+    assert alles(bericht, erwartung, stream, kunde=_kunde(md=crlf, projekt="Testportal"))["dod"]["TF4-D6"]["ok"] is True
+    mueller = "# Manibase · Sicherheitsprüfung Müller\n"
+    for md, projekt in ((mueller, "Müller"), (mueller.replace("ü", "ü"), "Müller")):
+        assert alles(bericht, erwartung, stream, kunde=_kunde(md=md, projekt=projekt))["dod"]["TF4-D6"]["ok"] is True, (md, projekt)

@@ -6,7 +6,8 @@
   bericht.py repo [--repo R]                      Repo-Name (genau `kontext`-Feld `repo`) auf stdout, ohne Seiteneffekte
                                                   (Exit 3: kein Repo)
   bericht.py rendern <json>                       Schema prüfen, <basisname>.md neben das JSON schreiben
-                                                  (Exit 2 mit Fehlerliste auf stderr)
+                                                  (Exit 2 mit Fehlerliste auf stderr; Treffer der Kundenregeln nur als Warnung,
+                                                  Exit 0)
 
 Die Befundliste im ersten Codeblock des Markdown ist für /fix-findings gedacht (Format wie pr-review-loop; Eingang ohne PR ab TF5).
 Nur Standardbibliothek; git-Aufrufe über gitkopie.git.
@@ -46,6 +47,9 @@ _KLASSE_MODELL_MOCK = re.compile(r"K[124] ")     # `klasse` von K1, K2 und K4: d
 MAX_OWASP_KI = 3
 _COMMIT = re.compile(r"[0-9a-f]{7,64}")
 _CODE_PFAD = re.compile(r"(.+):([1-9][0-9]*)", re.DOTALL)
+KOPF_MAX = {"projekt": 200, "repo": 100, "ordner": 100, "teilpfad": 4096}       # Zeichen; `kontext` kürzt repo und ordner selbst auf 100
+KUNDENFELDER = {"zusammenfassung": (40, 600), "massnahme": (20, 400)}       # optional; Länge in Zeichen (min, max)
+KUNDEN_REGELN = ("du", "a", "b", "c", "d", "e", "url", "email")         # Werte von `regel` in kunden_verstoesse
 
 
 class KontextFehler(Exception):
@@ -55,6 +59,17 @@ class KontextFehler(Exception):
 # ------------------------------------------------------------------------------------ kontext
 
 _bereinigen = gitkopie.repo_bereinigen
+
+
+def _hauptordner(wurzel: str) -> str:
+    """Ordner der Hauptkopie des Repos: in einem git-Worktree das Elternverzeichnis des gemeinsamen `.git`, sonst `wurzel` selbst."""
+    try:
+        gemeinsam = os.fsdecode(git(wurzel, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout).rstrip("\n")
+        if os.path.basename(gemeinsam) == ".git":
+            return os.path.dirname(gemeinsam)
+    except GitFehler:
+        pass
+    return wurzel
 
 
 def _repo_name(wurzel: str) -> str:
@@ -124,6 +139,7 @@ def kontext(repo: str, teilpfad: str | None, jetzt: datetime | None = None, repo
     except GitFehler as e:
         raise KontextFehler(f"Kein git-Repository mit HEAD unter {_t(repo)}: {_t(e)}") from e
     name = _repo_name(wurzel)
+    ordner_name = _bereinigen(os.path.basename(_hauptordner(wurzel)))   # `ordner` unten ist der Ausgabeordner, nicht dieser Name; im Worktree der Hauptordner (R1-8)
     datum = jetzt.strftime("%Y-%m-%d")
     echt = _teilpfad(wurzel, teilpfad, sha) if teilpfad is not None else None
     slug = _slug(echt) if echt is not None else None
@@ -181,7 +197,7 @@ def kontext(repo: str, teilpfad: str | None, jetzt: datetime | None = None, repo
         stats = os.path.join(os.path.expanduser("~"), ".claude", "agent-stats", name, f"{datum}-security-audit.md")
 
     return {
-        "repo": name, "wurzel": wurzel, "sha": sha, "sha7": sha[:7], "datum": datum,
+        "repo": name, "ordner": ordner_name, "wurzel": wurzel, "sha": sha, "sha7": sha[:7], "datum": datum,
         "teilpfad": echt, "teilpfad_slug": slug, "ausgabe_ordner": ordner, "basisname": basisname,
         "hinweise": hinweise, "repo_konfiguration": konfig,
         "agent_stats_datei": stats,
@@ -334,6 +350,15 @@ def _befund_fehler(b: dict, label: str, teilpfad: str | None = None) -> list[str
             fehler(feld, msg)
     if "beschreibung" in b and (msg := _text_fehler(b["beschreibung"], False)):
         fehler("beschreibung", msg)
+    for feld, (mini, maxi) in KUNDENFELDER.items():        # optional; Inhaltsregeln stehen in `kunden_verstoesse`, nicht hier
+        if feld not in b:
+            continue
+        if msg := _text_fehler(b[feld], True):
+            fehler(feld, msg)
+        elif len(b[feld].strip()) < mini:
+            fehler(feld, f"kürzer als {mini} Zeichen")
+        elif len(b[feld]) > maxi:
+            fehler(feld, f"länger als {maxi} Zeichen")
     for feld in ("ohne_anmeldung", "mandantenuebergreifend"):
         if feld in b and type(b[feld]) is not bool:
             fehler(feld, "muss true oder false sein")
@@ -406,6 +431,15 @@ def pruefe_schema(daten: object) -> list[str]:
     for feld in ("teilpfad", "projekt"):
         if daten.get(feld) is not None and (msg := _text_fehler(daten[feld], True)):
             f.append(f"{feld} {msg}")
+    for feld, grenze in KOPF_MAX.items():            # R2-5: Kopfangaben werden vollständig geprüft, also müssen sie begrenzt sein
+        if isinstance(daten.get(feld), str) and len(daten[feld]) > grenze:
+            f.append(f"{feld} länger als {grenze} Zeichen")
+    if daten.get("ordner") is not None:         # optional (fehlt oder null erlaubt); sonst wie `repo`
+        o = daten["ordner"]
+        if not (isinstance(o, str) and re.fullmatch(r"[A-Za-z0-9._-]+", o)):
+            f.append(f"ordner ungültig: erwartet nur [A-Za-z0-9._-], ist {_t(o)!r}")
+        elif re.fullmatch(r"\.+", o):
+            f.append("ordner ungültig: nur Punkte")
     if "karte" in daten:
         k = daten["karte"]
         if not isinstance(k, list):
@@ -444,6 +478,286 @@ def pruefe_schema(daten: object) -> list[str]:
                                               else f"id muss S-<Zahl> sein, ist {_t(bid)!r}"))
                 f.extend(_befund_fehler(b, label, daten["teilpfad"] if isinstance(daten.get("teilpfad"), str) else None))
     return f
+
+
+# ------------------------------------------------------------------------------------ Kundenprüfung
+
+# Inhaltsregeln für Kundentexte (TF4). Geprüft werden Rohwerte nach NFKC (TF4 Härtung: Vollbreiten-Zeichen und Ligaturen zählen wie die
+# gewöhnlichen; der Status und die Pfade des Schemas bleiben NFC), nie das erzeugte Markdown; Regex-Regeln mit
+# re.IGNORECASE, Teilstring-Abgleiche (a, e, d mit Pfad) ohne Beachtung der Großschreibung. Meldungen nennen nie den
+# Treffertext, nur bei `du` das Wort und bei `a` das Token (beides stammt aus dem JSON der Hauptsession).
+_DU_FORMEN = ("du", "dich", "dir", "dein", "deine", "deinen", "deinem", "deiner", "deines",
+              "euch", "euer", "eure", "euren", "eurem", "eurer", "eures")
+# Grenzen nach Spec B1; am Ende darf ein Satzpunkt folgen (`dir.` am Satzende), nicht aber `.<Wortzeichen>` (`dir.json`)
+_DU = re.compile(r"(?<![\w./@-])(?:" + "|".join(_DU_FORMEN) + r")(?![\w/@-])(?!\.\w)", re.IGNORECASE)
+# Request: HTTP-Methode vor einem Pfad (auch `POST-/api`) oder irgendein Pfad mit führendem Schrägstrich (R1-1; unabhängig vom `poc`),
+# auch `//pfad` (nicht `://`), `Endpunkt:/api` und `C:/Users` (R2-2); Schrägstrich auch als U+2215, U+2044, U+29F8 (NFKC bildet sie nicht ab).
+# Frei bleiben `und/oder`, `24/7`, `TCP/IP`, `Lese-/Schreibrechte`, ` / ` und `https://` (Wortzeichen oder `-` vor dem Strich, bzw. kein Pfadzeichen danach).
+# Bekannte Fehlalarme (fail-closed, Legende in SKILL.md Schritt 7): `500 €/Monat`, `01.01./31.12.`, `5 %/Jahr`, `bzw./oder`; bekannte Grenze: `Endpunkt-/api`.
+_SCHRAEGE = "/\u2215\u2044\u29f8"
+_PFADANFANG = r"(?=[\w.~%@-])"
+_REGEL_B_METHODE = r"\b(?:GET|POST|PUT|PATCH|DELETE)[\s-]+/"
+_REGEL_B = re.compile(_REGEL_B_METHODE + rf"|(?<![\w{_SCHRAEGE}-])[{_SCHRAEGE}]{_PFADANFANG}|(?<![\w{_SCHRAEGE}:-])[{_SCHRAEGE}]{{2}}{_PFADANFANG}",
+                      re.IGNORECASE)
+_REGEL_B_KOPF = re.compile(_REGEL_B_METHODE, re.IGNORECASE)    # Kopfangaben (vom Nutzer benannt): nur der Request; ein Pfad darin ist Regel a oder frei
+_REGEL_C = re.compile(r"[{}<>=`]")
+_REGEL_C_TITEL = re.compile(r"[{}=`]")                  # im Titel sind `<` und `>` erlaubt (`name@1.2.3`, Vergleiche in Werkzeugtiteln)
+_D_LAUF = re.compile(r"(?<![\w./-])[\w./-]+")          # `Pfad:Zahl` ohne Backtracking: Lauf suchen, dann Zeichen danach prüfen
+_D_MUSTER = re.compile(r"#L\d+|\bZeile\s+\d+", re.IGNORECASE)
+_URL = re.compile(r"https?://|\bwww\.", re.IGNORECASE)
+_EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}\b", re.IGNORECASE)
+_TAUSENDER = re.compile(r"\d{1,3}(?:\.\d{3})+(?:,\d+)?")
+_A_ZEICHEN = frozenset("/=?&%<>{}_@$\\[]")
+_A_PUNKT = re.compile(r"\w\.\w")
+_A_RAND = ".,;:()\"'"
+_A_VERSION = re.compile(r"v?\d+(?:\.\d+){1,2}")                 # `4.17.1`, `v4.17`; vier Teile (`10.0.0.5`) sind eine Adresse und bleiben Token
+_A_DATEINAME = re.compile(r"[A-Za-z][\w-]*\.(?:js|ts|mjs|cjs|json|md|html|css)", re.IGNORECASE)   # `Node.js`, `package.json` (ohne / = ? & %)
+_MAX_TOKEN = 200000      # Token aus `poc` je Bericht; darüber ist jedes geprüfte Feld ein Verstoß gegen Regel a (fail-closed)
+_MAX_POC = 10**6         # Zeichen je `poc`; ein längerer `poc` zählt wie zu viele Token (fail-closed, nie still abgeschnitten)
+_MAX_SCHRITTE = 5_000_000  # Teilstring-Prüfungen der Regeln a, d und e je Bericht (~1 s); danach wie zu viele Token (fail-closed)
+ZU_VIELE_TOKEN = "zu viele Token zum Prüfen"
+_KUNDEN_DETAIL = {                                   # fester Text je Regel (außer `du` und `a` der Befundfelder), nie Treffertext
+    "a": "Text aus einem poc", "b": "Request oder Pfad mit führendem Schrägstrich", "c": "Sonderzeichen oder Backtick", "d": "Datei mit Zeilenangabe",
+    "e": "Dateipfad aus einem Befund", "url": "Webadresse", "email": "E-Mail-Adresse",
+}
+_KUNDEN_FELDER = (("zusammenfassung", KUNDEN_REGELN), ("massnahme", KUNDEN_REGELN),
+                  ("titel", ("a", "b", "c", "d", "e", "url", "email")))           # Titel: alle Regeln außer `du` (TF4 Review 2, I1)
+_MAX_PRUEF = 5000        # Zeichen je Feld; hält die Regex-Prüfung auch bei übergroßen Texten schnell
+
+
+def _pruef_text(wert: object, voll: bool = False) -> str | None:
+    """Prüftext nach NFKC. Befundfelder werden auf `_MAX_PRUEF` Zeichen gekappt (ihre Ausgabe ist ebenfalls gekürzt bzw. im Schema
+    begrenzt); Kopfangaben (`voll`) nie, denn `projekt` hat keine Längengrenze und dahinter stünde Exploit-Text ungeprüft im Kopf (R1-3)."""
+    if not isinstance(wert, str):
+        return None
+    return unicodedata.normalize("NFKC", wert if voll else wert[:_MAX_PRUEF])
+
+
+def _d_allgemein(text: str) -> bool:
+    """`<Pfad mit . oder />:<Zahl>`, `#L<Zahl>` oder `Zeile <Zahl>` (nicht `14:30`)."""
+    if _D_MUSTER.search(text):
+        return True
+    for m in _D_LAUF.finditer(text):
+        nach = text[m.end():m.end() + 2]
+        if len(nach) == 2 and nach[0] == ":" and re.match(r"\d", nach[1]) and ("." in m.group() or "/" in m.group()):
+            return True
+    return False
+
+
+def _regex_treffer(text: str, titel: bool = False) -> dict[str, list[str]]:
+    t: dict[str, list[str]] = {}
+    if woerter := [m.group() for m in _DU.finditer(text)]:
+        t["du"] = woerter
+    for regel, muster in (("b", _REGEL_B), ("c", _REGEL_C_TITEL if titel else _REGEL_C)):
+        if muster.search(text):
+            t[regel] = [_KUNDEN_DETAIL[regel]]
+    if _d_allgemein(text):
+        t["d"] = [_KUNDEN_DETAIL["d"]]
+    if _URL.search(text):
+        t["url"] = [_KUNDEN_DETAIL["url"]]
+    if "@" in text and _EMAIL.search(text):
+        t["email"] = [_KUNDEN_DETAIL["email"]]
+    return t
+
+
+def _treffer_liste(t: dict[str, list[str]], regeln: tuple[str, ...]) -> list[tuple[str, str]]:
+    aus: list[tuple[str, str]] = []
+    for regel in KUNDEN_REGELN:
+        if regel in regeln:
+            aus.extend((regel, d) for d in dict.fromkeys(t.get(regel, [])))
+    return aus
+
+
+def text_verstoesse(text: str) -> list[tuple[str, str]]:
+    """Treffer der textbezogenen Kundenregeln `du`, `b`, `c`, `d` (ohne Pfadteile), `url`, `email` als (regel, detail);
+    `detail` ist bei `du` das gefundene Wort, sonst ein fester Text. Ohne Bezug zum JSON (für feste Bausteine). Wirft bei jedem Typ
+    von `text` nicht; eine Ausnahme aus der Prüfung selbst wird nicht verschluckt (ein Fehler dort ist kein „keine Verstöße“)."""
+    roh = _pruef_text(text)
+    return [] if roh is None else _treffer_liste(_regex_treffer(roh), ("du", "b", "c", "d", "url", "email"))
+
+
+def _poc_token(poc: str) -> list[str]:
+    """Token eines `poc` nach Spec R2-B-1: Whitespace-getrennt, Rand `.,;:()"'` abgeschnitten, mindestens 6 Zeichen und
+    ein Zeichen aus `/ = ? & % < > { } _ @ $ \\ [ ]` oder `\\w.\\w`; Zahlen mit Tausenderpunkten zählen nie.
+    Bewusste Abweichung von R2-B-1 (Review 1, I-1; enger gefasst in Review 2, N-2): Versionsnummern mit zwei oder drei Teilen
+    (`4.17.1`, `v4.17`; vier Teile wie `10.0.0.5` sind Adressen und bleiben Token), `Wort.endung` ohne `/ = ? & %` nur mit der Endung
+    js, ts, mjs, cjs, json, md, html oder css (`Node.js`, `package.json`; `admin.php`, `poc.py`, `evil.com` bleiben Token) und
+    `und/oder` zählen nie; sie sind im Kundentext legitim. Schneidet nie ab: `_quellen` lässt nur `poc` bis `_MAX_POC` Zeichen herein."""
+    aus: dict[str, None] = {}
+    for roh in unicodedata.normalize("NFKC", poc).split():
+        tok = roh.strip(_A_RAND)
+        if (len(tok) >= 6 and (_A_ZEICHEN.intersection(tok) or _A_PUNKT.search(tok)) and not _TAUSENDER.fullmatch(tok)
+                and not _A_VERSION.fullmatch(tok) and not _A_DATEINAME.fullmatch(tok) and tok.casefold() != "und/oder"):
+            aus[tok] = None
+    return list(aus)
+
+
+def _kuerzen60(token: str) -> str:
+    kurz = _t(token, 60)
+    return kurz if len(kurz) <= 60 else kurz[:59] + "…"
+
+
+def _quellen(befunde: list) -> tuple[list[str], list[str], list[str], bool]:
+    """(Token aus allen `poc`, Pfadangaben mit `/` bzw. volle `code_pfad`-Einträge für e, alle Pfade und Basenames für d, zu viele
+    Token) über alle Befunde, unabhängig vom Status. Mehr als `_MAX_TOKEN` Token oder ein `poc` über `_MAX_POC` Zeichen: die
+    Token-Liste bleibt leer, das Flag ist gesetzt (der Aufrufer meldet dann jedes geprüfte Feld als Verstoß gegen Regel a)."""
+    token: dict[str, None] = {}
+    e: dict[str, None] = {}
+    d: dict[str, None] = {}
+
+    def pfad(p: str, voll: bool = False) -> None:
+        p = unicodedata.normalize("NFKC", p[:10**4])
+        if not p:
+            return
+        if voll or "/" in p:
+            e[p] = None
+        d[p] = None
+        d[p.rsplit("/", 1)[-1] or p] = None
+
+    zu_viele = False
+    for b in befunde:
+        if not isinstance(b, dict):
+            continue
+        if isinstance(b.get("poc"), str) and not zu_viele:
+            if len(b["poc"]) > _MAX_POC:
+                zu_viele = True
+            else:
+                token.update(dict.fromkeys(_poc_token(b["poc"])))
+                zu_viele = len(token) > _MAX_TOKEN
+            if zu_viele:
+                token.clear()
+        if isinstance(b.get("datei"), str):
+            pfad(b["datei"])
+        cp = b.get("code_pfad")
+        for eintrag in (cp if isinstance(cp, list) else []):
+            if not isinstance(eintrag, str):
+                continue
+            e[unicodedata.normalize("NFKC", eintrag[:10**4])] = None
+            if m := _CODE_PFAD.fullmatch(eintrag[:10**4]):
+                pfad(m.group(1))
+    e.pop("", None)
+    return list(token), list(e), list(d), zu_viele
+
+
+def _pfad_zeile(pfad: str) -> re.Pattern:
+    return re.compile(r"(?<![\w./-])" + re.escape(pfad) + r"(?:\s*:\s*\d+|,?\s*(?:Zeile|Z\.)\s*\d+)", re.IGNORECASE)
+
+
+class _ZuVieleSchritte(Exception):
+    """Das Arbeitsbudget (`_MAX_SCHRITTE`) der Teilstring-Prüfungen ist verbraucht."""
+
+
+class _Nadeln:
+    """Teilstring-Suche vieler Nadeln (klein geschrieben) in einem Text: je Nadellänge (höchstens 6) wird nur der Anfang der Nadel
+    als n-Gramm des Textes nachgeschlagen, erst dann der ganze Teilstring geprüft. Laufzeit je Text ~ Textlänge statt Nadelzahl,
+    solange wenige Nadeln dasselbe n-Gramm als Anfang haben. Haben sehr viele Nadeln denselben Anfang, der auch im Text steht,
+    wäre jede einzeln zu prüfen (TF4 Re-Review 1, N-3: 17 s bei 190000 Token); `arbeit` (eine Liste mit dem Rest, von mehreren
+    Instanzen geteilt) begrenzt das: ist er verbraucht, wirft `finde` `_ZuVieleSchritte`."""
+
+    def __init__(self, nadeln: list[tuple[str, object]], arbeit: list[int] | None = None):
+        self._arbeit = [_MAX_SCHRITTE] if arbeit is None else arbeit
+        self._nach_laenge: dict[int, dict[str, list[tuple[int, str, object]]]] = {}
+        for i, (klein, nutzlast) in enumerate(nadeln):
+            if klein:
+                n = min(len(klein), 6)
+                self._nach_laenge.setdefault(n, {}).setdefault(klein[:n], []).append((i, klein, nutzlast))
+
+    def finde(self, klein: str) -> list[object]:
+        """Nutzlasten aller Nadeln, die in `klein` vorkommen, in der Reihenfolge der Nadeln."""
+        treffer: dict[int, object] = {}
+        for n, tabelle in self._nach_laenge.items():
+            for gramm in {klein[i:i + n] for i in range(len(klein) - n + 1)}.intersection(tabelle):
+                kandidaten = tabelle[gramm]
+                self._arbeit[0] -= len(kandidaten)
+                if self._arbeit[0] < 0:
+                    raise _ZuVieleSchritte
+                treffer.update((i, nutzlast) for (i, nadel, nutzlast) in kandidaten if nadel in klein)
+        return [treffer[i] for i in sorted(treffer)]
+
+
+def _felder_pruefen(befunde: list, zu_viele: bool, nadeln_a: "_Nadeln | None", nadeln_e: "_Nadeln | None",
+                    nadeln_d: "_Nadeln | None") -> list[tuple[str, str, str, str]]:
+    """Die Feldprüfung von `kunden_verstoesse`; ohne Nadeln (`zu_viele`) gelten nur die Regex-Regeln und a als Verstoß je Feld."""
+    aus: list[tuple[str, str, str, str]] = []
+    for b in befunde:
+        if not (isinstance(b, dict) and isinstance(b.get("id"), str) and _ID.fullmatch(b["id"])):
+            continue
+        status = unicodedata.normalize("NFC", b["status"]) if isinstance(b.get("status"), str) else None
+        if status not in IN_LISTE:
+            continue
+        for feld, regeln in _KUNDEN_FELDER:
+            text = _pruef_text(b.get(feld))
+            if text is None:
+                continue
+            klein = text.lower()
+            t = _regex_treffer(text, titel=feld == "titel")
+            if "a" in regeln and zu_viele:
+                t["a"] = [ZU_VIELE_TOKEN]
+            elif "a" in regeln and nadeln_a is not None and (hits := nadeln_a.finde(klein)):
+                t["a"] = [_kuerzen60(k) for k in hits]
+            if "e" in regeln and nadeln_e is not None and nadeln_e.finde(klein):
+                t["e"] = [_KUNDEN_DETAIL["e"]]
+            if "d" not in t and nadeln_d is not None and any(_pfad_zeile(p).search(text) for p in nadeln_d.finde(klein)):
+                t["d"] = [_KUNDEN_DETAIL["d"]]
+            aus.extend((b["id"], feld, regel, detail) for regel, detail in _treffer_liste(t, regeln))
+    return aus
+
+
+def kunden_verstoesse(daten: object) -> list[tuple[str, str, str, str]]:
+    """Verstöße der Kundenfelder gegen die Inhaltsregeln als (id, feld, regel, detail); wirft bei keinem Typ im JSON.
+
+    Geprüft werden Befunde mit Status bestätigt/unbestätigt (NFC) und je Feld einzeln, was vorhanden und Text ist:
+    `zusammenfassung`, `massnahme` (alle Regeln) und `titel` (alle außer `du`; bei `c` ohne `<` und `>`). Fehlende Felder meldet erst
+    kundenbericht.py.
+    Regeln (Werte von KUNDEN_REGELN): `du` Du-Form (detail: das Wort), `a` Token aus einem `poc` (detail: das Token, höchstens 60
+    Zeichen), `b` Request (HTTP-Methode vor einem Pfad) oder Pfad mit führendem Schrägstrich (auch `//pfad`, `x:/pfad`), `c` `{ } < > =` oder Backtick, `d` Datei mit Zeile (auch `Dockerfile:6`), `#L<n>`,
+    `Zeile <n>`, `e` Dateipfad oder `code_pfad`-Eintrag eines Befunds (ohne Ausnahme, auch die eigene `datei`), `url` Webadresse,
+    `email` E-Mail-Adresse. Quellen für a, d und e sind alle Befunde unabhängig vom Status.
+    `detail` ist bei b, c, d, e, url und email ein fester Text ohne Treffertext (die Exit-2-Zeile von kundenbericht.py darf ihn
+    ausgeben), bei `du` das Wort, bei `a` das Token.
+    Fail-closed mit festem Detail „zu viele Token zum Prüfen“ (Regel a bei jedem geprüften Feld: `zusammenfassung`, `massnahme`,
+    `titel`): mehr als 200000 Token in den `poc`-Feldern, ein `poc` über 10**6 Zeichen oder mehr als 5 Mio. Teilstring-Prüfungen
+    (nur bei sehr vielen Token oder Pfaden mit gleichem Anfang; gewöhnliche Berichte brauchen einen Bruchteil). Die Funktion hat
+    keine Seiteneffekte (keine Ausgabe auf stderr). Eine Ausnahme aus der Prüfung selbst wird nicht verschluckt: Aufrufer
+    behandeln sie als „Prüfung nicht möglich“, nie als „keine Verstöße“."""
+    if not isinstance(daten, dict) or not isinstance(daten.get("befunde"), list):
+        return []
+    befunde = daten["befunde"]
+    token, pfade_e, pfade_d, zu_viele = _quellen(befunde)
+    arbeit = [_MAX_SCHRITTE]
+    nadeln_a = _Nadeln([(k.lower(), k) for k in token], arbeit)            # einmal vorab klein schreiben und indizieren (Laufzeit)
+    nadeln_e = _Nadeln([(p.lower(), p) for p in pfade_e], arbeit)
+    nadeln_d = _Nadeln([(p.lower(), p) for p in pfade_d], arbeit)
+    try:
+        return _felder_pruefen(befunde, zu_viele, nadeln_a, nadeln_e, nadeln_d)
+    except _ZuVieleSchritte:
+        return _felder_pruefen(befunde, True, None, None, None)
+
+
+def kopf_verstoesse(daten: object, felder: dict[str, object]) -> list[tuple[str, str, str]]:
+    """Verstöße der Kopfangaben (Projektname, Teilpfad: `felder` Name -> Wert), die im Kundenbericht stehen, ohne durch
+    `kunden_verstoesse` zu laufen, als (feld, regel, detail). Nur die Regeln `a` (Token aus einem `poc`) und `b` (nur der Request: HTTP-Methode
+    vor einem Pfad): Namen und Pfade sind sonst frei (Punkte, Bindestriche, Leerzeichen, Zahlen, `&`). Nach NFKC wie die Befundfelder; ein Wert,
+    der kein Text ist, bleibt außer Betracht. `detail` ist ein fester Text, nie der Wert und nie das Token. Fail-closed wie
+    `kunden_verstoesse` (zu viele Token, zu langer `poc`, verbrauchtes Arbeitsbudget: Regel a mit dem Detail „zu viele Token zum
+    Prüfen“); eine Ausnahme aus der Prüfung wird nicht verschluckt."""
+    befunde = daten["befunde"] if isinstance(daten, dict) and isinstance(daten.get("befunde"), list) else []
+    token, _e, _d, zu_viele = _quellen(befunde)
+    nadeln = _Nadeln([(k.lower(), k) for k in token])
+    aus: list[tuple[str, str, str]] = []
+    for feld, wert in felder.items():
+        text = _pruef_text(wert, voll=True)
+        if text is None:
+            continue
+        try:
+            a = ZU_VIELE_TOKEN if zu_viele else (_KUNDEN_DETAIL["a"] if nadeln.finde(text.lower()) else None)
+        except _ZuVieleSchritte:
+            a = ZU_VIELE_TOKEN
+        if a:
+            aus.append((feld, "a", a))
+        if _REGEL_B_KOPF.search(text):
+            aus.append((feld, "b", _KUNDEN_DETAIL["b"]))
+    return aus
 
 
 # ------------------------------------------------------------------------------------ Markdown
@@ -543,6 +857,22 @@ def _reservierung_abweichungen(marker: str, daten: dict) -> list[str]:
             for feld in ("sha", "repo", "teilpfad") if daten.get(feld) != erwartet.get(feld)]
 
 
+def _kundenwarnung(daten: dict) -> None:
+    """Treffer von `kunden_verstoesse` nur als Warnung auf stderr (ID, Feld, Regel; nie Wort, Token oder Treffertext): `rendern`
+    scheitert nie an Kundenregeln, `kundenbericht.py` entscheidet. Scheitert die Prüfung selbst, steht das ebenfalls auf stderr
+    (nur der Ausnahmetyp, nie ihr Text): „keine Warnung“ hieße sonst fälschlich „keine Verstöße“."""
+    try:
+        treffer = kunden_verstoesse(daten)
+    except Exception as ex:  # noqa: BLE001 - `rendern` scheitert nie an der Kundenprüfung; sichtbar machen statt schweigen
+        print(f"Kundenbericht-Prüfung nicht möglich ({type(ex).__name__}); kundenbericht.py meldet den Fehler.", file=sys.stderr)
+        return
+    if not treffer:
+        return
+    zeilen = list(dict.fromkeys(f"{i} {feld}: Regel {regel}" for (i, feld, regel, _d) in treffer))
+    print("Kundenbericht wird scheitern: " + "; ".join(zeilen[:30]) + (f"; … und {len(zeilen) - 30} weitere" if len(zeilen) > 30 else ""),
+          file=sys.stderr)
+
+
 def _rendern(pfad: str) -> int:
     try:
         if os.path.getsize(pfad) > MAX_JSON_BYTES:
@@ -580,6 +910,7 @@ def _rendern(pfad: str) -> int:
     finally:
         if tmp is not None and os.path.lexists(tmp):       # Fehler zwischen mkstemp und replace: keine Reste im Ausgabeordner
             os.unlink(tmp)
+    _kundenwarnung(daten)
     try:
         os.unlink(os.path.splitext(pfad)[0] + ".reserviert")       # Reservierung von `kontext` freigeben
     except FileNotFoundError:

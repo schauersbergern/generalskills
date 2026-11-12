@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Eval-Lauf des Skills security-audit: legt ein Temp-Repo mit der Test-App an, kopiert den Skill hinein, startet
 `claude -p` mit eng gefassten Rechten und wertet das Ergebnis über `auswertung.auswerten` aus (TF1-D1 bis TF1-D7, je nach
-Erwartung TF2-D1 bis TF2-D4).
+Erwartung TF2-D1 bis TF2-D4, TF3-D1 bis TF3-D4 und TF4-D6).
 
     python3 security-audit/evals/run_eval.py --fixture fixture-web [--erwartung DATEI] [--ohne LISTE] [--ohne-lockfile]
-        [--timeout 5400] [--behalten] [--prompt-art slash|text]
+        [--timeout 5400] [--behalten] [--prompt-art slash|text] [--projekt NAME]
 
+`--projekt` hängt `projekt="<NAME>"` an den Prompt (`[A-Za-z0-9][A-Za-z0-9 ._-]{0,59}`); der Skill setzt es als Projektname
+des Kundenberichts. Nach dem Lauf liest `run_eval.py` `<Bericht>-kunde.md` und von `<Bericht>-kunde.pdf` die ersten 8 Bytes, die Größe und die
+letzten 1024 Bytes für TF4-D6 (Erwartung mit `kundenbericht: true`).
 `--erwartung` wählt die Erwartung (Standard `expected/<fixture>.json`); ihr Feld `fixture` muss zur Test-App passen.
 Mit `secret: true` in der Erwartung committet der Lauf vor dem Start ein Fake-Secret (`config/keys.js`) und löscht es
 im nächsten Commit; der Wert existiert nur im Speicher, die Auswertung bekommt nur `sha256`, Commit und Länge.
@@ -29,6 +32,7 @@ import re
 import secrets
 import shutil
 import signal
+import stat
 import string
 import subprocess
 import sys
@@ -51,6 +55,9 @@ SMOKE_PROMPT = "Antworte nur mit ok."
 # ohne den Schalter ab. Die Konfiguration ist hier die eigene Skill-Kopie in einem Wegwerf-Repo, also gilt der Schalter in beiden Prompts.
 SCHALTER = "repo-konfig-geprueft"
 PROMPTS = {"slash": f"/{SKILL_NAME} {SCHALTER}", "text": f"Nutze den Skill {SKILL_NAME} auf diesem Repo mit dem Schalter {SCHALTER}."}
+PROJEKT_MUSTER = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,59}")
+KUNDE_MD_MAX = 1024 * 1024                                 # TF4-D6: so viel vom Kunden-Markdown wird gelesen
+KUNDE_PDF_ENDE = 1024                                      # TF4-D6: so viel vom Ende des Kunden-PDF wird gelesen (`%%EOF`)
 SMOKE_TIMEOUT = 300
 DOCKER_TIMEOUT = 60
 KILL_WARTEN = 10
@@ -74,8 +81,14 @@ def erlaubte_regeln(skill_ordner: str, ausgabe: str, home: str, tmp: str | None 
     - Write/Edit nur im Ausgabeordner (`//` = absoluter Pfad ab Wurzel).
     - Bash: `poc.py` (auch `poc.py modell` für den Modell-Mock), `lieferkette.py` (kopierter Skill; `lieferkette.py` ruft selbst OSV-API und
       KEV-Katalog auf, das ist die Erlaubtliste des Feature-Files, die Session macht keinen eigenen Netzverkehr), `ki.py` (TF3, rein
-      statische Erkennung ohne Netz und ohne Kindprozess), `bericht.py kontext`, `bericht.py repo` (beide read-only), `bericht.py rendern <ausgabe>/*`, `agent-stats.py add
-      <ausgabe>/*` (mit `~` und mit absolutem `home`) und `ls`. Die `*`-Muster treffen auch `..`-Pfade (Restrisiko)."""
+      statische Erkennung ohne Netz und ohne Kindprozess), `bericht.py kontext`, `bericht.py repo` (beide read-only), `bericht.py rendern <ausgabe>/*`,
+      `kundenbericht.py erstellen --json <ausgabe>/*` (TF4; pandoc und weasyprint ruft nur das Skript auf, nie die Session), `agent-stats.py add
+      <ausgabe>/*` (mit `~` und mit absolutem `home`) und `ls`. Die `*`-Muster treffen auch `..`-Pfade (Restrisiko).
+
+    Restrisiko der Kundenbericht-Regel `kundenbericht.py erstellen --json <ausgabe>/*`: Sie ist so breit wie die von `rendern`. Das Muster
+    trifft auch ein zweites `--json` (`--json <ausgabe>/a.json --json /pfad/b.json`; das letzte `--json` gilt), und `erstellen` entfernt
+    vor dem Lesen vorhandene `-kunde.md` und `-kunde.pdf` neben jeder `*.json`, auch ohne gültigen Bericht. Betroffen sind nur reguläre
+    Dateien mit genau diesen Endungen; geschrieben wird nur bei einem gültigen Bericht."""
     absolut = lambda pfad: "/" + pfad                    # "//<absoluter Pfad ohne führenden />"
     if tmp is None:
         tmp = os.path.realpath(tempfile.gettempdir())
@@ -92,6 +105,7 @@ def erlaubte_regeln(skill_ordner: str, ausgabe: str, home: str, tmp: str | None 
         f"Bash(python3 -I {skill_ordner}/scripts/poc.py *)",
         f"Bash(python3 -I {skill_ordner}/scripts/lieferkette.py *)",
         f"Bash(python3 -I {skill_ordner}/scripts/ki.py *)",
+        f"Bash(python3 -I {skill_ordner}/scripts/kundenbericht.py erstellen --json {ausgabe}/*)",
         f"Bash({bericht} kontext)",
         f"Bash({bericht} kontext *)",
         f"Bash({bericht} repo)",
@@ -651,6 +665,73 @@ def _bericht_lesen(ordner: str) -> tuple[dict | None, str | None]:
     return None, pfade[0]
 
 
+def _kunde_oeffnen(pfad: str, lesen):
+    """Öffnet `pfad` ohne Symlinks zu folgen (O_NOFOLLOW), nur als reguläre Datei (kein Verzeichnis, keine FIFO: O_NONBLOCK hängt nicht),
+    und gibt `lesen(datei, groesse)` zurück; sonst None."""
+    try:
+        fd = os.open(pfad, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        with os.fdopen(fd, "rb", closefd=False) as f:
+            return lesen(f, st.st_size)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def _kunde_datei(pfad: str, max_bytes: int) -> bytes | None:
+    """Höchstens `max_bytes` der Datei, ohne Symlinks zu folgen (O_NOFOLLOW) und nur als reguläre Datei; sonst None."""
+    return _kunde_oeffnen(pfad, lambda f, _groesse: f.read(max_bytes))
+
+
+def _kunde_pdf(pfad: str) -> tuple[bytes, int, bytes] | None:
+    """(erste 8 Bytes, Größe, letzte `KUNDE_PDF_ENDE` Bytes) eines regulären PDF ohne Symlink; sonst None."""
+    def lesen(f, groesse):
+        anfang = f.read(8)
+        f.seek(max(0, groesse - KUNDE_PDF_ENDE))
+        return anfang, groesse, f.read(KUNDE_PDF_ENDE)
+    return _kunde_oeffnen(pfad, lesen)
+
+
+def _kunde_lesen(bericht_pfad: str | None, projekt: str | None) -> dict | None:
+    """Kundendaten für TF4-D6: `{"md": str | None, "md_abgeschnitten": bool, "pdf_anfang": bytes | None, "pdf_groesse": int | None,
+    "pdf_ende": bytes | None, "projekt": str | None}`. Die Pfade leiten sich aus dem Bericht-JSON ab (`<Basis>-kunde.md`,
+    `<Basis>-kunde.pdf`); eine fehlende, nicht reguläre oder per Symlink gelegte Datei ergibt None. Das Markdown wird bis
+    `KUNDE_MD_MAX` Bytes gelesen; ist es länger, ist `md_abgeschnitten` wahr (die Auswertung meldet das, statt still nur den
+    Anfang zu prüfen). Ohne Bericht-Pfad: None (ganz)."""
+    if bericht_pfad is None:
+        return None
+    basis = os.path.splitext(bericht_pfad)[0]
+    md = _kunde_datei(basis + "-kunde.md", KUNDE_MD_MAX + 1)
+    pdf = _kunde_pdf(basis + "-kunde.pdf")
+    return {"md": None if md is None else md[:KUNDE_MD_MAX].decode("utf-8", "replace"),
+            "md_abgeschnitten": md is not None and len(md) > KUNDE_MD_MAX,
+            "pdf_anfang": None if pdf is None else pdf[0], "pdf_groesse": None if pdf is None else pdf[1],
+            "pdf_ende": None if pdf is None else pdf[2], "projekt": projekt}
+
+
+def _projekt_arg(wert: str) -> str:
+    """argparse-Typ von `--projekt`: `[A-Za-z0-9][A-Za-z0-9 ._-]{0,59}` ganz (kein Zeilenumbruch, keine Anführungszeichen)."""
+    if not PROJEKT_MUSTER.fullmatch(wert):
+        raise argparse.ArgumentTypeError(f"ungültiger Projektname {wert!r} (erlaubt: [A-Za-z0-9][A-Za-z0-9 ._-]{{0,59}})")
+    return wert
+
+
+def _prompt(art: str, projekt: str | None) -> str:
+    """Prompt des Laufs; mit Projekt hängt `projekt="<name>"` an (slash: ` projekt=…`, text: ` mit projekt=…` vor dem Punkt)."""
+    prompt = PROMPTS[art]
+    if projekt is None:
+        return prompt
+    if art == "text":
+        return f'{prompt.removesuffix(".")} mit projekt="{projekt}".'
+    return f'{prompt} projekt="{projekt}"'
+
+
 # ------------------------------------------------------------------------------------ main
 
 def _argumente(argv: list[str]) -> argparse.Namespace:
@@ -663,6 +744,8 @@ def _argumente(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--timeout", type=float, default=5400, help="Zeitlimit des Laufs in Sekunden (Standard 5400)")
     p.add_argument("--behalten", action="store_true", help="Temp-Verzeichnis auch nach Exit 0 behalten")
     p.add_argument("--prompt-art", choices=sorted(PROMPTS), default="slash", help="slash: /security-audit-eval, text: Satz")
+    p.add_argument("--projekt", type=_projekt_arg, default=None,
+                   help="Projektname für den Kundenbericht, geht als projekt=\"<name>\" an den Prompt")
     return p.parse_args(argv)
 
 
@@ -814,7 +897,8 @@ def _lauf_main(a: argparse.Namespace) -> int:
     env = kind_umgebung(os.environ, ausgabe, ohne, cwd=repo)
     gemeinsam = ["--permission-mode", "acceptEdits", "--setting-sources", "project,local", "--strict-mcp-config",
                  "--agents", agenten, "--add-dir", ausgabe, "--disallowedTools", "WebFetch,WebSearch"]
-    cmd = ["claude", "-p", PROMPTS[a.prompt_art], "--output-format", "stream-json", "--verbose", *gemeinsam,
+    prompt = _prompt(a.prompt_art, a.projekt)
+    cmd = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose", *gemeinsam,
            "--tools", TOOLS, "--allowedTools", *erlaubte_regeln(skill, ausgabe, home, os.path.realpath(tempfile.gettempdir()))]
 
     reviews_vorher, stats_vorher = _home_zustand()
@@ -830,7 +914,7 @@ def _lauf_main(a: argparse.Namespace) -> int:
             return 6
         # 5. Lauf
         _abbruch_pruefen()
-        _log(f"Lauf startet (Timeout {a.timeout:g} s, Prompt {PROMPTS[a.prompt_art]!r})")
+        _log(f"Lauf startet (Timeout {a.timeout:g} s, Prompt {prompt!r})")
         lauf = _lauf(cmd, repo, env, stream_pfad, stderr_pfad, a.timeout)
         _log(f"Lauf beendet: rc={lauf['rc']}, Timeout={lauf['timeout']}, {lauf['dauer_s']} s")
         # 6. Nachher: Docker-Listen erfassen
@@ -859,14 +943,15 @@ def _lauf_main(a: argparse.Namespace) -> int:
     except OSError:
         ereignisse, uebersprungen, nur_letzte, letzte = [], 0, False, ""
     quellen = geheim_quellen_lesen(stream_pfad, stderr_pfad, ausgabe, temp, kopien_vorher) if secret_info else None
+    kunde = _kunde_lesen(bericht_pfad, a.projekt)
     ergebnis = auswertung.auswerten(
         bericht, erwartung, ereignisse, porcelain, dateien,
         sorted(reviews_nachher - reviews_vorher), sorted(stats_nachher - stats_vorher), listen,
         stream_uebersprungen=uebersprungen, stream_nur_letzte=nur_letzte, stream_letzte_zeile=letzte,
-        secret_info=secret_info, geheim_quellen=quellen)
+        secret_info=secret_info, geheim_quellen=quellen, kunde=kunde)
     lauf_ok = lauf["rc"] == 0 and not lauf["timeout"]
     ergebnis["lauf"] = {"fixture": a.fixture, "erwartung": erwartung_pfad, "temp": wurzel, "repo": repo, "ausgabe": ausgabe_ordner,
-                        "bericht": bericht_pfad, "prompt": PROMPTS[a.prompt_art], "ohne": ohne,
+                        "bericht": bericht_pfad, "prompt": prompt, "ohne": ohne,
                         "subagenten": auswertung.zaehle_subagenten(ereignisse),
                         "stream_zeilen_uebersprungen": uebersprungen, "ok": lauf_ok, **lauf}
     if secret_info:

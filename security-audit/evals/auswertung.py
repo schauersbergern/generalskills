@@ -1,4 +1,4 @@
-"""Auswertung eines Eval-Laufs des Skills security-audit (TF1-D1 bis TF1-D7, TF2-D1 bis TF2-D4, TF3-D1 bis TF3-D4).
+"""Auswertung eines Eval-Laufs des Skills security-audit (TF1-D1 bis TF1-D7, TF2-D1 bis TF2-D4, TF3-D1 bis TF3-D4, TF4-D6).
 
 Rein: keine Seiteneffekte, kein Netz, kein Docker, kein git. Alle Eingaben (Bericht-JSON, Erwartung, Stream-JSON von
 `claude -p --output-format stream-json --verbose`, `git status --porcelain`, Ordnerlisten, Docker-Listen) liefert
@@ -16,6 +16,7 @@ from urllib.parse import unquote
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import bericht as bericht_schema  # noqa: E402
+import kundenbericht  # noqa: E402
 import netzregel  # noqa: E402
 
 IN_LISTE = ("bestätigt", "unbestätigt")
@@ -529,14 +530,15 @@ def pruefe_ki_hinweis(bericht: dict | None, erwartung: dict) -> list[str]:
 def pruefe_ablage(porcelain: str, ausgabe_dateien: list[str], neue_reviews: list[str],
                   neue_stats: list[str]) -> list[str]:
     """TF1-D4: `git status --porcelain` des Repos leer; im Ausgabeordner (Basenames) mindestens ein `.md` (nicht
-    `-agent-stats.md`), ein `.json` und ein `-agent-stats.md`; nichts Neues unter `~/.claude/security-reviews/`
+    `-agent-stats.md`, nicht `-kunde.md`), ein `.json` und ein `-agent-stats.md`; `-kunde.md` und `-kunde.pdf` des Kundenberichts
+    zählen nicht als technischer Bericht (TF4-D6 prüft sie); nichts Neues unter `~/.claude/security-reviews/`
     und `~/.claude/agent-stats/eval-security-audit-*` (die Aufrufer-Listen sind die neuen Einträge)."""
     fehler: list[str] = []
     zeilen = [z for z in (porcelain or "").splitlines() if z.strip()]
     if zeilen:
         fehler.append("git status nicht leer: " + "; ".join(z.strip() for z in zeilen[:10]))
     namen = [os.path.basename(n) for n in ausgabe_dateien or []]
-    if not any(n.endswith(".md") and not n.endswith("-agent-stats.md") for n in namen):
+    if not any(n.endswith(".md") and not n.endswith(("-agent-stats.md", "-kunde.md")) for n in namen):
         fehler.append("Ausgabeordner: kein Bericht (.md)")
     if not any(n.endswith(".json") for n in namen):
         fehler.append("Ausgabeordner: keine Bericht-JSON (.json)")
@@ -655,6 +657,78 @@ def pruefe_hinweise(bericht: dict | None, erwartung: dict) -> list[str]:
     return fehler
 
 
+# ------------------------------------------------------------------------------------ Kundenbericht (TF4-D6)
+
+KUNDE_KOPF = "# Manibase · Sicherheitsprüfung"
+_KUNDE_MAX_MELDUNGEN = 5
+_MD_ESCAPE = re.compile(r"\\([\\`*_{}\[\]<>!$^~@&|#])")
+KUNDE_PDF_MIN = 1024        # Mindestgröße eines Kunden-PDF; ein `%PDF-1.7` mit nichts dahinter ist eine Attrappe (Review 5, Minor 1)
+_DATEI_ZAHL = re.compile(r"[\w./-]+\.[A-Za-z0-9]{1,8}:\d+\b|\b(?:Dockerfile|Makefile|Containerfile)[\w.-]*:\d+\b")
+
+
+def pruefe_kundenbericht(bericht: dict | None, kunde: dict | None) -> list[str]:
+    """TF4-D6: `kunde` (`{"md": str | None, "md_abgeschnitten": bool, "pdf_anfang": bytes | None, "pdf_groesse": int | None,
+    "pdf_ende": bytes | None, "projekt": str | None}`, von `run_eval.py`) ist da;
+    das Markdown beginnt mit dem Kopf, ist vollständig gelesen (`md_abgeschnitten` ist nicht wahr) und trägt bei gesetztem `projekt`
+    den escapten Namen (`kundenbericht.escape`) in der ersten Zeile; das PDF beginnt mit `%PDF`, ist mindestens `KUNDE_PDF_MIN` Bytes
+    groß und trägt `%%EOF` in den letzten 1024 Bytes (`pdf_ende`; fehlt eine der beiden Angaben, gilt das als nicht geprüft und ist
+    rot); `bericht.kunden_verstoesse` auf dem Bericht-JSON ist leer (scheitert die Prüfung selbst, ist das rot, nie „keine Verstöße“);
+    im Markdown steht kein `code_pfad`-Eintrag und kein `datei:zahl`. „Vorhanden“ heißt nicht `None`. Die Meldungen nennen nur die
+    fehlende Bedingung (bei Verstößen Befund, Feld und Regel), nie Text aus dem Markdown oder den Berichtfeldern."""
+    if not isinstance(kunde, dict):
+        return ["keine Kundendaten"]
+    fehler: list[str] = []
+    md, pdf, projekt = kunde.get("md"), kunde.get("pdf_anfang"), kunde.get("projekt")
+    if md is None:
+        fehler.append("Kundenbericht (Markdown) fehlt")
+    elif not isinstance(md, str):
+        fehler.append("Kundenbericht (Markdown) ungültig")
+    else:
+        erste = md.split("\n", 1)[0].rstrip("\r")
+        if not unicodedata.normalize("NFC", erste).startswith(KUNDE_KOPF):
+            fehler.append(f"Kundenbericht: Kopf fehlt (erste Zeile beginnt nicht mit {KUNDE_KOPF!r})")
+        elif isinstance(projekt, str) and projekt:
+            if unicodedata.normalize("NFC", erste) != f"{KUNDE_KOPF} {kundenbericht.escape(unicodedata.normalize('NFC', projekt))}":
+                fehler.append("Kundenbericht: Projektname fehlt in der ersten Zeile (oder stimmt nicht, escapt erwartet)")
+        if kunde.get("md_abgeschnitten") is not False:
+            fehler.append("Kundenbericht (Markdown) größer als die Lesegrenze, nicht vollständig geprüft")
+        fehler += _md_spuren(md, bericht)
+    if pdf is None:
+        fehler.append("Kundenbericht (PDF) fehlt")
+    elif not isinstance(pdf, (bytes, bytearray)) or not bytes(pdf).startswith(b"%PDF"):
+        fehler.append("Kundenbericht (PDF): beginnt nicht mit %PDF")
+    else:
+        groesse, ende = kunde.get("pdf_groesse"), kunde.get("pdf_ende")
+        if type(groesse) is not int or groesse < KUNDE_PDF_MIN:
+            fehler.append(f"Kundenbericht (PDF): kleiner als {KUNDE_PDF_MIN} Bytes (oder Größe unbekannt)")
+        if not isinstance(ende, (bytes, bytearray)) or b"%%EOF" not in bytes(ende):
+            fehler.append("Kundenbericht (PDF): %%EOF fehlt am Ende")
+    if bericht is not None:
+        try:
+            gefunden = bericht_schema.kunden_verstoesse(bericht)
+        except Exception as ex:  # noqa: BLE001 - die Prüfung selbst ist gescheitert: rot, nie „keine Verstöße“ (nur der Typ, kein Text)
+            fehler.append(f"Kundenprüfung nicht möglich ({type(ex).__name__})")
+            gefunden = []
+        fehler += [f"{i} {feld}: Regel {regel}" for i, feld, regel, _detail in gefunden[:_KUNDE_MAX_MELDUNGEN]]
+        if len(gefunden) > _KUNDE_MAX_MELDUNGEN:
+            fehler.append(f"… und {len(gefunden) - _KUNDE_MAX_MELDUNGEN} weitere Verstöße der Kundenfelder")
+    return fehler
+
+
+def _md_spuren(md: str, bericht: dict | None) -> list[str]:
+    """Spuren technischer Details im Kunden-Markdown: ein `code_pfad`-Eintrag des Berichts oder ein `datei:zahl`. Backslash-
+    Escapes der Menge aus `kundenbericht.escape` werden vorher entfernt. Ohne Text aus dem Markdown."""
+    text = unicodedata.normalize("NFC", _MD_ESCAPE.sub(r"\1", md))
+    fehler: list[str] = []
+    pfade = {unicodedata.normalize("NFC", p) for b in _befunde(bericht) if isinstance(b.get("code_pfad"), list)
+             for p in b["code_pfad"] if isinstance(p, str) and p.strip()}
+    if any(p in text for p in pfade):
+        fehler.append("Kundenbericht: Code-Pfad aus dem Bericht im Markdown")
+    if _DATEI_ZAHL.search(text):
+        fehler.append("Kundenbericht: Zeilenangabe (Datei:Zahl) im Markdown")
+    return fehler
+
+
 # ------------------------------------------------------------------------------------ Gesamt
 
 def _tf3_dod(e: dict) -> str | None:
@@ -695,12 +769,14 @@ def auswerten(bericht: dict | None, erwartung: dict, stream: list[dict], porcela
               neue_reviews: list[str], neue_stats: list[str], docker_listen: dict[str, list[str]],
               stream_uebersprungen: int = 0, stream_nur_letzte: bool = False,
               stream_letzte_zeile: str = "", secret_info: dict | None = None,
-              geheim_quellen: dict[str, str] | None = None) -> dict:
+              geheim_quellen: dict[str, str] | None = None, kunde: dict | None = None) -> dict:
     """Alle Prüfungen: `{"dod": {"TF1-D1": {"ok": bool, "details": [...]}, …}, "ok": bool}`. Welche Schlüssel vorkommen,
     bestimmt die Erwartung (`_dod_schluessel`): TF1-D3 bis D7 immer; TF1-D1 und D2 je nach Einträgen; `TF2-Dn` für jedes
     `dod` der `werkzeug`-Einträge, TF2-D2 zusätzlich bei `secret`, TF2-D4 zusätzlich bei `werkzeug_hinweise` oder
     `alle_unbestaetigt`. `ok` heißt: alle vorhandenen Schlüssel ok. `secret_info` (`sha256`, `commit`, `laenge`) und
-    `geheim_quellen` (Name → Text) stammen aus `run_eval.py`; der Wert selbst kommt nie hierher.
+    `geheim_quellen` (Name → Text) stammen aus `run_eval.py`; der Wert selbst kommt nie hierher. `kunde` (`md`, `md_abgeschnitten`,
+    `pdf_anfang`, `pdf_groesse`, `pdf_ende`, `projekt`) ebenso; bei `kundenbericht: true` in der Erwartung gilt TF4-D6 (`pruefe_kundenbericht`), und `kunde=None` ist dann
+    rot („keine Kundendaten“), ein fehlender Bericht ebenso („kein Bericht“).
     Fehlt der Bericht (`None`), sind D1 bis D3, D5 und alle TF2-Schlüssel nicht ok mit dem Detail „kein Bericht“ (D5
     meldet zusätzlich Verstöße aus dem Stream; die Wert-Suche in TF2-D2 läuft trotzdem). D3 prüft zuerst das
     Bericht-Schema (`bericht.pruefe_schema`). Ein leerer Stream (keine Ereignisse) macht D5 und D6 nicht ok („kein
@@ -788,6 +864,9 @@ def auswerten(bericht: dict | None, erwartung: dict, stream: list[dict], porcela
         fehler["TF3-D4"] += pruefe_ki_hinweis(bericht, erwartung)
     elif "TF3-D4" in tf3:
         fehler["TF3-D4"] += [f for f in pruefe_ki_hinweis(None, erwartung) if f.startswith("Erwartung ki_hinweis")]
+    if erwartung.get("kundenbericht") is True:
+        fehler["TF4-D6"] = list(kein) if bericht is None else []
+        fehler["TF4-D6"] += pruefe_kundenbericht(bericht, kunde)
     ergebnis = {k: {"ok": not f, "details": list(f) + (hinweis if k in ("TF1-D5", "TF1-D6") else [])}
                 for k, f in sorted(fehler.items(), key=lambda kv: (kv[0][:3] != "TF1", kv[0]))}
     return {"dod": ergebnis, "ok": all(d["ok"] for d in ergebnis.values())}

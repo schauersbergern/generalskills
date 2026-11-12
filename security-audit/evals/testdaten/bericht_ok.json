@@ -24,6 +24,8 @@
       "klasse": "x",
       "ohne_anmeldung": false,
       "mandantenuebergreifend": false,
+      "zusammenfassung": "Beschäftigte eines Kunden können Projekte anderer Kunden einsehen. Das gefährdet vertrauliche Geschäftsdaten und kann das Vertrauen Ihrer Kunden beschädigen.",
+      "massnahme": "Wir empfehlen, jede Abfrage an den angemeldeten Kunden zu binden und Zugriffe auf fremde Daten abzuweisen.",
       "poc": "python3 /skill/security-audit/scripts/poc.py anfrage --lauf 0a1b2c3d --rolle p1 --pfad /api/projects/2"
     },
     {
@@ -40,6 +42,8 @@
       "klasse": "x",
       "ohne_anmeldung": false,
       "mandantenuebergreifend": false,
+      "zusammenfassung": "Über die Suche lassen sich Abfragen so verändern, dass Daten ausgegeben werden, die nicht für die Anfragenden bestimmt sind. Das kann zu einem Abfluss vertraulicher Informationen führen.",
+      "massnahme": "Aktualisieren Sie die Suche so, dass Eingaben der Nutzer nie als Teil einer Datenbankabfrage gelten.",
       "poc": "python3 /skill/security-audit/scripts/poc.py anfrage --lauf 0a1b2c3d --rolle p1 --pfad /search?q=x"
     },
     {
@@ -56,6 +60,8 @@
       "klasse": "x",
       "ohne_anmeldung": false,
       "mandantenuebergreifend": false,
+      "zusammenfassung": "Ein Verwaltungsbereich ist möglicherweise ohne ausreichende Prüfung der Berechtigung erreichbar. Dadurch könnten Unbefugte Einstellungen Ihrer Anwendung ändern.",
+      "massnahme": "Wir empfehlen, den Verwaltungsbereich ausschließlich für Administratoren freizugeben und dies bei jedem Zugriff zu prüfen.",
       "code_pfad": [
         "src/a.js:3",
         "src/b.js:7"
@@ -75,6 +81,8 @@
       "klasse": "x",
       "ohne_anmeldung": false,
       "mandantenuebergreifend": false,
+      "zusammenfassung": "Eingehende Meldungen anderer Systeme werden angenommen, ohne ihre Herkunft zu prüfen. Dadurch könnten Fremde falsche Ereignisse in Ihrer Anwendung auslösen.",
+      "massnahme": "Lassen Sie eingehende Meldungen nur nach erfolgreicher Prüfung ihrer Herkunft verarbeiten.",
       "poc": "python3 /skill/security-audit/scripts/poc.py anfrage --lauf 0a1b2c3d --rolle p1 --pfad /webhook"
     },
     {
@@ -91,6 +99,8 @@
       "klasse": "x",
       "ohne_anmeldung": false,
       "mandantenuebergreifend": false,
+      "zusammenfassung": "Der Server kann dazu gebracht werden, interne Systeme abzurufen und deren Antworten weiterzugeben. Dadurch könnten interne Informationen nach außen gelangen.",
+      "massnahme": "Wir empfehlen, nur vorab freigegebene Ziele zuzulassen und Zugriffe auf interne Adressen zu sperren.",
       "poc": "python3 /skill/security-audit/scripts/poc.py anfrage --lauf 0a1b2c3d --rolle p1 --pfad /preview?url=http://127.0.0.1/"
     },
     {
@@ -107,6 +117,8 @@
       "klasse": "x",
       "ohne_anmeldung": false,
       "mandantenuebergreifend": false,
+      "zusammenfassung": "Heruntergeladene Dateien könnten möglicherweise von Nutzern abgerufen werden, die dafür keine Berechtigung haben. Das kann vertrauliche Dokumente offenlegen.",
+      "massnahme": "Wir empfehlen, vor jedem Download zu prüfen, ob der Nutzer die Datei sehen darf.",
       "code_pfad": [
         "src/a.js:3",
         "src/b.js:7"
