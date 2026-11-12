@@ -39,7 +39,10 @@ TEMP_PRAEFIX = "eval-security-audit-"
 SKILL_NAME = "security-audit-eval"
 TOOLS = "Read,Glob,Grep,Write,Edit,Agent,Skill,Bash,TodoWrite,ToolSearch"
 SMOKE_PROMPT = "Antworte nur mit ok."
-PROMPTS = {"slash": f"/{SKILL_NAME}", "text": f"Nutze den Skill {SKILL_NAME} auf diesem Repo."}
+# Der Eval-Skill liegt in `.claude/skills/` des Temp-Repos (Claude-Konfiguration „nur im Arbeitsbaum“): `bericht.py kontext` bricht
+# ohne den Schalter ab. Die Konfiguration ist hier die eigene Skill-Kopie in einem Wegwerf-Repo, also gilt der Schalter in beiden Prompts.
+SCHALTER = "repo-konfig-geprueft"
+PROMPTS = {"slash": f"/{SKILL_NAME} {SCHALTER}", "text": f"Nutze den Skill {SKILL_NAME} auf diesem Repo mit dem Schalter {SCHALTER}."}
 SMOKE_TIMEOUT = 300
 DOCKER_TIMEOUT = 60
 KILL_WARTEN = 10

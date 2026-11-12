@@ -1012,6 +1012,30 @@ def test_temp_repo_globales_exclude(tmp_path, monkeypatch):
         shutil.rmtree(wurzel, ignore_errors=True)
 
 
+@pytest.mark.parametrize("art", sorted(run_eval.PROMPTS))
+def test_eval_prompt_und_kontext_auf_dem_temp_repo_r2_1(tmp_path, monkeypatch, art):
+    """R2-1: Der Eval-Skill liegt unter `.claude/skills/` des Temp-Repos; `bericht.py kontext` bricht ohne den Schalter mit Exit 3
+    ab. Beide Prompts tragen den Schalter, und mit ihm läuft `kontext` auf dem von `temp_repo_anlegen` gebauten Repo durch."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(tempfile, "tempdir", os.path.realpath(tmp_path))
+    wurzel, repo = run_eval.temp_repo_anlegen("fixture-web", SKILL, False)
+    try:
+        kontext = [sys.executable, "-I", os.path.join(SKILL, "scripts", "bericht.py"), "kontext", "--repo", repo]
+        env = dict(os.environ, HOME=str(home), SECURITY_AUDIT_AUSGABE=str(tmp_path / "ausgabe"))
+        ohne = subprocess.run(kontext, capture_output=True, text=True, env=env)
+        assert ohne.returncode == 3 and ".claude/skills" in ohne.stderr, (ohne.returncode, ohne.stderr)
+        assert run_eval.SCHALTER in run_eval.PROMPTS[art]
+        schalter = ["--repo-konfig-geprueft"] if run_eval.SCHALTER in run_eval.PROMPTS[art].split() or \
+            run_eval.SCHALTER in re.findall(r"[\w-]+", run_eval.PROMPTS[art]) else []
+        mit = subprocess.run(kontext + schalter, capture_output=True, text=True, env=env)
+        assert mit.returncode == 0, mit.stderr
+        assert json.loads(mit.stdout)["repo_konfiguration"] == [".claude/skills (nur im Arbeitsbaum, nicht im geprüften Commit)"]
+    finally:
+        shutil.rmtree(wurzel, ignore_errors=True)
+
+
 def test_temp_repo(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     echt = tmp_path / "echt"
@@ -1121,7 +1145,7 @@ def test_lauf_ok_und_aufruf(ev, capsys, monkeypatch):
     smoke, lauf = ev.aufrufe(smoke=True), ev.aufrufe(smoke=False)
     assert len(smoke) == 1 and len(lauf) == 1
     a = lauf[0]["args"]
-    assert a[0] == "-p" and a[1] == "Nutze den Skill security-audit-eval auf diesem Repo."
+    assert a[0] == "-p" and a[1] == "Nutze den Skill security-audit-eval auf diesem Repo mit dem Schalter repo-konfig-geprueft."
     assert smoke[0]["args"][:2] == ["-p", "Antworte nur mit ok."]
 
     def wert(args, opt):
@@ -1166,7 +1190,7 @@ def test_lauf_slash_prompt_und_kindumgebung(ev, monkeypatch):
     ev.modus("bericht")
     assert run_eval.main(["--fixture", "fixture-web"]) == 0
     lauf = ev.aufrufe(smoke=False)[0]
-    assert lauf["args"][1] == "/security-audit-eval"
+    assert lauf["args"][1] == "/security-audit-eval repo-konfig-geprueft"
     for k in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_EFFORT"):
         assert k not in lauf["env"]
 
