@@ -15,7 +15,7 @@ Der aktuelle Stand des Repos umfasst zehn produktiv nutzbare Skills, den F&E-Ski
 | `viral-post-wizard` | Erstellt LinkedIn-Posts im Stil von Nikolaus Schausberger auf Basis fester Schreibregeln | `viral-post-wizard/SKILL.md`, `viral-post-wizard/references/*` |
 | `pr-review-loop` | Reviewer-Thread: startet ohne Fixer-Namen sofort je PR einen eigenen Fixer, prueft Runde 1 mit 1–3 Opus-Reviewern je nach PR-Art (Doku/Ops 1, Code klein 1, Code 2, Code mit Risiko 3 inkl. Tests-Fokus; PRs aus `auto-feature` eine Stufe flacher, ohne Tests-Fokus), Fixer auf Sonnet/high, eigene Test-DB je mutierendem Reviewer, reproduziert Befunde, liefert P1/P2/P3-Liste an den Fixer-Thread, re-reviewt nur das Delta mit einem `sonnet-high` (kleine, Doku- und P3-Deltas selbst, Merges nur per `--remerge-diff`), zweiter P2 an derselben Heuristik geht als Entscheidung an den User, Runde 3+ nur nach P1/P2, ohne `runden=<n>` bis sauber oder Stillstand; Agent-Statistik unter `~/.claude/agent-stats/` inkl. Thread-Tokens per Skript; aendert nie Code, merged nie | `pr-review-loop/SKILL.md` |
 | `fix-findings` | Fixer-Thread (Effort high, von `pr-review-loop` mit Sonnet gestartet): prueft eingefuegte Review-Befunde, setzt angenommene per Test → Fix → Commit um, vor dem Push nur Typecheck und abhaengige Tests (ganze Suite in der CI, ohne CI einmal vor dem Push), pusht, liefert Entscheidungstabelle; Merge/Deploy nur auf Befehlswort; nimmt auch die Befundliste aus `security-audit` ohne PR an (eigener Worktree vom geprueften SHA, Push des Branches ausser bei oeffentlichen Repos, PR-Link, kein PR) | `fix-findings/SKILL.md` |
-| `auto-feature` | Autonomer Feature-Workflow aus einem Feature-File ohne Zwischenhalt: Spec (Opus 5.5) → Opus-Review max. 2 → Plan (Opus 5.5) → Opus-Review max. 2 → Sonnet-5.5-Umsetzung → Haertung → PRs → harter Stopp (HITL); Stand-Datei je Lauf, damit eine fruehe Kompaktierung der Hauptsession nichts verliert, kurze Subagent-Berichte; Effort xhigh, nur Re-Reviews, lesende Refactor-/UI-Reviews und mechanische Tasks mit `sonnet-high`; ganze Suite einmal je TF; Agent-Statistik Pflicht (Format gilt fuer alle Skills, Skript `scripts/agent-stats.py` fuer Eintrag (einmal je TF per `import` aus den Subagent-Transkripten, Urteile per `bewerte`), Auswertung (auch je Skill-Stand), Thread-Tokens aus Transkripten und den Stempel `Skills: generalskills@<sha>` im Kopf jeder Statistik); kein PR-Review-Loop, kein Merge; Format des Feature-Files mit DoD-IDs und Nachweis-Art in `references/feature-file.md`; Retro am Laufende (auch in `pr-review-loop` und `fix-findings`) legt Fehlerklassen-Kandidaten zur Freigabe ab, Rezept `references/retro.md`, Ablage per `scripts/fehlerklassen.py` | `auto-feature/SKILL.md`, `auto-feature/references/feature-file.md`, `auto-feature/references/retro.md`, `auto-feature/scripts/agent-stats.py`, `auto-feature/scripts/fehlerklassen.py` |
+| `auto-feature` | Autonomer Feature-Workflow aus einem Feature-File ohne Zwischenhalt: Spec (Opus 5.5) → Opus-Review max. 2 → Plan (Opus 5.5) → Opus-Review max. 2 → Sonnet-5.5-Umsetzung → Haertung → PRs → harter Stopp (HITL); Stand-Datei je Lauf, damit eine fruehe Kompaktierung der Hauptsession nichts verliert, kurze Subagent-Berichte; Effort xhigh, nur Re-Reviews, lesende Refactor-/UI-Reviews und mechanische Tasks mit `sonnet-high`; ganze Suite einmal je TF; Agent-Statistik Pflicht (Format gilt fuer alle Skills, Skript `scripts/agent-stats.py` fuer Eintrag (einmal je TF per `import` aus den Subagent-Transkripten, Urteile per `bewerte`), Auswertung (auch je Skill-Stand), Thread-Tokens aus Transkripten und den Stempel `Skills: generalskills@<sha>` im Kopf jeder Statistik); kein PR-Review-Loop, kein Merge; Format des Feature-Files mit DoD-IDs und Nachweis-Art in `references/feature-file.md` | `auto-feature/SKILL.md`, `auto-feature/references/feature-file.md`, `auto-feature/scripts/agent-stats.py` |
 | `feature-file` | Macht aus Kundenwunsch, Call-Notiz oder Idee ein Feature-File fuer `auto-feature`: Ist-Stand im Code zuerst, Interview nur fuer Entscheidungen von User oder Kunde, Recherche nur als Default mit Quelle, Builder-Check durch einen frischen `opus-xhigh`, Freigabe-Zeile erst nach OK | `feature-file/SKILL.md` |
 | `security-audit` | Auditiert ganze Node/TS-Repos auf ausnutzbare Luecken: Karte der Angriffsflaeche, bis zu 6 Opus-Reviewer, 2 Pruefer, die jeden P1/P2 widerlegen oder per Docker-PoC im internen Netz belegen; dazu Abhaengigkeiten (osv-scanner, CISA KEV, Erreichbarkeit im Code), Lieferkette (Lockfile, `npm install` statt `npm ci`, offene Install-Skripte) und Secrets in der Git-Historie (gitleaks, Arbeitskopie vor dem Lesen geschwaerzt, Werte nie im Bericht); KI- und Agenten-Apps: Erkennung ueber `package.json` (`ki.py`), eigene Pruefpunkte K1 bis K7 (fremde Inhalte steuern Agenten, Tools mit Wirkung, Modellausgabe in Senken, Geheimnisse im Prompt), belegt per Modell-Mock im internen Docker-Netz, nie gegen eine echte Modell-API; Bericht ausserhalb des Repos unter `~/.claude/security-reviews/<repo>/`, Befundliste fuer `/fix-findings` (Eingang ohne PR ab TF5); dazu ein Kundenbericht (Markdown und PDF, Sie-Form, Kundenstufen, Risiko und Massnahme je Befund, ohne Exploit-Details; Kopf mit dem Projektnamen aus `projekt=`); aendert das Repo nie | `security-audit/SKILL.md`, `security-audit/references/*`, `security-audit/scripts/bericht.py`, `security-audit/scripts/poc.py`, `security-audit/scripts/netzregel.py`, `security-audit/scripts/gitkopie.py`, `security-audit/scripts/lieferkette.py`, `security-audit/scripts/ki.py`, `security-audit/scripts/kundenbericht.py`, `security-audit/scripts/kundenbericht.html5`, `security-audit/docker/llm-mock.mjs`, `security-audit/evals/run_eval.py` |
 | `architektur-rat` | **Forschung und Entwicklung, in keinen Workflow eingebunden, nur auf ausdruecklichen Wunsch.** Zwei unabhaengige `sonnet-high`-Voten (Pragmatiker, Risiko) zu einer offenen, schwer umkehrbaren Code-/Betriebsentscheidung; Hauptsession entscheidet und dokumentiert beide Voten. Test 2026-11-09: keine bessere Entscheidung als ohne Rat, ~360k Sonnet-Input-Aequivalent je Runde; nicht nach `~/.claude/skills/` verlinkt, fuer einen Versuch `ln -sfn ~/Projects/skillz/nikskills/architektur-rat ~/.claude/skills/architektur-rat` | `architektur-rat/SKILL.md` |
@@ -63,12 +63,9 @@ nikskills/
     SKILL.md
     references/
       feature-file.md
-      retro.md
     scripts/
       agent-stats.py
       test_agent_stats.py
-      fehlerklassen.py
-      test_fehlerklassen.py
   feature-file/
     SKILL.md
   security-audit/
@@ -298,17 +295,18 @@ Themen in postfaehige Fassungen ausgelegt.
 
 ## Coding-Workflow-Skills (Claude Code)
 
-`pr-review-loop`, `fix-findings`, `auto-feature`, `feature-file` und `security-audit` sind globale Claude-Code-Skills.
+`pr-review-loop`, `fix-findings`, `auto-feature` und `feature-file` sind globale Claude-Code-Skills.
 Sie werden per Symlink eingebunden:
 
 ```bash
-for s in pr-review-loop fix-findings auto-feature feature-file security-audit; do ln -sfn ~/Projects/skillz/nikskills/$s ~/.claude/skills/$s; done
+for s in pr-review-loop fix-findings auto-feature feature-file; do ln -sfn ~/Projects/skillz/nikskills/$s ~/.claude/skills/$s; done
 for a in opus-xhigh sonnet-xhigh sonnet-high; do ln -sfn ~/Projects/skillz/nikskills/agents/$a.md ~/.claude/agents/$a.md; done
 ```
 
 `pr-review-loop`, `auto-feature` und `feature-file` setzen `effort: xhigh` im Frontmatter, `auto-feature` und `feature-file` zusaetzlich `model: opus`; `fix-findings` setzt `effort: high`.
 Die Subagenten bekommen Effort ueber die Agent-Typen `opus-xhigh`/`sonnet-xhigh`/`sonnet-high`; fehlen sie,
 weichen die Skills auf `general-purpose` mit explizitem `model` aus und melden „Effort nicht garantiert“.
+`security-audit` wird **nicht global verlinkt**. Er läuft nur auf ausdrücklichen Bedarf und nie im agentischen Workflow (`auto-feature`, `pr-review-loop`, `fix-findings`). Für ein Audit verlinkst du ihn vorübergehend mit `ln -sfn ~/Projects/skillz/nikskills/security-audit ~/.claude/skills/security-audit` Erst wenn auch die Befundliste per `/fix-findings` abgearbeitet ist, entfernst du ihn wieder mit `unlink ~/.claude/skills/security-audit`, denn `fix-findings` liest auf dem Audit-Weg `scripts/bericht.py` über diesen Link.
 `security-audit` nutzt `opus-xhigh` fuer Reviewer und Pruefer, sonst `general-purpose` mit `model: opus` und „Effort nicht garantiert“.
 
 `security-audit` (nur pruefen, aendert das Repo nie): Kundenrepos frisch klonen. Enthaelt das Repo eigene
@@ -383,3 +381,4 @@ insbesondere Pfade und Ausgabehandling anpassen.
 
 - `SKILL.md` ist jeweils die kanonische Quelle fuer Trigger und Workflow.
 - Support-Dateien in `references/` und Scripts muessen zur `SKILL.md` passen.
+- **Keine Retro-Regeln.** Die Retro, die aus Review-Befunden Fehlerklassen-Kandidaten für neue Prüfpunkte ableitete, ist seit 2026-11-12 abgeschaltet. Ihr Material waren Fehler, die Reviews und Härtung schon gefangen hatten. Mehr Regeln in den Skills kosten in jedem Lauf Aufmerksamkeit und Tokens, ohne nachweisbar zu helfen. Gelernt wird nur noch aus Ausreißern, also Produktionsbugs und Kundenrückmeldungen, die auf einen Fehler zurückgehen. Daraus folgt bevorzugt eine deterministische Prüfung im betroffenen Repo (Regressionstest, Lint-Regel, CI-Schritt), keine neue Prosa-Regel im Skill. Die bisherigen Kandidaten liegen als Archiv in `~/.claude/fehlerklassen/kandidaten.md`.

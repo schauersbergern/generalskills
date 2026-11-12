@@ -196,14 +196,6 @@ Sobald alle PRs stehen bzw. alle TFs abgeschlossen oder übersprungen sind, **st
 - **Phase G entfällt:** kein PR-Review-Loop, kein `/code-review`, kein `/pr-review-loop`. Den PR-Review stößt der User selbst an, nachdem der Lauf geprüft ist.
 - **Nicht mergen, nicht deployen, keine Server-Aktionen.**
 
-**Retro** vor dem Abschlussbericht, einmal je Lauf über alle TFs, nach `~/.claude/skills/auto-feature/references/retro.md`. Material sind:
-- Blocker und Wichtige aus Task-Reviews und Re-Reviews
-- Mutationsproben, bei denen kein Test rot wurde
-- Lücken, die die Härtung gefunden hat
-- Design-Pässe
-
-„Klein“ zählt nach der P3-Regel in `retro.md`.
-
 Der **Abschlussbericht** ist die Grundlage für die Prüfung durch den User. Er macht den Reasoning-Weg nachvollziehbar, je TF:
 - **PR:** Link, Basis, Merge-Reihenfolge, Status (offen, übersprungen, kein PR wegen roter Tests)
 - **Entscheidungen und Annahmen:** jede mit Begründung, besonders jeder Default anstelle einer offenen Frage
@@ -214,7 +206,6 @@ Der **Abschlussbericht** ist die Grundlage für die Prüfung durch den User. Er 
 - **Offene Fragen und Entscheidungen** für den User, inklusive Abweichungen von repo-eigenen Workflow-Dokumenten und „Effort nicht garantiert“, falls zutreffend
 - **Nötige Ops-Schritte:** Migrationen, Env, Resync
 - **Agent-Statistik:** Pfad und die Auswertung je Rolle
-- **Retro:** der Abschnitt aus `retro.md`, „Bericht“
 
 Letzte Zeile: „Stopp. Bitte prüfen; danach `/pr-review-loop <PR>` je PR.“
 
