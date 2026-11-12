@@ -26,7 +26,7 @@
       "mandantenuebergreifend": false,
       "zusammenfassung": "Beschäftigte eines Kunden können Projekte anderer Kunden einsehen. Das gefährdet vertrauliche Geschäftsdaten und kann das Vertrauen Ihrer Kunden beschädigen.",
       "massnahme": "Wir empfehlen, jede Abfrage an den angemeldeten Kunden zu binden und Zugriffe auf fremde Daten abzuweisen.",
-      "poc": "python3 /skill/scripts/poc.py anfrage --lauf 0a1b2c3d --rolle p1 --pfad /api/projects/2"
+      "poc": "python3 /skill/security-audit/scripts/poc.py anfrage --lauf 0a1b2c3d --rolle p1 --pfad /api/projects/2"
     },
     {
       "id": "S-2",
@@ -44,7 +44,7 @@
       "mandantenuebergreifend": false,
       "zusammenfassung": "Über die Suche lassen sich Abfragen so verändern, dass Daten ausgegeben werden, die nicht für die Anfragenden bestimmt sind. Das kann zu einem Abfluss vertraulicher Informationen führen.",
       "massnahme": "Aktualisieren Sie die Suche so, dass Eingaben der Nutzer nie als Teil einer Datenbankabfrage gelten.",
-      "poc": "python3 /skill/scripts/poc.py anfrage --lauf 0a1b2c3d --rolle p1 --pfad /search?q=x"
+      "poc": "python3 /skill/security-audit/scripts/poc.py anfrage --lauf 0a1b2c3d --rolle p1 --pfad /search?q=x"
     },
     {
       "id": "S-3",
@@ -83,7 +83,7 @@
       "mandantenuebergreifend": false,
       "zusammenfassung": "Eingehende Meldungen anderer Systeme werden angenommen, ohne ihre Herkunft zu prüfen. Dadurch könnten Fremde falsche Ereignisse in Ihrer Anwendung auslösen.",
       "massnahme": "Lassen Sie eingehende Meldungen nur nach erfolgreicher Prüfung ihrer Herkunft verarbeiten.",
-      "poc": "python3 /skill/scripts/poc.py anfrage --lauf 0a1b2c3d --rolle p1 --pfad /webhook"
+      "poc": "python3 /skill/security-audit/scripts/poc.py anfrage --lauf 0a1b2c3d --rolle p1 --pfad /webhook"
     },
     {
       "id": "S-5",
@@ -101,7 +101,7 @@
       "mandantenuebergreifend": false,
       "zusammenfassung": "Der Server kann dazu gebracht werden, interne Systeme abzurufen und deren Antworten weiterzugeben. Dadurch könnten interne Informationen nach außen gelangen.",
       "massnahme": "Wir empfehlen, nur vorab freigegebene Ziele zuzulassen und Zugriffe auf interne Adressen zu sperren.",
-      "poc": "python3 /skill/scripts/poc.py anfrage --lauf 0a1b2c3d --rolle p1 --pfad /preview?url=http://127.0.0.1/"
+      "poc": "python3 /skill/security-audit/scripts/poc.py anfrage --lauf 0a1b2c3d --rolle p1 --pfad /preview?url=http://127.0.0.1/"
     },
     {
       "id": "S-6",

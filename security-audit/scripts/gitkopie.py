@@ -203,9 +203,15 @@ class _Batch:
                                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=_umgebung())
         except OSError as e:
             raise GitFehler(f"git nicht startbar: {e}") from e
-        self.timer = threading.Timer(BATCH_TIMEOUT if rest is None else min(BATCH_TIMEOUT, rest), self.proc.kill)
+        self.zeitgeber_abgelaufen = False
+        self.timer = threading.Timer(BATCH_TIMEOUT if rest is None else min(BATCH_TIMEOUT, rest), self._zeit_abgelaufen)
         self.timer.daemon = True
         self.timer.start()
+
+    def _zeit_abgelaufen(self) -> None:
+        """Zeitgeber: merkt den Ablauf und beendet den eigenen cat-file-Prozess (wie bisher `proc.kill`)."""
+        self.zeitgeber_abgelaufen = True
+        self.proc.kill()
 
     def lies(self, sha: str) -> bytes | None:
         """Inhalt des Blobs oder None, wenn das Objekt fehlt (z. B. Partial Clone ohne Lazy Fetch). Ein Abbruch nach Ablauf
@@ -215,7 +221,7 @@ class _Batch:
         except ZeitbudgetFehler:
             raise
         except GitFehler as e:
-            if frist_erschoepft():
+            if frist_erschoepft() or self.zeitgeber_abgelaufen:      # Gesamtfrist oder eigener Zeitgeber (BATCH_TIMEOUT)
                 raise ZeitbudgetFehler(f"git cat-file --batch: Zeitbudget erschöpft ({e})") from e
             raise
 
@@ -556,6 +562,37 @@ def arbeitskopie(repo: str, ziel: str, rev: str = "HEAD") -> list[str]:
     return meldungen
 
 
+# ------------------------------------------------------------------------------------ Repo-Name
+
+def repo_bereinigen(name: str) -> str | None:
+    """Repo-Name auf [A-Za-z0-9._-] beschränken; leer oder nur Punkte → None."""
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-")[:100]
+    return None if not name or re.fullmatch(r"\.+", name) else name
+
+
+def repo_name(wurzel: str) -> str:
+    try:
+        url = git(wurzel, "config", "--get", "remote.origin.url").stdout.decode(errors="replace").strip()
+    except GitFehler:
+        url = ""
+    if url:
+        basis = re.split(r"[/:\\]", url.rstrip("/\\"))[-1]
+        if basis.endswith(".git"):
+            basis = basis[:-4]
+        name = repo_bereinigen(basis)
+        if name:
+            return name
+    ordner = wurzel
+    try:
+        gemeinsam = os.fsdecode(git(wurzel, "rev-parse", "--path-format=absolute", "--git-common-dir")
+                                .stdout).rstrip("\n")
+        if os.path.basename(gemeinsam) == ".git":
+            ordner = os.path.dirname(gemeinsam)
+    except GitFehler:
+        pass
+    return repo_bereinigen(os.path.basename(ordner)) or "repo"
+
+
 # ------------------------------------------------------------------------------------ Konfiguration
 
 def repo_konfiguration(repo: str, rev: str = "HEAD") -> list[str]:
@@ -577,6 +614,34 @@ def repo_konfiguration(repo: str, rev: str = "HEAD") -> list[str]:
         if treffer:
             gefunden.append(pfad)
     return sorted(gefunden)
+
+
+def arbeitsbaum_konfiguration(wurzel: str, versioniert: list[str]) -> list[str]:
+    """Claude-/MCP-Konfiguration im Arbeitsbaum der Repo-Wurzel, die nicht in `versioniert` steht (ungetrackt oder ignoriert,
+    z. B. `.claude/settings.local.json`): Claude Code lädt sie trotzdem. Nur `lstat` auf die Orte im Wurzelordner
+    (`.mcp.json`, `.claude/settings*.json`, `.claude/skills|agents|commands`), der Inhalt wird nie gelesen."""
+    bekannt = set(versioniert)
+    gefunden: list[str] = []
+
+    def vorhanden(rel: str) -> bool:
+        try:
+            os.lstat(os.path.join(wurzel, rel))
+            return True
+        except OSError:
+            return False
+
+    kandidaten = [".mcp.json"]
+    try:
+        kandidaten += [f".claude/{n}" for n in sorted(os.listdir(os.path.join(wurzel, ".claude")))
+                       if (n.startswith("settings") and n.endswith(".json")) or n in ("skills", "agents", "commands")]
+    except OSError:
+        pass
+    for rel in kandidaten:
+        if rel in bekannt or any(b.startswith(rel + "/") for b in bekannt):
+            continue
+        if vorhanden(rel):
+            gefunden.append(rel)
+    return gefunden
 
 
 # ------------------------------------------------------------------------------------ Hinweise

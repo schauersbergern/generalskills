@@ -46,7 +46,7 @@ Zusätzlich je Status:
 
 | Status | Pflicht | Hinweis |
 |---|---|---|
-| `bestätigt` | `poc` | Text: Request(s) und beobachtete Antwort. Nur die Hosts `app`, `db`, `llm`, `localhost`, `127.0.0.1`, `::1`, `0.0.0.0` (`llm` ist der Modell-Mock); ein fremder Host (auch URL-kodiert) lässt `rendern` scheitern. |
+| `bestätigt` | `poc` | Text: Request(s) und beobachtete Antwort. Nur die Hosts `app`, `db`, `llm`, `localhost`, `127.0.0.1`, `::1`, `0.0.0.0` (`llm` ist der Modell-Mock); ein fremder Host (auch URL-kodiert) lässt `rendern` scheitern. Tokens stehen als Platzhalter (`<TOKEN_A>`), nie als echter Seed-Wert. |
 | `unbestätigt` | `code_pfad` | Liste von mindestens 2 Einträgen `datei:zeile` von der Eingabe bis zur Senke; bei einem gekoppelten Werkzeugbefund (siehe „Werkzeugbefunde“) genügt 1 Eintrag |
 | `verworfen` | `grund` | eine Zeile mit Beleg (`datei:zeile`) |
 | `verdacht` | – | nicht in der Befundliste |
@@ -94,7 +94,7 @@ Befunde zu den Prüfpunkten K1 bis K7 (`references/pruefpunkte-ki.md`) tragen zu
 | Feld | Typ | Inhalt |
 |---|---|---|
 | `owasp_ki` | Liste von Text | 1 bis 3 verschiedene IDs aus `ASI01` bis `ASI10` oder `LLM01` bis `LLM10`; der Reviewer liefert sie, die Hauptsession übernimmt sie |
-| `annahme_modell` | Wahrheitswert | `true` nur mit `status: bestätigt`: Der Beleg beruht auf dem Modell-Mock unter der Annahme, dass das Modell der Anweisung folgt. Setzt die Hauptsession (Schritt 6 in `SKILL.md`), nie der Prüfer; bei einem anderen Status ein Schemafehler. Umgekehrt ist ein `bestätigt` mit `klasse` ab `K1 `, `K2 ` oder `K4 ` ohne `annahme_modell: true` ein Schemafehler |
+| `annahme_modell` | Wahrheitswert | `true` nur mit `status: bestätigt`: Der Beleg beruht auf dem Modell-Mock unter der Annahme, dass das Modell der Anweisung folgt. Setzt die Hauptsession (Schritt 6 in `SKILL.md`), nie der Prüfer; bei einem anderen Status oder einer `klasse` ohne `K1 `, `K2 ` oder `K4 ` ein Schemafehler. Umgekehrt ist ein `bestätigt` mit `klasse` ab `K1 `, `K2 ` oder `K4 ` ohne `annahme_modell: true` ein Schemafehler |
 
 - `kategorie` bleibt `A01` bis `A10` (die der Wurzel); die OWASP-KI-IDs stehen nur in `owasp_ki`. Die Befundliste im Codeblock bleibt unverändert.
 - `klasse` beginnt bei KI-Befunden mit der Prüfpunkt-Nummer und einem Leerzeichen (`K1 Tool mit Wirkung nach fremd befülltem Kontext`, einzeilig); die Hauptsession setzt `annahme_modell` nur bei `K1`, `K2` und `K4`.
@@ -177,7 +177,7 @@ Je Eintrag eine Zeile. Immer enthalten:
 - Werkzeugbefunde außerhalb des Teilpfads als „außerhalb des Teilpfads: <titel> (<datei>)“.
 - Docker-Kategorien und Hinweise aus `bauen`/`starten` (`docker-fehlt`, `lockfile-fehlt`, `lockfile-fremde-quelle`, `nicht-npm`, `native-module`, `prisma-engines`, `lockfile-ohne-paketliste`, `node-range-zu-lang`, `node-engines-ignoriert`, `build-fehler`, `build-timeout`, `start-fehler`) mit der Folge („keine PoCs, P1/P2 nur unbestätigt“).
 - „BuildKit-Cache kann Code-Layer des geprüften Repos enthalten (`docker builder prune`).“
-- **Grenzen:** „Grenzen: Die Netzregel erkennt Verstöße im Nachhinein, sie ist keine Sandbox; die echte Sperre ist die Rechtekonfiguration der Session. Ob `disallowed-tools` auf Subagenten durchschlägt, ist offen.“
+- **Grenzen:** „Grenzen: Die Netzregel erkennt Verstöße im Nachhinein, sie ist keine Sandbox; die echte Sperre ist die Rechtekonfiguration der Session. Ob `disallowed-tools` auf Subagenten durchschlägt, ist offen; das Frontmatter-Feld gilt womöglich nur bis zur nächsten User-Nachricht (Verdacht, nicht gemessen).“
 - Ausweichtyp `general-purpose`: „Effort nicht garantiert.“ Übernahme eines Subagenten-Auftrags durch die Hauptsession. Mit Schalter: „Repo-Konfiguration vom User geprüft: <Liste>.“ Anweisungsversuche im Repo (Regel 1), mit `datei:zeile`.
 
 ## Beispiel

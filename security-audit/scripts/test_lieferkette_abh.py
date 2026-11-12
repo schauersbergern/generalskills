@@ -1336,3 +1336,126 @@ def test_kev_treffer_ignoriert_gross_klein_und_leerraum():
 def test_advisory_listet_die_eigene_id_nicht_als_alias():
     a = lieferkette._advisory({"id": "GHSA-a", "aliases": ["GHSA-a", "CVE-1"], "summary": "s", "details": "d"})
     assert a["aliase"] == ["CVE-1"]
+
+
+def _sekunden_aufzeichnen(monkeypatch):
+    """`_sekunden` im Testprozess durch einen Aufzeichner ersetzen: Liste der (Name, Standard) der Aufrufstellen."""
+    aufrufe = []
+    echt = lieferkette._sekunden
+
+    def aufzeichner(name, standard):
+        aufrufe.append((name, standard))
+        return echt(name, standard)
+    monkeypatch.setattr(lieferkette, "_sekunden", aufzeichner)
+    return aufrufe
+
+
+def test_abhaengigkeiten_budget_laeuft_ueber_den_deckel_r1_4(umg, monkeypatch, capsys):
+    """Die Aufrufstelle in `cmd_abhaengigkeiten` nimmt `_sekunden` mit dem Standard 300 s (kein Rohwert der Variable)."""
+    umg.fake_osv()
+    monkeypatch.setattr(tempfile, "tempdir", str(umg.tmp))
+    monkeypatch.setenv("PATH", f"{umg.bin}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_OSV_LOG", str(umg.log))
+    monkeypatch.setenv("FAKE_OSV_CONFIG", str(umg.config))
+    monkeypatch.setenv("SECURITY_AUDIT_ABH_BUDGET", "1e9")
+    aufrufe = _sekunden_aufzeichnen(monkeypatch)
+    rc = lieferkette.main(["abhaengigkeiten", "--lauf", LAUF, "--quelle", umg.quelle()])
+    capsys.readouterr()
+    assert rc == 0 and aufrufe == [("SECURITY_AUDIT_ABH_BUDGET", 300)]
+
+
+def test_unbrauchbare_lockfile_pfade_werden_nicht_geprueft_und_gemeldet_r1_6(umg):
+    """Pfade mit Steuerzeichen oder über 300 Zeichen kämen nie als `lockfile` ins Befund-Schema: übersprungen mit Hinweis,
+    nicht gekappt."""
+    lang = "/".join(["verzeichnis-mit-langem-namen"] * 12)
+    umg.schreibe("a\x01b/package-lock.json", "{}")
+    umg.schreibe(f"{lang}/package-lock.json", "{}")
+    umg.schreibe("ok/package-lock.json", "{}")
+    umg.fake_osv({"rc": 0, "stdout": {"results": []}})
+    out = ausgabe(umg.abh())
+    hinweise = "\n".join(out["hinweise"])
+    assert "1 Lockfiles mit Steuerzeichen oder ungültigen Zeichen im Pfad übersprungen" in hinweise
+    assert "1 Lockfiles mit überlangem Pfad (über 300 Zeichen) übersprungen" in hinweise
+    assert "\x01" not in hinweise and lang not in hinweise
+    assert len(umg.aufrufe()) == 1                                                                  # nur ok/package-lock.json
+
+
+@pytest.mark.parametrize("ohne", ["", "gitleaks", "gitleaks,docker"])
+def test_osv_scanner_toml_im_repo_wird_von_abhaengigkeiten_gemeldet_r1_7(umg, ohne):
+    """Der Hinweis hängt nicht an `secrets` (das mit fehlendem gitleaks nichts meldet), sondern kommt von `abhaengigkeiten`."""
+    umg.schreibe("package-lock.json", "{}")
+    umg.schreibe("web/osv-scanner.toml", "[[IgnoredVulns]]\nid = 'X'\n")
+    umg.schreibe("node_modules/x/osv-scanner.toml", "")
+    umg.fake_osv({"rc": 0, "stdout": {"results": []}})
+    env = umg.env(SECURITY_AUDIT_OHNE=ohne) if ohne else umg.env()
+    out = ausgabe(umg.abh(env=env))
+    assert [h for h in out["hinweise"] if h.startswith("osv-scanner.toml im Repo vorhanden, beim Audit ignoriert")] == [
+        "osv-scanner.toml im Repo vorhanden, beim Audit ignoriert: web/osv-scanner.toml"]
+    assert not umg.aufrufe()[0]["toml_im_cwd"] and not umg.aufrufe()[0]["toml_beim_lockfile"]
+
+
+def test_ohne_osv_scanner_toml_kein_konfig_hinweis_r1_7(umg):
+    umg.schreibe("package-lock.json", "{}")
+    umg.fake_osv({"rc": 0, "stdout": {"results": []}})
+    assert not [h for h in ausgabe(umg.abh())["hinweise"] if "osv-scanner.toml" in h]
+
+
+# ------------------------------------------------------------------------------------ dev aus pnpm-Lockfiles < 9 (Review R1-8)
+
+PNPM_V6_DEV = ("lockfileVersion: '6.0'\n\npackages:\n\n"
+               "  /prod-pkg@1.0.0:\n    resolution: {integrity: x}\n    dev: false\n\n"
+               "  /dev-pkg@2.0.0:\n    resolution: {integrity: x}\n    dev: true\n\n"
+               "  /@scope/dev-scoped@3.0.0(peer@1.0.0):\n    resolution: {integrity: x}\n    dev: true\n\n"
+               "  /ohne-angabe@4.0.0:\n    resolution: {integrity: x}\n\n"
+               "  /gemischt@5.0.0:\n    resolution: {integrity: x}\n    dev: true\n\n"
+               "  /gemischt@5.0.0(peer@2.0.0):\n    resolution: {integrity: x}\n    dev: false\n\n"
+               "snapshots:\n\n  /x@1.0.0:\n    dev: true\n")
+PNPM_V5_DEV = ("lockfileVersion: 5.4\n\npackages:\n\n"
+               "  /prod-pkg/1.0.0:\n    resolution: {integrity: x}\n    dev: false\n\n"
+               "  /dev-pkg/2.0.0:\n    resolution: {integrity: x}\n    dev: true\n\n"
+               "  /@scope/dev-scoped/3.0.0_peer@1.0.0:\n    resolution: {integrity: x}\n    dev: true\n")
+
+
+def _pnpm_dev_ausgabe(umg, text, *pakete):
+    umg.schreibe("pnpm-lock.yaml", text)
+    umg.fake_osv({"rc": 1, "stdout": osv_ausgabe(*[(n, v, [vuln(n)]) for n, v in pakete])})
+    return je_paket(ausgabe(umg.abh()))
+
+
+def test_pnpm_lockfile_v6_liefert_dev_je_paket_r1_8(umg):
+    pakete = _pnpm_dev_ausgabe(umg, PNPM_V6_DEV, ("prod-pkg", "1.0.0"), ("dev-pkg", "2.0.0"), ("@scope/dev-scoped", "3.0.0"),
+                               ("ohne-angabe", "4.0.0"), ("gemischt", "5.0.0"))
+    dev = {k[0]: p["dev"] for k, p in pakete.items()}
+    assert dev == {"prod-pkg": False, "dev-pkg": True, "@scope/dev-scoped": True, "ohne-angabe": False, "gemischt": False}
+
+
+def test_pnpm_lockfile_v5_liefert_dev_je_paket_r1_8(umg):
+    pakete = _pnpm_dev_ausgabe(umg, PNPM_V5_DEV, ("prod-pkg", "1.0.0"), ("dev-pkg", "2.0.0"), ("@scope/dev-scoped", "3.0.0"))
+    assert {k[0]: p["dev"] for k, p in pakete.items()} == {"prod-pkg": False, "dev-pkg": True, "@scope/dev-scoped": True}
+
+
+def test_pnpm_lockfile_ab_format_9_traegt_keine_dev_angabe_r1_8(umg):
+    text = "lockfileVersion: '9.0'\n\npackages:\n\n  dev-pkg@2.0.0:\n    resolution: {integrity: x}\n    dev: true\n"
+    pakete = _pnpm_dev_ausgabe(umg, text, ("dev-pkg", "2.0.0"))
+    assert pakete[("dev-pkg", "2.0.0", "pnpm-lock.yaml")]["dev"] is False
+
+
+# ------------------------------------------------------------------------------------ überlebende Mutanten (Review R1-10 a, b)
+
+def test_behoben_in_nimmt_nur_bereiche_mit_der_installierten_version_wenn_es_solche_gibt_r1_10a():
+    """Überlappende Versionslinien: installiert 1.0.0 liegt nur in [0, 3.0.0); der Bereich [2.0.0, 2.5.0) darf nicht zählen."""
+    v = vuln("lib", bereiche=(("0", "3.0.0"), ("2.0.0", "2.5.0")))
+    assert lieferkette.behoben_in([v], "lib", "1.0.0") == "3.0.0"
+    v2 = vuln("lib", bereiche=(("2.0.0", "2.5.0"), ("0", "3.0.0")))
+    assert lieferkette.behoben_in([v2], "lib", "1.0.0") == "3.0.0"
+    assert lieferkette.behoben_in([v], "lib", "2.1.0") == "2.5.0"                  # in beiden: die kleinste Fix-Version
+
+
+def test_dev_gilt_nur_wenn_alle_vorkommen_dev_sind_unabhaengig_von_der_reihenfolge_r1_10b(umg):
+    """Dasselbe Paket in derselben Version einmal produktiv, einmal dev: `dev` ist false, egal welches Vorkommen zuerst steht."""
+    for name, pakete in (("prod-zuerst", (("node_modules/a", "1.0.0", False), ("node_modules/x/node_modules/a", "1.0.0", True))),
+                         ("dev-zuerst", (("node_modules/x/node_modules/a", "1.0.0", True), ("node_modules/a", "1.0.0", False)))):
+        text = npm_lock(*pakete)
+        assert lieferkette._npm_index(text).dev[("a", "1.0.0")] is False, name
+    assert lieferkette._npm_index(npm_lock(("node_modules/a", "1.0.0", True),
+                                           ("node_modules/x/node_modules/a", "1.0.0", True))).dev[("a", "1.0.0")] is True

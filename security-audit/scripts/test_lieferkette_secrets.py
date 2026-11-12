@@ -44,6 +44,12 @@ modus = args[0] if args else ""
 ziel = args[1] if len(args) > 1 else ""
 cfg = json.load(open(os.environ["FAKE_GL_CONFIG"]))
 verhalten = cfg.get(modus, {{}})
+frueher = 0
+if os.path.exists(os.environ["FAKE_GL_LOG"]):
+    frueher = sum(1 for z in open(os.environ["FAKE_GL_LOG"]) if z.strip() and json.loads(z)["modus"] == modus)
+if modus == "dir" and frueher > 0:                     # Prüfläufe nach der Schwärzung: `nach` je Lauf, danach findet er nichts mehr
+    nach = verhalten.get("nach", [])
+    verhalten = nach[frueher - 1] if frueher - 1 < len(nach) else {{}}
 
 
 def opt(name):
@@ -598,10 +604,10 @@ def test_repo_konfig_hinweise(umg):
     umg.fake_gitleaks(dir={"report": []}, git={"report": []})
     out = ausgabe(secrets(umg, v))
     text = "\n".join(out["hinweise"])
-    assert ".gitleaks.toml" in text and ".gitleaksignore" in text and "web/osv-scanner.toml" in text
+    assert ".gitleaks.toml" in text and ".gitleaksignore" in text and "osv-scanner.toml" not in text   # R1-7: meldet `abhaengigkeiten`
     assert "gitleaks:allow" in text and "src/b.js" in text
     assert all("ignoriert" in h for h in out["hinweise"] if ("Standardausnahmen" not in h) and (".toml" in h or "allow" in h))
-    for name in (".gitleaks.toml", ".gitleaksignore", "osv-scanner.toml"):
+    for name in (".gitleaks.toml", ".gitleaksignore"):
         assert any(h.startswith(f"{name} im Repo vorhanden, beim Audit ignoriert") for h in out["hinweise"]), name
     assert any(h.startswith("gitleaks:allow-Kommentare im Repo vorhanden, beim Audit ignoriert") for h in out["hinweise"])
     assert any(h.startswith("gitleaks-Standardausnahmen nicht geprüft:") and ".gitleaks.toml" in h for h in out["hinweise"])
@@ -619,8 +625,9 @@ def test_marker_gesetzt_und_vor_historie(umg):
     v = vorbereiten(umg, [MINI])
     umg.fake_gitleaks(dir={"report": [dir_treffer(JS_ZEILE.encode())]}, git={"report": []})
     ausgabe(secrets(umg, v))
-    dir_aufruf, git_aufruf = umg.aufrufe()
-    assert dir_aufruf["marker"] is False and git_aufruf["marker"] is True        # test_marker_vor_historie
+    dir_aufruf, pruef_aufruf, git_aufruf = umg.aufrufe()                         # dir, Prüflauf nach der Schwärzung, git
+    assert [a["modus"] for a in (dir_aufruf, pruef_aufruf, git_aufruf)] == ["dir", "dir", "git"]
+    assert dir_aufruf["marker"] is False and pruef_aufruf["marker"] is False and git_aufruf["marker"] is True  # test_marker_vor_historie
     assert os.path.isfile(umg.marker()) and not os.path.islink(umg.marker())
 
 
@@ -647,6 +654,11 @@ def test_marker_alt_wird_vor_dem_lauf_entfernt(umg):
     {"roh": '{"kein": "array"}'},
     {"kein_report": True},
     {"report": [{"RuleID": "x", "File": "{ziel}/src/a.js", "StartLine": "eins", "EndLine": 1, "StartColumn": 1, "EndColumn": 2}]},
+    {"report": [treffer(datei="{ziel}/src/a.js", zeile=99, von=1, bis=5)]},                  # Zeile hinter dem Dateiende (R1-3)
+    {"report": [treffer(datei="{ziel}/src/a.js", zeile=0, von=1, bis=5)]},
+    {"report": [treffer(datei="")]},                                                           # leerer Dateipfad
+    {"report": [{k: w for k, w in treffer().items() if k != "File"}]},                         # kein Dateipfad
+    {"report": [treffer(datei="{ziel}/a\0b.js")]},                                             # NUL im Pfad
 ])
 def test_schwaerzung_scheitert_exit4_ohne_marker(umg, dir_verhalten):
     v = vorbereiten(umg, [MINI])
@@ -788,7 +800,9 @@ def test_secrets_verwirft_ungueltige_commits_und_dateinamen(umg):
     umg.fake_gitleaks(dir={"report": []}, git={"report": [
         treffer(commit="nicht-hex"), treffer(commit=v.shas[0], datei="src/‮gpj.js"), treffer(commit=v.shas[0], datei="")]})
     out = ausgabe(secrets(umg, v))
-    assert [x["datei"] for x in out["befunde_roh"]] == ["src/\\u202egpj.js"]     # Bidi-Zeichen escaped, Ungültiges verworfen
+    assert out["befunde_roh"] == []                                             # Bidi-Pfad und Ungültiges: nicht ausgegeben
+    assert any("1 Secret-Fundstellen der Historie mit unbrauchbarem Dateipfad" in h for h in out["hinweise"])   # R1-6: Hinweis
+    assert any("2 Fundstellen der Historie mit ungültiger Regel, Datei oder Commit-SHA verworfen" in h for h in out["hinweise"])
 
 
 def test_secrets_in_head_env_datei(umg):
@@ -1207,13 +1221,13 @@ def test_konfig_suche_bricht_ab_findet_aber_jede_gitleaksignore_m_b(tmp_path, mo
     `.gitleaksignore`, die danach entfernt werden muss) werden weiter gesammelt."""
     schreibe(str(tmp_path), "a/.gitleaksignore", "x\n")
     schreibe(str(tmp_path), "z/tief/.gitleaksignore", "y\n")
-    schreibe(str(tmp_path), "b/osv-scanner.toml", "")
+    schreibe(str(tmp_path), "b/.gitleaks.toml", "")
     schreibe(str(tmp_path), "c/code.js", "// gitleaks:allow\n")
     monkeypatch.setattr(lieferkette, "KONFIG_SUCHE_BUDGET", -1)
     hinweise, ignore = lieferkette._repo_konfiguration(str(tmp_path))
     assert "Suche nach gitleaks:allow abgebrochen (Zeitbudget)" in hinweise
     assert sorted(os.path.relpath(p, tmp_path) for p in ignore) == ["a/.gitleaksignore", "z/tief/.gitleaksignore"]
-    assert any(h.startswith("osv-scanner.toml im Repo vorhanden") for h in hinweise)
+    assert any(h.startswith(".gitleaks.toml im Repo vorhanden") for h in hinweise)
     assert not any(h.startswith("gitleaks:allow-Kommentare") for h in hinweise)
 
 
@@ -1516,3 +1530,335 @@ def test_lese_report_verweigert_zu_grosse_berichte(tmp_path, monkeypatch):
     monkeypatch.setattr(lieferkette, "REPORT_MAX", 20)
     with pytest.raises(lieferkette.ReportFehler, match="zu groß"):
         lieferkette._lese_report(str(pfad))
+
+
+# ------------------------------------------------------------------------------------ lange Zeilen (Review R1-1)
+
+LANGE_ZEILE = b"var a=1;" * 20000                                                # 160 KB: gitleaks 8.30 meldet dahinter falsche Spalten
+
+
+def _lang_lauf(umg, inhalt):
+    v = vorbereiten(umg, [{"dist/bundle.min.js": inhalt, "package.json": "{}"}])
+    return secrets(umg, v), v
+
+
+@echt
+@pytest.mark.parametrize("variante", ["github-pat", "base64"])
+def test_schwaerzung_echt_lange_zeile_laesst_keinen_wert_stehen_r1_1(umg, variante):
+    pat = "ghp_" + geheimnis(20261111, 36)
+    if variante == "github-pat":
+        geheim = pat.encode()
+        inhalt = LANGE_ZEILE + b'var t="' + geheim + b'";\n'
+    else:
+        geheim = base64.b64encode(f'password = "{WERT}"'.encode())
+        inhalt = LANGE_ZEILE + b"var d='" + geheim + b"';\n"
+    r, v = _lang_lauf(umg, inhalt)
+    neu = lesen(os.path.join(v.quelle, "dist/bundle.min.js"))
+    assert geheim not in neu and WERT.encode() not in neu, "Secret-Wert steht nach der Schwärzung noch in der Arbeitskopie"
+    assert len(neu) == len(inhalt) and neu.count(b"\n") == 1
+    assert r.returncode in (0, 4), r.stdout + r.stderr
+    assert (r.returncode == 0) == os.path.isfile(umg.marker())                      # Marker nur bei geschwärzter Kopie
+    assert geheim.decode() not in r.stdout + r.stderr
+
+
+def _lang_treffer(inhalt, datei="src/a.js", zeile=1):
+    """Fundstelle mit unbrauchbaren Spalten (wie gitleaks bei langen Zeilen): Zeile stimmt, Spalten zeigen daneben."""
+    return treffer(datei="{ziel}/" + datei, zeile=zeile, von=3, bis=9, match="REDACTED", regel="github-pat")
+
+
+def test_nachpruefung_schwaerzt_restfunde_zeilenweise_und_prueft_erneut_r1_1(umg):
+    langer_wert = "ghp_" + geheimnis(7, 36)
+    inhalt = f'var a=1;var t="{langer_wert}";\nvar b=2;\n'
+    v = vorbereiten(umg, [{"src/a.js": inhalt, "package.json": "{}"}])
+    t = _lang_treffer(inhalt)
+    umg.fake_gitleaks(dir={"report": [t]}, git={"report": []})
+    cfg = json.loads(umg.config_datei.read_text())
+    cfg["dir"]["nach"] = [{"report": [t]}, {"report": []}]                        # Prüflauf 1 findet den Rest, Prüflauf 2 nicht
+    umg.config_datei.write_text(json.dumps(cfg))
+    out = ausgabe(secrets(umg, v))
+    neu = lesen(os.path.join(v.quelle, "src/a.js"))
+    assert langer_wert.encode() not in neu and neu.endswith(b"\nvar b=2;\n")        # Zeile 1 ganz, Zeile 2 unverändert
+    assert neu.split(b"\n")[0] == b"*" * len(inhalt.split("\n")[0])
+    assert "Schwärzung unscharf: src/a.js:1 (ganze Zeile)" in out["hinweise"]
+    assert [a["modus"] for a in umg.aufrufe()] == ["dir", "dir", "dir", "git"]
+    assert os.path.isfile(umg.marker())
+    assert langer_wert not in json.dumps(out)
+
+
+def test_nachpruefung_mit_bleibendem_restfund_ist_exit4_ohne_marker_r1_1(umg):
+    inhalt = 'var a=1;var t="geheim-geheim-geheim";\n'
+    v = vorbereiten(umg, [{"src/a.js": inhalt, "package.json": "{}"}])
+    t = _lang_treffer(inhalt)
+    umg.fake_gitleaks(dir={"report": [t], "nach": [{"report": [t]}, {"report": [t]}]}, git={"report": [treffer(commit=v.shas[0])]})
+    r = secrets(umg, v)
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "nicht geschwärzt" in r.stdout + r.stderr and "kategorie: schwaerzung-fehlgeschlagen" in r.stdout.splitlines()
+    assert not os.path.lexists(umg.marker())
+    assert [a["modus"] for a in umg.aufrufe()] == ["dir", "dir", "dir"]            # keine Historie
+    assert lieferkette_inhalt(umg) == []
+    for sentinel in SENTINELS:
+        assert sentinel not in r.stdout and sentinel not in r.stderr
+
+
+def test_nachpruefung_laeuft_nur_nach_einer_schwaerzung_r1_1(umg):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    ausgabe(secrets(umg, v))
+    assert [a["modus"] for a in umg.aufrufe()] == ["dir", "git"]
+
+
+def test_nachpruefung_ignoriert_funde_ausserhalb_der_arbeitskopie_r1_1(umg, tmp_path):
+    v = vorbereiten(umg, [MINI])
+    aussen = tmp_path / "aussen.js"
+    aussen.write_bytes(JS_ZEILE.encode())
+    t_innen = dir_treffer(JS_ZEILE.encode())
+    t_aussen = dir_treffer(JS_ZEILE.encode(), datei="a.js") | {"File": str(aussen)}
+    umg.fake_gitleaks(dir={"report": [t_innen], "nach": [{"report": [t_aussen]}]}, git={"report": []})
+    ausgabe(secrets(umg, v))
+    assert aussen.read_bytes() == JS_ZEILE.encode()
+    assert os.path.isfile(umg.marker())
+
+
+# ------------------------------------------------------------------------------------ Standardausnahmen gegen die Quelle (Review R1-2)
+
+# Die `paths` der Standard-Allowlist aus config/gitleaks.toml von gitleaks 8.30.1, wörtlich, je Regex ein Beispielpfad, den sie
+# erfasst. Weicht die eingebettete Config des installierten gitleaks ab, scheitert der Test: Liste und `STANDARD_AUSNAHMEN` prüfen.
+GITLEAKS_STANDARD_PFADE = (
+    ("gitleaks\\.toml", "gitleaks.toml"),
+    ("(?i)\\.(?:bmp|gif|jpe?g|png|svg|tiff?)$", "x.png"),
+    ("(?i)\\.(?:eot|[ot]tf|woff2?)$", "x.woff2"),
+    ("(?i)\\.(?:docx?|xlsx?|pdf|bin|socket|vsidx|v2|suo|wsuo|.dll|pdb|exe|gltf)$", "x.docx"),
+    ("go\\.(?:mod|sum|work(?:\\.sum)?)$", "go.mod"),
+    ("(?:^|/)vendor/modules\\.txt$", "vendor/modules.txt"),
+    ("(?:^|/)vendor/(?:github\\.com|golang\\.org/x|google\\.golang\\.org|gopkg\\.in|istio\\.io|k8s\\.io|sigs\\.k8s\\.io)(?:/.*)?$",
+     "vendor/github.com/a/b.go"),
+    ("(?:^|/)gradlew(?:\\.bat)?$", "gradlew"),
+    ("(?:^|/)gradle\\.lockfile$", "gradle.lockfile"),
+    ("(?:^|/)mvnw(?:\\.cmd)?$", "mvnw"),
+    ("(?:^|/)\\.mvn/wrapper/MavenWrapperDownloader\\.java$", ".mvn/wrapper/MavenWrapperDownloader.java"),
+    ("(?:^|/)node_modules(?:/.*)?$", "node_modules/x/a.js"),
+    ("(?:^|/)(?:deno\\.lock|npm-shrinkwrap\\.json|package-lock\\.json|pnpm-lock\\.yaml|yarn\\.lock)$", "package-lock.json"),
+    ("(?:^|/)bower_components(?:/.*)?$", "bower_components/a/b.js"),
+    ("(?:^|/)(?:angular|bootstrap|jquery(?:-?ui)?|plotly|swagger-?ui)[a-zA-Z0-9.-]*(?:\\.min)?\\.js(?:\\.map)?$",
+     "static/jquery-3.6.0.min.js"),
+    ("(?:^|/)javascript\\.json$", "static/javascript.json"),
+    ("(?:^|/)(?:Pipfile|poetry)\\.lock$", "poetry.lock"),
+    ("(?i)(?:^|/)(?:v?env|virtualenv)/lib(?:64)?(?:/.*)?$", "venv/lib/python3.11/site-packages/a.py"),
+    ("(?i)(?:^|/)(?:lib(?:64)?/python[23](?:\\.\\d{1,2})+|python/[23](?:\\.\\d{1,2})+/lib(?:64)?)(?:/.*)?$",
+     "lib/python3.11/site-packages/a.py"),
+    ("(?i)(?:^|/)[a-z0-9_.]+-[0-9.]+\\.dist-info(?:/.+)?$", "foo-1.0.dist-info/METADATA"),
+    ("(?:^|/)vendor/(?:bundle|ruby)(?:/.*?)?$", "vendor/bundle/a.rb"),
+    ("\\.gem$", "a.gem"),
+    ("verification-metadata\\.xml", "verification-metadata.xml"),
+    ("Database.refactorlog", "Database.refactorlog"),
+    ("(?:^|/)\\.git$", ".git"),
+)
+
+
+def _eingebettete_standard_pfade():
+    """Die `paths` der Standard-Allowlist aus der Config, die im gitleaks-Binary steckt (None, wenn nicht auffindbar)."""
+    with open(GITLEAKS, "rb") as f:
+        daten = f.read()
+    kopf = daten.find(b'description = "global allow lists"\npaths = [\n')
+    if kopf < 0:
+        return None
+    pfade = []
+    for zeile in daten[kopf:].split(b"\n")[2:]:
+        zeile = zeile.strip()
+        if not (zeile.startswith(b"'''") and zeile.endswith(b"''',")):
+            break
+        pfade.append(zeile[3:-4].decode())
+    return pfade
+
+
+@echt
+def test_standard_ausnahmen_decken_die_eingebettete_gitleaks_allowlist_ab_r1_2(umg, tmp_path):
+    """Jede Pfad-Regex der Standard-Allowlist von gitleaks hat einen Beispielpfad, den gitleaks tatsächlich überspringt und den
+    `_standard_ausnahme` einer Klasse zuordnet: eine unvollständige Liste (venv, site-packages, dist-info, …) fällt auf."""
+    eingebettet = _eingebettete_standard_pfade()
+    assert eingebettet is not None, "Allowlist im gitleaks-Binary nicht auffindbar: Format geändert, Test anpassen"
+    assert eingebettet == [r for r, _ in GITLEAKS_STANDARD_PFADE], \
+        "gitleaks hat eine andere Standard-Allowlist als 8.30.1: GITLEAKS_STANDARD_PFADE und STANDARD_AUSNAHMEN prüfen"
+    pfade = [p for _, p in GITLEAKS_STANDARD_PFADE]
+    wurzel = tmp_path / "ausn"
+    (tmp_path / "leer").mkdir()
+    for i, pfad in enumerate(pfade):
+        schreibe(str(wurzel / f"d{i}"), pfad, JS_ZEILE)
+    config = tmp_path / "cfg.toml"
+    config.write_text(lieferkette.GITLEAKS_TOML)
+    bericht = tmp_path / "bericht.json"
+    r = subprocess.run([GITLEAKS, "dir", str(wurzel), "--config", str(config), "--report-format", "json", "--report-path",
+                        str(bericht), "--exit-code", "0", "--no-banner", "--no-color", "--redact"],
+                       cwd=tmp_path / "leer", env=umg.env(), capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr
+    gefunden = {os.path.relpath(t["File"], wurzel).split(os.sep, 1)[1] for t in json.loads(bericht.read_text())}
+    for pfad in pfade:
+        assert pfad not in gefunden, f"gitleaks prüft {pfad} doch"
+        assert lieferkette._standard_ausnahme(pfad) is not None, f"{pfad}: keine Klasse in STANDARD_AUSNAHMEN"
+
+
+def test_standard_ausnahmen_hinweis_nennt_python_umgebungen_r1_2(umg):
+    v = vorbereiten(umg, [dict(MINI, **{"venv/lib/python3.11/site-packages/a.py": "x = 1\n",
+                                        "foo-1.0.dist-info/METADATA": "Name: foo\n"})])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    out = ausgabe(secrets(umg, v))
+    hinweis = next(h for h in out["hinweise"] if h.startswith("gitleaks-Standardausnahmen nicht geprüft"))
+    assert "venv/lib/python3.11/site-packages/a.py" in hinweis and "foo-1.0.dist-info/METADATA" in hinweis
+
+
+def _sekunden_aufzeichnen(monkeypatch):
+    """`_sekunden` im Testprozess durch einen Aufzeichner ersetzen: Liste der (Name, Standard) der Aufrufstellen."""
+    aufrufe = []
+    echt = lieferkette._sekunden
+
+    def aufzeichner(name, standard):
+        aufrufe.append((name, standard))
+        return echt(name, standard)
+    monkeypatch.setattr(lieferkette, "_sekunden", aufzeichner)
+    return aufrufe
+
+
+def test_secrets_budgets_laufen_ueber_den_deckel_r1_4(umg, monkeypatch, capsys):
+    """Die Aufrufstelle in `_secrets_mit_sperre` nimmt `_sekunden` mit den Standards 300 s und 120 s (kein Rohwert der Variable)."""
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    aufrufe = _sekunden_aufzeichnen(monkeypatch)
+    rc, _ = inproc_secrets(umg, v, monkeypatch, capsys, SECURITY_AUDIT_SECRETS_BUDGET="1e9", SECURITY_AUDIT_SECRETS_DIR_BUDGET="1e9")
+    assert rc == 0
+    assert sorted(aufrufe) == [("SECURITY_AUDIT_SECRETS_BUDGET", 300), ("SECURITY_AUDIT_SECRETS_DIR_BUDGET", 120)]
+
+
+# ------------------------------------------------------------------------------------ unbrauchbare Pfade in befunde_roh (Review R1-6)
+
+def test_secrets_pfad_mit_zeilenangabe_oder_steuerzeichen_wird_gefiltert_statt_gekappt_r1_6(umg):
+    v = vorbereiten(umg, [MINI])
+    lang = "/".join(["verzeichnis-mit-langem-namen"] * 12) + "/a.js"              # > 300 Zeichen
+    umg.fake_gitleaks(dir={"report": []}, git={"report": [
+        treffer(datei="env:12", commit=v.shas[0]), treffer(datei="a\x01b.js", commit=v.shas[0]),
+        treffer(datei=lang, commit=v.shas[0]), treffer(datei="x#L5", commit=v.shas[0]),
+        treffer(datei="./a.js", commit=v.shas[0]), treffer(datei="src/gut.js", commit=v.shas[0])]})
+    out = ausgabe(secrets(umg, v))
+    assert [b["datei"] for b in out["befunde_roh"]] == ["src/gut.js"]
+    hinweise = "\n".join(out["hinweise"])
+    assert "4 Secret-Fundstellen der Historie mit unbrauchbarem Dateipfad" in hinweise and "nicht ausgegeben" in hinweise
+    assert "1 Secret-Fundstellen der Historie mit überlangem Dateipfad" in hinweise
+    assert "env:12" not in hinweise and lang not in hinweise and "\x01" not in hinweise
+
+
+def test_secrets_ohne_unbrauchbare_pfade_kein_pfad_hinweis_r1_6(umg):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": [treffer(datei="src/mit leerzeichen.js", commit=v.shas[0])]})
+    out = ausgabe(secrets(umg, v))
+    assert [b["datei"] for b in out["befunde_roh"]] == ["src/mit leerzeichen.js"]
+    assert not [h for h in out["hinweise"] if "Dateipfad" in h]
+
+
+def test_aufraeumfehler_nach_gesetztem_marker_ist_ein_hinweis_kein_abbruch_r1_9(umg, monkeypatch, capsys):
+    """Kopie ist geschwärzt, Marker gültig: scheitert danach das Löschen der Arbeitsdateien, endet `secrets` mit Exit 0 und JSON
+    (SKILL.md 1b liest jedes Exit ≠ 0 als „Arbeitskopie nicht geschwärzt“)."""
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    echt = lieferkette._aufraeumen
+
+    def kaputt(lk):
+        if os.path.exists(umg.marker()):
+            raise lieferkette.PocFehler(f"{lk}/spiegel.git nicht vollständig entfernt (Rechte)", code=1)
+        echt(lk)
+    monkeypatch.setattr(lieferkette, "_aufraeumen", kaputt)
+    rc, aus = inproc_secrets(umg, v, monkeypatch, capsys)
+    assert rc == 0, aus.out + aus.err
+    out = json.loads(aus.out)
+    assert any(h.startswith("Aufräumen der Arbeitsdateien unvollständig") for h in out["hinweise"])
+    assert os.path.isfile(umg.marker())
+    assert "Aufräumen" in aus.err                                                # Warnung auch auf stderr (zweiter Versuch im finally)
+
+
+def test_aufraeumfehler_ohne_marker_bleibt_exit_1_r1_9(umg, monkeypatch, capsys):
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+
+    def kaputt(lk):
+        raise lieferkette.PocFehler(f"{lk}/spiegel.git nicht vollständig entfernt (Rechte)", code=1)
+    monkeypatch.setattr(lieferkette, "_aufraeumen", kaputt)
+    rc, aus = inproc_secrets(umg, v, monkeypatch, capsys)
+    assert rc == 1 and not os.path.lexists(umg.marker())
+
+
+def test_spiegel_klont_ohne_hardlinks_mit_no_local_r1_10e(umg, tmp_path, monkeypatch):
+    """`git clone --mirror` bekommt `--no-local`: ohne den Schalter hängt ein lokaler Klon per Hardlink am Kundenrepo."""
+    repo, _ = repo_bauen(umg, [{"a.txt": "1"}])
+    aufrufe = []
+    echt = gitkopie.werkzeug_ausfuehren
+
+    def merken(args, *a, **k):
+        aufrufe.append(list(args))
+        return echt(args, *a, **k)
+    monkeypatch.setattr(gitkopie, "werkzeug_ausfuehren", merken)
+    ziel = str(tmp_path / "spiegel.git")
+    gitkopie.spiegel(repo, ziel, 60)
+    (klon,) = [a for a in aufrufe if "clone" in a]
+    assert "--no-local" in klon and "--mirror" in klon and klon.index("--no-local") < klon.index("--")
+    objekte = [os.path.join(d, f) for d, _, fs in os.walk(os.path.join(ziel, "objects")) for f in fs]
+    assert objekte and all(os.stat(o).st_nlink == 1 for o in objekte)             # keine Hardlinks auf das Kundenrepo
+
+
+# ------------------------------------------------------------------------------------ Aufräumen: alle Einträge, Spiegel zuerst (Review R2-1)
+
+def _entferne_mit_fehlern(monkeypatch, scheitern: dict, nur_mit_marker=None):
+    """`poc._entferne` ersetzen: Namen in `scheitern` werfen die genannte Ausnahme, alle anderen laufen echt. Rückgabe: die
+    Liste der versuchten Namen. Mit `nur_mit_marker` (Pfad) scheitert es erst, wenn der Marker existiert."""
+    versucht = []
+    echt = lieferkette.poc._entferne
+
+    def attrappe(pfad, wurzel):
+        name = os.path.basename(pfad)
+        versucht.append(name)
+        if name in scheitern and (nur_mit_marker is None or os.path.exists(nur_mit_marker)):
+            raise scheitern[name]
+        echt(pfad, wurzel)
+    monkeypatch.setattr(lieferkette.poc, "_entferne", attrappe)
+    return versucht
+
+
+def test_aufraeumen_versucht_alle_eintraege_und_den_spiegel_zuerst_r2_1(tmp_path, monkeypatch):
+    lk = tmp_path / "lieferkette"
+    lk.mkdir()
+    for name in lieferkette.ARBEIT:
+        (lk / name).mkdir()
+    versucht = _entferne_mit_fehlern(monkeypatch, {"leer": OSError(13, "Permission denied"),
+                                                   "gl-dir.json": lieferkette.PocFehler("gl-dir.json nicht entfernt", code=1)})
+    with pytest.raises(lieferkette.PocFehler) as e:
+        lieferkette._aufraeumen(str(lk))
+    assert versucht[0] == "spiegel.git" and sorted(versucht) == sorted(lieferkette.ARBEIT)       # nach dem ersten Fehler weiter
+    assert not (lk / "spiegel.git").exists() and not (lk / "abh").exists()
+    assert (lk / "leer").exists() and (lk / "gl-dir.json").exists()
+    assert e.value.code == 1 and "leer" in str(e.value) and "gl-dir.json" in str(e.value)       # beide Fehler gesammelt
+
+
+def test_aufraeumfehler_fruehen_eintrags_laesst_den_spiegel_nicht_liegen_r2_1(umg, monkeypatch, capsys):
+    """Scheitert nach gesetztem Marker das Löschen von `gl-dir.json` (PocFehler) und von `leer` (roher OSError), ist
+    `spiegel.git` trotzdem weg; `secrets` endet mit Exit 0, JSON und Hinweis (kein Traceback)."""
+    v = vorbereiten(umg, [MINI])
+    umg.fake_gitleaks(dir={"report": []}, git={"report": []})
+    _entferne_mit_fehlern(monkeypatch, {"gl-dir.json": lieferkette.PocFehler("gl-dir.json nicht entfernt", code=1),
+                                        "leer": OSError(13, "Permission denied")}, nur_mit_marker=umg.marker())
+    rc, aus = inproc_secrets(umg, v, monkeypatch, capsys)
+    assert rc == 0, aus.out + aus.err
+    out = json.loads(aus.out)
+    assert any(h.startswith("Aufräumen der Arbeitsdateien unvollständig") for h in out["hinweise"])
+    assert not os.path.lexists(os.path.join(umg.lieferkette_ordner(), "spiegel.git"))
+    assert os.path.isfile(umg.marker())
+
+
+def test_nachpruefung_hinweise_stehen_einmal_je_zeile_und_zaehlung_nicht_doppelt_r2_2(umg):
+    inhalt = 'var a=1;var t="x";var u="y";\nvar b=2;\n'
+    v = vorbereiten(umg, [{"src/a.js": inhalt, "package.json": "{}"}])
+    erster = [_lang_treffer(inhalt), _lang_treffer(inhalt)]                            # zwei Funde in Zeile 1
+    umg.fake_gitleaks(dir={"report": erster, "nach": [{"report": erster}, {"report": []}]}, git={"report": []})
+    out = ausgabe(secrets(umg, v))
+    h = out["hinweise"]
+    assert [x for x in h if x.endswith("Secret-Fundstellen in der Arbeitskopie geschwärzt")] == [
+        "2 Secret-Fundstellen in der Arbeitskopie geschwärzt"]                         # Zählhinweis genau einmal
+    assert h.count("Schwärzung unscharf: src/a.js:1 (ganze Zeile)") == 1               # je (Datei, Zeile), nicht je Treffer
+    assert "2 weitere Secret-Fundstellen bei der Nachprüfung zeilenweise geschwärzt (nicht in `geschwaerzt` enthalten)" in h
+    assert out["geschwaerzt"] == 2

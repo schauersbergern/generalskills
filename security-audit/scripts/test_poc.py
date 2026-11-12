@@ -4,6 +4,7 @@ Aufruf: python3 -m pytest security-audit/scripts/test_poc.py -q
 Der Fake protokolliert jeden Aufruf (Argumente, stdin) als JSON-Zeile und liefert Ausgaben aus einer
 Konfigurationsdatei (Schlüssel: die ersten zwei Argumente, sonst das erste). Alles liegt in tmp_path.
 """
+import argparse
 import http.client
 import json
 import os
@@ -266,6 +267,113 @@ def test_lockfile_abhaengigkeits_spezifikation_mit_git(tmp_path):
 def test_lockfile_funding_urls_sind_kein_verstoss(tmp_path):
     inhalt = lockdatei({"node_modules/a": paket(funding=[{"type": "github", "url": "https://github.com/sponsors/a"}])})
     assert poc.lockfile_pruefen(lock_in(tmp_path, inhalt)) is None
+
+
+LOCK_WURZEL_FREMD = [
+    "https://evil.test/x.tgz",       # gemessener Fall R1-2: URL-Spec im Wurzelpaket
+    "evil/repo",                     # gemessener Fall R1-2: GitHub-Kurzform
+    "evil/repo#semver:^1",
+    "git@github.com:a/b.git",
+    "http://registry.npmjs.org/a.tgz",
+    "npm:evil/repo",
+    "npm:@a/b@https://evil.test/x.tgz",
+    "workspace:*",
+]
+
+
+@pytest.mark.parametrize("feld", ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"])
+@pytest.mark.parametrize("spec", LOCK_WURZEL_FREMD)
+def test_lockfile_wurzel_spec_fremd(tmp_path, feld, spec):
+    inhalt = lockdatei({"node_modules/x": paket()}, root=None)
+    daten = json.loads(inhalt)
+    daten["packages"][""][feld] = {"x": spec}
+    assert poc.lockfile_pruefen(lock_in(tmp_path, json.dumps(daten))) == "lockfile-fremde-quelle"
+
+
+def test_lockfile_gemessener_fall_ohne_resolved(tmp_path):
+    """R1-2: URL-Spec im Wurzelpaket, Eintrag ohne resolved (vorher: None, Bau erlaubt)."""
+    daten = {"lockfileVersion": 3, "packages": {
+        "": {"dependencies": {"x": "https://evil.test/x.tgz"}}, "node_modules/x": {"version": "1.0.0"}}}
+    assert poc.lockfile_pruefen(lock_in(tmp_path, json.dumps(daten))) == "lockfile-fremde-quelle"
+
+
+@pytest.mark.parametrize("version", ["https://evil.test/x.tgz", "evil/repo", "^1.0.0", "", None])
+def test_lockfile_eintrag_unter_node_modules_ohne_resolved_und_ohne_reine_version(tmp_path, version):
+    inhalt = lockdatei({"node_modules/x": {"version": version, "integrity": "sha512-xx"}})
+    assert poc.lockfile_pruefen(lock_in(tmp_path, inhalt)) == "lockfile-fremde-quelle"
+
+
+def test_lockfile_eintrag_ohne_resolved_mit_reiner_version_ist_erlaubt(tmp_path):
+    """Echte Lockfiles (npm-dedupe) enthalten Einträge ohne resolved; npm holt name@version aus der Registry."""
+    inhalt = lockdatei({"node_modules/a/node_modules/semver": {"version": "7.6.3", "license": "ISC"}})
+    assert poc.lockfile_pruefen(lock_in(tmp_path, inhalt)) is None
+
+
+def test_lockfile_gebuendelter_eintrag_ohne_resolved_ist_erlaubt(tmp_path):
+    inhalt = lockdatei({"node_modules/a": paket(), "node_modules/a/node_modules/b": {"version": "1.0.0", "inBundle": True}})
+    assert poc.lockfile_pruefen(lock_in(tmp_path, inhalt)) is None
+
+
+@pytest.mark.parametrize("spec", ["^1.2.3", "~1.2", ">=1 <3", "1.x", "*", "", "latest", "next", "1.0.0 - 2.0.0",
+                                  "^1 || ^2", "1.2.3-beta.1+b", "npm:b@^1.0.0", "npm:@s/b@1.x", "npm:b", "$a"])
+def test_lockfile_registry_specs_sind_erlaubt(tmp_path, spec):
+    daten = json.loads(lockdatei({"node_modules/x": paket()}))
+    daten["packages"][""]["dependencies"] = {"x": spec}
+    daten["packages"]["node_modules/x"]["dependencies"] = {"y": spec}
+    assert poc.lockfile_pruefen(lock_in(tmp_path, json.dumps(daten))) is None
+
+
+def test_lockfile_alte_version_requires_mit_url(tmp_path):
+    inhalt = json.dumps({"lockfileVersion": 1, "dependencies": {
+        "a": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/a/-/a-1.0.0.tgz", "requires": {"b": "evil/repo"}}}})
+    assert poc.lockfile_pruefen(lock_in(tmp_path, inhalt)) == "lockfile-fremde-quelle"
+
+
+@pytest.mark.parametrize("feld,wert", [
+    ("dependencies", {"x": "https://evil.test/x.tgz"}),
+    ("devDependencies", {"x": "evil/repo"}),
+    ("optionalDependencies", {"x": "git+https://evil.test/x.git"}),
+    ("peerDependencies", {"x": "file:../x"}),
+    ("overrides", {"x": "https://evil.test/x.tgz"}),
+    ("overrides", {"a": {"b": "evil/repo"}}),
+    ("overrides", {"a": {".": "1.0.0", "b": "github:a/b"}}),
+])
+def test_package_json_fremde_spec(tmp_path, feld, wert):
+    q = lock_in(tmp_path, dateien={"package-lock.json": lockdatei({"node_modules/a": paket()}),
+                                   "package.json": json.dumps({"name": "m", feld: wert})})
+    assert poc.lockfile_pruefen(q) == "lockfile-fremde-quelle"
+
+
+def test_package_json_registry_specs_sind_erlaubt(tmp_path):
+    pj = {"name": "m", "dependencies": {"a": "^1.0.0", "b": "npm:c@2"}, "overrides": {"a": {".": "1.0.0", "d": "$b"}}}
+    q = lock_in(tmp_path, dateien={"package-lock.json": lockdatei({"node_modules/a": paket()}), "package.json": json.dumps(pj)})
+    assert poc.lockfile_pruefen(q) is None
+
+
+def test_package_json_nicht_lesbar_ist_keine_stille_freigabe(tmp_path):
+    q = lock_in(tmp_path, dateien={"package-lock.json": lockdatei({"node_modules/a": paket()}), "package.json": "{kaputt"})
+    assert poc.lockfile_pruefen(q) == "lockfile-fremde-quelle"
+
+
+def _v1(deps):
+    return json.dumps({"lockfileVersion": 1, "dependencies": deps})
+
+
+@pytest.mark.parametrize("version", ["evil/repo#abc", "evil/repo", "git@github.com:a/b.git", "^1.0.0", "1.0", "", None, 1,
+                                     "npm:evil/repo", "npm:@a/b@https://evil.test/x.tgz"])
+def test_lockfile_v1_ohne_resolved_nur_reine_version_r2(tmp_path, version):
+    """R2 (Geschwisterstelle zu R1-2): v1-`dependencies`-Einträge ohne resolved, rekursiv, nur mit reiner Semver oder npm:-Alias."""
+    assert poc.lockfile_pruefen(lock_in(tmp_path, _v1({"x": {"version": version}}))) == "lockfile-fremde-quelle"
+    tief = _v1({"a": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/a/-/a-1.0.0.tgz",
+                      "dependencies": {"b": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/b/-/b-1.0.0.tgz",
+                                             "dependencies": {"c": {"version": version}}}}}})
+    assert poc.lockfile_pruefen(lock_in(tmp_path / "t", tief)) == "lockfile-fremde-quelle"
+
+
+@pytest.mark.parametrize("eintrag", [{"version": "1.2.3"}, {"version": "1.2.3-beta.1+b"}, {"version": "npm:b@1.2.3"},
+                                     {"version": "npm:@s/b@1.2.3"}, {"version": "evil/repo", "bundled": True}])
+def test_lockfile_v1_ohne_resolved_erlaubte_faelle_r2(tmp_path, eintrag):
+    assert poc.lockfile_pruefen(lock_in(tmp_path, _v1({"x": eintrag}))) is None
 
 
 def test_lockfile_hinweise(tmp_path):
@@ -588,9 +696,8 @@ def test_vorbereiten_kein_git_repo(umg, tmp_path):
 def test_vorbereiten_unvollstaendig(temp_ordner, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(poc.gitkopie, "arbeitskopie", lambda repo, ziel, rev="HEAD": [
         "Namenskollision: a", "Arbeitskopie unvollständig: git cat-file abgebrochen bei x (boom)"])
-    repo = tmp_path / "r"
-    repo.mkdir()
-    assert poc.main(["vorbereiten", "--lauf", LAUF, "--repo", str(repo)]) == 4
+    repo = repo_mit(tmp_path, MINI, name="r")          # echtes Repo: der Commit wird vor dem Kopieren aufgelöst (R1-17)
+    assert poc.main(["vorbereiten", "--lauf", LAUF, "--repo", repo]) == 4
     aus = capsys.readouterr()
     assert aus.out.splitlines()[0] == "kategorie: arbeitskopie-unvollstaendig"
     assert "Arbeitskopie unvollständig" in aus.err
@@ -600,9 +707,8 @@ def test_vorbereiten_git_fehler(temp_ordner, tmp_path, monkeypatch, capsys):
     def kaputt(repo, ziel, rev="HEAD"):
         raise gitkopie.GitFehler("git ls-tree fehlgeschlagen (Exit 128): kein HEAD")
     monkeypatch.setattr(poc.gitkopie, "arbeitskopie", kaputt)
-    repo = tmp_path / "r"
-    repo.mkdir()
-    assert poc.main(["vorbereiten", "--lauf", LAUF, "--repo", str(repo)]) == 4
+    repo = repo_mit(tmp_path, MINI, name="r")          # echtes Repo: der Commit wird vor dem Kopieren aufgelöst (R1-17)
+    assert poc.main(["vorbereiten", "--lauf", LAUF, "--repo", repo]) == 4
     aus = capsys.readouterr()
     assert aus.out.splitlines()[0] == "kategorie: git-fehler"
     assert "kein HEAD" in aus.err
@@ -610,9 +716,8 @@ def test_vorbereiten_git_fehler(temp_ordner, tmp_path, monkeypatch, capsys):
 
 def test_vorbereiten_meldungen_nur_auf_stderr(temp_ordner, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(poc.gitkopie, "arbeitskopie", lambda repo, ziel, rev="HEAD": ["Symlink übersprungen: x"])
-    repo = tmp_path / "r"
-    repo.mkdir()
-    assert poc.main(["vorbereiten", "--lauf", LAUF, "--repo", str(repo)]) == 0
+    repo = repo_mit(tmp_path, MINI, name="r")          # echtes Repo: der Commit wird vor dem Kopieren aufgelöst (R1-17)
+    assert poc.main(["vorbereiten", "--lauf", LAUF, "--repo", repo]) == 0
     aus = capsys.readouterr()
     assert aus.out.strip() == os.path.join(poc.zustand_ordner(LAUF), "quelle")
     assert "Symlink übersprungen" in aus.err
@@ -830,6 +935,7 @@ def test_starten_env_dienst_seed(umg, tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     db = [a for a in laeufe(umg) if wert(a, "--name") == [f"security-audit-{LAUF}-p1-db"]][0]
     assert db[-1] == "postgres:16-alpine"
+    assert wert(db, "--network") == [f"security-audit-{LAUF}-p1"]      # R1-4: nie bridge/host, immer das interne Rollennetz
     assert wert(db, "--network-alias") == ["db"]
     assert wert(db, "--security-opt") == ["no-new-privileges"]
     assert wert(db, "--memory") == ["512m"] and wert(db, "--pids-limit") == ["256"]
@@ -900,8 +1006,31 @@ def test_starten_vorhandene_container_werden_ersetzt(umg, tmp_path):
 
 def test_starten_netz_existiert_schon(umg, tmp_path):
     vorbereitet(umg, tmp_path)
-    umg.konfig({"network create": {"rc": 1, "stderr": "Error response from daemon: network with name x already exists"}})
+    umg.konfig({"network create": {"rc": 1, "stderr": "Error response from daemon: network with name x already exists"},
+                "network inspect": {"stdout": "true\n"}})
     assert umg.poc("starten", "--lauf", LAUF, "--rolle", "p1", "--start-befehl", "x", "--port", "1").returncode == 0
+    assert ["network", "inspect", "--format", "{{.Internal}}", f"security-audit-{LAUF}-p1"] in [a["args"] for a in umg.aufrufe()]
+
+
+@pytest.mark.parametrize("inspect", [{"stdout": "false\n"}, {"stdout": ""}, {"rc": 1, "stderr": "Error: No such network"},
+                                     {"stdout": "true false\n"}])
+def test_starten_vorhandenes_netz_muss_intern_sein_r1_20(umg, tmp_path, inspect):
+    """R1-20: Ein vorhandenes Netz gleichen Namens, das nicht als `--internal` bestätigt ist, wird nicht weiterverwendet."""
+    vorbereitet(umg, tmp_path)
+    umg.konfig({"network create": {"rc": 1, "stderr": "Error response from daemon: network with name x already exists"},
+                "network inspect": inspect})
+    r = umg.poc("starten", "--lauf", LAUF, "--rolle", "p1", "--start-befehl", "x", "--port", "1")
+    assert r.returncode == 4 and r.stdout.splitlines()[0] == "kategorie: start-fehler"
+    assert "nicht als intern bestätigt" in r.stdout
+    assert laeufe(umg) == []                                           # kein Container im fremden Netz gestartet
+
+
+def test_starten_anderer_netzfehler_ist_start_fehler_r1_20(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    umg.konfig({"network create": {"rc": 1, "stderr": "Error response from daemon: Pool overlaps with other one"}})
+    r = umg.poc("starten", "--lauf", LAUF, "--rolle", "p1", "--start-befehl", "x", "--port", "1")
+    assert r.returncode == 4 and "Pool overlaps" in r.stdout
+    assert laeufe(umg) == [] and not [a for a in umg.aufrufe() if a["args"][:2] == ["network", "inspect"]]
 
 
 # ------------------------------------------------------------------------------------ TF3: Modell-Mock und Env-Regeln
@@ -963,6 +1092,33 @@ def test_env_regeln_db_und_localhost_erlaubt(umg, tmp_path, mock):
     assert r.returncode == 0, r.stdout + r.stderr
     env = wert(run_mit_name(umg, APP)[0], "-e")
     assert "DATABASE_URL=postgres://poc:poc@db:5432/poc" in env and "SELBST=http://localhost:3000" in env
+
+
+@pytest.mark.parametrize("mock", [[], ["--modell-mock", "openai"]])
+@pytest.mark.parametrize("liste", ["https://app:3000,http://localhost:5173", "http://localhost:5173;http://app:3000/x",
+                                   "http://app:3000,http://llm:4010,http://127.0.0.1:1"])
+def test_env_regeln_url_liste_mit_trennzeichen_erlaubt_review_r1_8(umg, tmp_path, mock, liste):
+    """Review R1-8: Eine übliche Origin-Liste (Komma oder Semikolon) ist kein fremder Host `app:3000,http:`."""
+    vorbereitet(umg, tmp_path)
+    r = starten(umg, *mock, "--env", f"CORS_ORIGINS={liste}")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"CORS_ORIGINS={liste}" in wert(run_mit_name(umg, APP)[0], "-e")
+
+
+@pytest.mark.parametrize("liste, host", [("http://app:3000,http://poc-fremd.invalid/x", "poc-fremd.invalid"),
+                                         ("https://localhost:3000;https://poc-fremd.invalid", "poc-fremd.invalid"),
+                                         ("http://poc-fremd.invalid,http://app:3000", "poc-fremd.invalid"),
+                                         ("http://app:3000,poc-fremd.invalid@x.invalid", "x.invalid"),
+                                         # Review R2-3: ein Listenelement ohne Schema ist für die Netzregel kein Host; dann gilt der Wert als Ganzes
+                                         ("http://app,poc-fremd.invalid", "app,poc-fremd.invalid"),
+                                         ("http://app,poc-fremd.invalid:80", "app,poc-fremd.invalid"),
+                                         ("http://app;poc-fremd.invalid", "app;poc-fremd.invalid")])
+def test_env_regeln_url_liste_mit_fremdem_host_exit2_review_r1_8(umg, tmp_path, liste, host):
+    vorbereitet(umg, tmp_path)
+    r = starten(umg, "--env", f"CORS_ORIGINS={liste}")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert r.stderr.strip().endswith(f"--env CORS_ORIGINS: nicht erlaubter Host {host}"), r.stderr
+    assert umg.aufrufe() == []
 
 
 def test_env_regeln_meldung_ohne_wert(umg, tmp_path):
@@ -1046,6 +1202,16 @@ def test_start_befehl_legitim_erlaubt(umg, tmp_path, mock, befehl):
     ("OPENAI_API_HOST=http://llm:4010 node server.js", "OPENAI_API_HOST"),
     ("ANTHROPIC_AUTH_TOKEN=x node server.js", "ANTHROPIC_AUTH_TOKEN"),
     ("OPENAI_PROJECT_ID=proj-x node server.js", "OPENAI_PROJECT_ID"),
+    # Review R1-7: gruppierte Optionen, read, for, Builtins, die Export oder Wert aufheben
+    ("env -vu OPENAI_BASE_URL node server.js", "OPENAI_BASE_URL"),
+    ("env -iu OPENAI_API_KEY node server.js", "OPENAI_API_KEY"),
+    ("read OPENAI_API_KEY < /tmp/f; node server.js", "OPENAI_API_KEY"),
+    ("read -r OPENAI_BASE_URL < /tmp/f && node server.js", "OPENAI_BASE_URL"),
+    ("for OPENAI_BASE_URL in a b; do node server.js; done", "OPENAI_BASE_URL"),
+    ("export -n OPENAI_BASE_URL; node server.js", "OPENAI_BASE_URL"),
+    ("typeset +x ANTHROPIC_API_KEY; node server.js", "ANTHROPIC_API_KEY"),
+    ("printf -v OPENAI_API_KEY %s x; node server.js", "OPENAI_API_KEY"),
+    ("declare -n ref=OPENAI_BASE_URL; ref=x node server.js", "OPENAI_BASE_URL"),
 ])
 def test_start_befehl_syntaxformen_reservierter_namen_exit2(umg, tmp_path, befehl, name):
     vorbereitet(umg, tmp_path)
@@ -1059,9 +1225,65 @@ def test_start_befehl_syntaxformen_reservierter_namen_exit2(umg, tmp_path, befeh
 @pytest.mark.parametrize("befehl", ["unset NODE_OPTIONS && node server.js", "node server.js -u poc", "env -u NODE_OPTIONS node server.js",
                                     "NEXT_PUBLIC_OPENAI_BASE_URL+=x npm start", "echo OPENAI_BASE_URL gesetzt; node server.js",
                                     "unset FOO; node server.js --modell OPENAI_API_KEY", "node server.js --unsetzen OPENAI_API_KEY",
-                                    "node server.js --u OPENAI_API_KEY"])      # `--u` ist keine Kurzoption `-u` (Wortgrenze davor)
+                                    "node server.js --u OPENAI_API_KEY", "env -v node server.js", "read LINE < f; node server.js",
+                                    "for x in a b; do echo OPENAI_API_KEY; done", "export -n FOO; node server.js",
+                                    "printf -v FOO %s x; node server.js", "declare -n ref=FOO; node server.js"])   # `--u` ist keine Kurzoption `-u` (Wortgrenze davor)
 def test_start_befehl_syntaxformen_legitim_erlaubt(umg, tmp_path, befehl):
     """Gegenprobe zu den Syntaxformen: Wortgrenzen, Befehlsgrenzen (`;`, `&&`) und `-u` ohne reservierten Namen bleiben erlaubt."""
+    vorbereitet(umg, tmp_path)
+    r = starten_mit_befehl(umg, befehl, "--modell-mock", "openai")
+    assert r.returncode == 0, (befehl, r.stdout + r.stderr)
+
+
+@pytest.mark.parametrize("befehl", ["env -i node server.js", "env - node server.js", "env -vi FOO=1 node server.js",
+                                    "/usr/bin/env --ignore-environment node server.js", "env -i; node server.js"])
+def test_start_befehl_env_leert_umgebung_exit2_review_r1_7(umg, tmp_path, befehl):
+    """Review R1-7: `env -i` und `env -` leeren die Umgebung samt der Mock-Variablen: mit --modell-mock Exit 2 (ohne Mock erlaubt)."""
+    vorbereitet(umg, tmp_path)
+    r = starten_mit_befehl(umg, befehl, "--modell-mock", "openai")
+    assert r.returncode == 2 and "leert die Umgebung" in r.stderr and "node server.js" not in r.stderr, (befehl, r.stderr)
+    assert umg.aufrufe() == []
+    assert starten_mit_befehl(umg, befehl).returncode == 0
+
+
+@pytest.mark.parametrize("befehl", ["env -u X -i node server.js", "env -C . -i node server.js", "env -u X -vi node server.js",
+                                    "env -S'-i node' server.js", "env --unset X -i node server.js", "env --chdir=. -i node server.js",
+                                    "env -uX -i node server.js", "env -u X - node server.js", "env -u X --ignore-environment node server.js"])
+def test_start_befehl_env_leert_umgebung_hinter_option_mit_argument_review_r2(umg, tmp_path, befehl):
+    """Review R2 (R1-7 Rest): `-i`, `-` und `--ignore-environment` an beliebiger Stelle der env-Optionen, auch hinter `-u X`, `-C dir`, `-S str`."""
+    vorbereitet(umg, tmp_path)
+    r = starten_mit_befehl(umg, befehl, "--modell-mock", "openai")
+    assert r.returncode == 2 and "leert die Umgebung" in r.stderr and "node server.js" not in r.stderr, (befehl, r.stderr)
+    assert umg.aufrufe() == []
+
+
+@pytest.mark.parametrize("befehl", ["env -u X node server.js", "env -C . node server.js", "env -u X FOO=1 -i node server.js",
+                                    "env -S'node -r x' server.js", "env -u i node server.js", "env -ui node server.js",
+                                    "npm run start", "env NODE_ENV=production node server.js", "read -r line; printf '%s' x"])
+def test_start_befehl_env_optionen_ohne_leeren_erlaubt_review_r2(umg, tmp_path, befehl):
+    vorbereitet(umg, tmp_path)
+    r = starten_mit_befehl(umg, befehl, "--modell-mock", "openai")
+    assert r.returncode == 0, (befehl, r.stdout + r.stderr)
+
+
+@pytest.mark.parametrize("muster", ["export -n A\n", "export -n a ", "unset ", "env -u ", "read ", "for ", "printf -v ", "declare -n x=", "env ",
+                                    "env -i -u ", "typeset +x ", "export A=1 ", "x" * 50 + " "])
+def test_start_befehl_pruefung_ist_linear_review_r2(muster):
+    """Review R2-2: Die Prüfung läuft vor jedem Zeitbudget; lange Befehle (2000 bis 4000 Wiederholungen, mit und ohne Zeilenumbruch, auch
+    gemischt mit anderen Zeilen) brauchen weniger als eine Sekunde (vorher bis zu 37 s bei 400 Zeilen)."""
+    import time
+    for befehl in (muster * 3000, muster * 2000 + "export B=1\n" * 2000, "node s.js " + muster * 2000 + "; node t.js"):
+        t0 = time.monotonic()
+        try:
+            poc._start_befehl_pruefen(befehl, ["openai"])
+        except poc.PocFehler:
+            pass                                                # gefunden ist in Ordnung, es zählt die Laufzeit
+        assert time.monotonic() - t0 < 1.0, (muster, len(befehl))
+
+
+@pytest.mark.parametrize("befehl", ["env FOO=1 node server.js", "env -u FOO node server.js", "node server.js -i", "node server.js --env -i",
+                                    "environment -i x", "env -C /app node server.js"])
+def test_start_befehl_env_ohne_leeren_erlaubt_review_r1_7(umg, tmp_path, befehl):
     vorbereitet(umg, tmp_path)
     r = starten_mit_befehl(umg, befehl, "--modell-mock", "openai")
     assert r.returncode == 0, (befehl, r.stdout + r.stderr)
@@ -1388,6 +1610,28 @@ def test_ausfuehren(umg):
     assert umg.aufrufe()[-1]["args"] == ["exec", f"security-audit-{LAUF}-p2-app", "cat", "/app/.netz", "-x"]
 
 
+def test_db_container_p2_haengt_im_netz_der_rolle_r1_4(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    umg.poc("starten", "--lauf", LAUF, "--rolle", "p2", "--start-befehl", "node s.js", "--port", "3001", "--dienst", "postgres")
+    db = [a for a in laeufe(umg) if wert(a, "--name") == [f"security-audit-{LAUF}-p2-db"]][0]
+    app = [a for a in laeufe(umg) if wert(a, "--name") == [f"security-audit-{LAUF}-p2-app"]][0]
+    assert wert(db, "--network") == wert(app, "--network") == [f"security-audit-{LAUF}-p2"]
+
+
+def test_neustart_p2_nutzt_netz_von_p2_r1_4(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    umg.poc("starten", "--lauf", LAUF, "--rolle", "p2", "--start-befehl", "node s.js", "--port", "3001")
+    umg.log_datei.unlink()
+    assert umg.poc("neustart", "--lauf", LAUF, "--rolle", "p2").returncode == 0
+    app = [a for a in laeufe(umg) if wert(a, "--name") == [f"security-audit-{LAUF}-p2-app"]][0]
+    assert wert(app, "--network") == [f"security-audit-{LAUF}-p2"]
+
+
+def test_ausfuehren_p2_trifft_nur_den_app_container_von_p2_r1_4(umg):
+    umg.poc("ausfuehren", "--lauf", LAUF, "--rolle", "p2", "--", "id")
+    assert [a["args"] for a in umg.aufrufe() if a["args"][0] == "exec"] == [["exec", f"security-audit-{LAUF}-p2-app", "id"]]
+
+
 def test_ausfuehren_fehlercode(umg):
     umg.konfig({"exec": {"rc": 3, "stderr": "nope\n"}})
     r = umg.poc("ausfuehren", "--lauf", LAUF, "--rolle", "p1", "--", "false")
@@ -1420,6 +1664,18 @@ def test_anfrage_nur_app(umg, tmp_path):
     assert wert(a, "--memory") == ["1g"] and wert(a, "--pids-limit") == ["256"]
     assert not {"-v", "--volume", "--mount", "-p", "--publish"} & set(a)
     assert wert(a, "--methode") == ["GET"]
+
+
+def test_anfrage_p2_laeuft_im_netz_von_p2_r1_4(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    gestartet(umg, "p1", port="3000")
+    gestartet(umg, "p2", port="3001")
+    r = umg.poc("anfrage", "--lauf", LAUF, "--rolle", "p2", "--pfad", "/x")
+    assert r.returncode == 0, r.stderr
+    (aufruf,) = anfrage_aufrufe(umg)
+    assert wert(aufruf["args"], "--network") == [f"security-audit-{LAUF}-p2"]
+    assert wert(aufruf["args"], "--name")[0].startswith(f"security-audit-{LAUF}-p2-anfrage-")
+    assert "http://app:3001/x" in aufruf["args"] or any("3001" in a for a in aufruf["args"])
 
 
 def test_anfrage_ohne_gestartete_rolle(umg):
@@ -2082,6 +2338,43 @@ def test_auflisten_zeigt_laeufe_aus_ordnern_und_docker_haertung_b2(umg, tmp_path
     assert not any(a["args"][0] in ("rm", "rmi") or a["args"][:2] == ["network", "rm"] for a in umg.aufrufe())   # nur lesen
 
 
+def test_auflisten_nennt_repo_alter_und_laeuft_r1_13(umg, tmp_path):
+    """R1-13: ein eigener, beendeter Lauf ist von einem laufenden (parallelen) Audit unterscheidbar."""
+    vorbereitet(umg, tmp_path)
+    anderer = umg.poc("neu").stdout.strip()
+    alt = os.path.join(umg.tmp, f"security-audit-{anderer}")
+    os.utime(alt, (time.time() - 3 * 3600, time.time() - 3 * 3600))
+    umg.konfig({
+        "ps -a": {"stdout": f"security-audit-{LAUF}-p1-app\nsecurity-audit-{anderer}-p1-app\n"},
+        "ps --format": {"stdout": f"security-audit-{LAUF}-p1-app\n"},     # nur LAUF läuft noch
+    })
+    r = umg.poc("auflisten")
+    assert r.returncode == 0, r.stderr
+    zeilen = {z.split()[0]: z for z in r.stdout.splitlines() if z.strip()}
+    assert "laeuft=ja" in zeilen[LAUF] and "repo=kunde" in zeilen[LAUF] and re.search(r"alter_min=\d+", zeilen[LAUF])
+    assert "laeuft=nein" in zeilen[anderer] and "repo=?" in zeilen[anderer]
+    assert int(re.search(r"alter_min=(\d+)", zeilen[anderer]).group(1)) >= 179
+    assert not any(a["args"][0] in ("rm", "rmi") or a["args"][:2] == ["network", "rm"] for a in umg.aufrufe())
+
+
+def test_auflisten_zeigt_denselben_repo_namen_wie_kontext_r2_3(umg, tmp_path):
+    """R2-3: Der Marker trägt den Repo-Namen aus origin (wie `bericht.py kontext`), nicht den Ordnernamen."""
+    repo = repo_mit(tmp_path, MINI, name="nikskills")
+    git(repo, "remote", "add", "origin", "https://github.com/a/generalskills.git")
+    assert umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo).returncode == 0
+    import bericht
+    assert bericht._repo_name(repo) == "generalskills"
+    zeilen = umg.poc("auflisten").stdout.splitlines()
+    assert any(z.startswith(LAUF) and "repo=generalskills " in z for z in zeilen), zeilen
+
+
+def test_auflisten_laeuft_unbekannt_ohne_docker_r1_13(umg, tmp_path):
+    vorbereitet(umg, tmp_path)
+    umg.konfig({"ps": {"rc": 1, "stderr": "Cannot connect to the Docker daemon. Is the docker daemon running?"}})
+    r = umg.poc("auflisten")
+    assert f"{LAUF} " in r.stdout and "laeuft=?" in r.stdout
+
+
 def test_auflisten_ohne_docker_meldet_und_endet_mit_1_haertung_b2(umg, tmp_path):
     vorbereitet(umg, tmp_path)
     umg.konfig({"version": {"rc": 1, "stderr": "Cannot connect to the Docker daemon"},
@@ -2173,6 +2466,38 @@ def test_vorbereiten_kopiert_den_uebergebenen_sha_haertung_b3(umg, tmp_path):
         assert json.load(f)["sha"] == sha1                                  # der Marker hält fest, was kopiert wurde
     r = umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo)               # ohne --sha: HEAD (Rückwärtskompatibilität)
     assert open(os.path.join(r.stdout.strip(), "stand.txt")).read() == "zwei\n"
+
+
+def test_vorbereiten_loest_den_commit_vor_dem_kopieren_auf_r1_17(tmp_path, monkeypatch):
+    """R1-17: Ohne `--sha` wird HEAD einmal zum vollen Hash aufgelöst, genau dieser Hash kopiert und im Marker festgehalten
+    (kein stiller Ersatzwert "HEAD", kein Wandern zwischen Kopie und rev-parse)."""
+    repo = repo_mit(tmp_path, MINI, name="kunde-r117")
+    head = git(repo, "rev-parse", "HEAD").strip()
+    monkeypatch.setattr(tempfile, "tempdir", os.path.realpath(tmp_path / "zustand"))
+    os.makedirs(tempfile.tempdir)
+    gesehen = []
+    echt = poc.gitkopie.arbeitskopie
+
+    def spion(r, ziel, rev="HEAD"):
+        gesehen.append(rev)
+        return echt(r, ziel, rev)
+
+    monkeypatch.setattr(poc.gitkopie, "arbeitskopie", spion)
+    assert poc.cmd_vorbereiten(argparse.Namespace(repo=repo, lauf=LAUF, sha=None)) == 0
+    assert gesehen == [head]
+    with open(os.path.join(poc.zustand_ordner(LAUF), "quelle.fertig")) as f:
+        assert json.load(f)["sha"] == head
+
+
+def test_vorbereiten_ohne_aufloesbaren_commit_ist_git_fehler_r1_17(tmp_path, monkeypatch, capsys):
+    """Leeres Repo (HEAD nicht auflösbar): kein Marker mit "HEAD", Kategorie git-fehler."""
+    repo = tmp_path / "leer"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    monkeypatch.setattr(tempfile, "tempdir", os.path.realpath(tmp_path / "zustand"))
+    os.makedirs(tempfile.tempdir)
+    assert poc.cmd_vorbereiten(argparse.Namespace(repo=str(repo), lauf=LAUF, sha=None)) == 4
+    assert capsys.readouterr().out.splitlines()[0] == "kategorie: git-fehler"
+    assert not os.path.exists(os.path.join(poc.zustand_ordner(LAUF), "quelle.fertig"))
 
 
 @pytest.mark.parametrize("sha", ["HEAD", "abc", "--output=x", "A" * 40, "0" * 39, "g" * 40])
@@ -2505,6 +2830,46 @@ def test_modell_rolle_nicht_gestartet_exit2(umg, tmp_path):
     assert not any(a["args"][0] in ("exec", "run") for a in umg.aufrufe())
 
 
+@pytest.mark.parametrize("zahl", ["NaN", "Infinity", "-Infinity", "1e999"])
+def test_modell_antworten_nan_und_unendlich_exit2_review_r1_6(umg, tmp_path, zahl):
+    """Review R1-6: Python liest NaN und Infinity, JSON (und der Mock) kennt sie nicht: Exit 2 („korrigieren“) statt Exit 1 („kein Beleg“)."""
+    mit_mock(umg, tmp_path)
+    roh = '[{"werkzeug": {"name": "t", "argumente": {"x": %s}}}]' % zahl
+    r = modell(umg, "--antworten-datei", antworten_datei(tmp_path, roh))
+    assert r.returncode == 2 and "kein gültiges JSON" in r.stderr, (r.returncode, r.stderr)
+    assert exec_aufrufe(umg) == []
+
+
+def test_modell_antworten_kompakte_datei_nahe_der_grenze_review_r1_6(umg, tmp_path):
+    """Review R1-6: Eine kompakt geschriebene Datei von 58 KB wurde mit den Standard-Trennzeichen von `json.dumps` über 64 KiB groß und vom
+    Mock abgelehnt. Jetzt geht kompakt serialisiertes JSON an den Mock (höchstens 64 KiB auf stdin)."""
+    mit_mock(umg, tmp_path)
+    argumente = {f"k{i:04d}": i for i in range(4600)}
+    roh = json.dumps([{"werkzeug": {"name": "t", "argumente": argumente}}], separators=(",", ":"))
+    assert 58000 < len(roh.encode()) < 64 * 1024 and len(json.dumps(json.loads(roh)).encode()) > 64 * 1024
+    r = modell(umg, "--antworten-datei", antworten_datei(tmp_path, roh))
+    assert r.returncode == 0, r.stderr
+    assert len(exec_aufrufe(umg)[0]["stdin"].encode()) <= 64 * 1024
+
+
+def test_modell_antworten_serialisierung_ueber_64kib_exit2_review_r1_6(umg, tmp_path):
+    """`1e2` (3 Bytes) wird als `100.0` (5 Bytes) serialisiert: Die Datei passt in 64 KiB, die Eingabe für den Mock nicht."""
+    mit_mock(umg, tmp_path)
+    roh = '[{"werkzeug": {"name": "t", "argumente": {"x": [' + ",".join(["1e2"] * 15000) + "]}}}]"
+    assert len(roh.encode()) < 64 * 1024
+    r = modell(umg, "--antworten-datei", antworten_datei(tmp_path, roh))
+    assert r.returncode == 2 and "64 KiB" in r.stderr, (r.returncode, r.stderr)
+    assert exec_aufrufe(umg) == []
+
+
+@pytest.mark.parametrize("emojis, rc", [(8192, 0), (8193, 2)])     # 2 UTF-16-Einheiten je Emoji: 16 384 sind erlaubt
+def test_modell_antworten_text_laenge_in_utf16_einheiten_review_r1_6(umg, tmp_path, emojis, rc):
+    mit_mock(umg, tmp_path)
+    r = modell(umg, "--antworten-datei", antworten_datei(tmp_path, json.dumps([{"text": "😀" * emojis}], ensure_ascii=False)))
+    assert r.returncode == rc, (r.returncode, r.stderr)
+    assert (exec_aufrufe(umg) == []) is (rc == 2)
+
+
 def test_modell_antworten_datei_zu_gross_exit2(umg, tmp_path):
     """K10: höchstens 64 KiB (+ 1 Byte gelesen); nicht lesbar (fehlt, Ordner) endet mit Exit 2."""
     mit_mock(umg, tmp_path)
@@ -2646,6 +3011,24 @@ def test_modell_protokoll_fehler_exit1_entschaerft_ohne_werte(umg, tmp_path):
     assert "teil" not in r.stdout
 
 
+def test_modell_protokoll_fehler_laengster_wert_zuerst_review_r1_11(umg, tmp_path):
+    """Review R1-11: Ist ein Wert Präfix eines anderen, ersetzt `_ohne_werte` den längeren zuerst; sonst bliebe `XYZ-geheim` im Auszug."""
+    mit_mock(umg, tmp_path, "--env", "A=abcdef", "--env", "B=abcdefXYZ-geheim")
+    umg.konfig({"exec -i": {"rc": 1, "stderr": "boom abcdefXYZ-geheim und abcdef\n"}})
+    r = modell(umg, "--protokoll")
+    assert r.returncode == 1, r.stderr
+    assert "boom <ENV:B> und <ENV:A>" in r.stderr and "XYZ" not in r.stderr and "geheim" not in r.stderr, r.stderr
+
+
+def test_modell_protokoll_fehler_maskiert_ab_genau_6_zeichen_review_r1_11(umg, tmp_path):
+    """Die zweite Maskiersicherung gilt wie der Mock für Werte ab 6 Zeichen: genau 6 werden ersetzt, 5 nicht."""
+    mit_mock(umg, tmp_path, "--env", "SECHS=abcdef", "--env", "FUENF=vwxyz")
+    umg.konfig({"exec -i": {"rc": 1, "stderr": "boom abcdef und vwxyz\n"}})
+    r = modell(umg, "--protokoll")
+    assert r.returncode == 1, r.stderr
+    assert "boom <ENV:SECHS> und vwxyz" in r.stderr, r.stderr
+
+
 def test_modell_protokoll_fehler_maskiert_auch_mock_keys(umg, tmp_path):
     """M-3: Der Fehlerauszug maskiert wie der Mock auch die Schlüssel des Mocks, nicht nur die `--env`-Werte."""
     mit_mock(umg, tmp_path, "--env", "X_TOKEN=poc-dummy-abcdef")
@@ -2713,18 +3096,29 @@ def test_modell_protokoll_maskierwerte_nur_gewaehlte_api_keys(umg, tmp_path):
     assert werte == [{"name": "ANTHROPIC_API_KEY", "wert": "poc-dummy-anthropic"}]
 
 
-def test_modell_protokoll_hoechstens_50_werte(umg, tmp_path):
-    """Mi-4: mehr als 50 Werte: die 50 längsten gehen an den Mock, der Hinweis steht auf stderr (ohne Werte)."""
-    envs = [a for i in range(55) for a in ("--env", f"V{i:02d}=" + "x" * (6 + i))]
+def test_modell_protokoll_hoechstens_200_werte(umg, tmp_path):
+    """Review R1-5: Die Grenze ist die des Mocks (200 Werte). Alle Werte ab 6 Zeichen gehen an den Mock, auch die kürzesten; darüber Exit 2
+    ohne Docker-Aufruf statt Werte wegzulassen (sonst stünde GEHEIM roh im Protokoll)."""
+    envs = [a for i in range(55) for a in ("--env", f"V{i:02d}=" + "x" * (10 + i))] + ["--env", "GEHEIM=s3cr3tPW"]
     mit_mock(umg, tmp_path, *envs)
     umg.konfig({"exec -i": {"stdout": '{"eintraege":[],"gekuerzt":0}\n'}})
     r = modell(umg, "--protokoll")
     assert r.returncode == 0, r.stderr
     werte = json.loads(exec_aufrufe(umg)[0]["stdin"])["werte"]
-    assert len(werte) == 50
-    assert {w["name"] for w in werte} >= {f"V{i:02d}" for i in range(6, 55)} | {"OPENAI_API_KEY"}
-    assert not {w["name"] for w in werte} & {f"V{i:02d}" for i in range(0, 6)}      # die kürzesten (6 bis 11 Zeichen) entfallen
-    assert "50" in r.stderr and "56" in r.stderr and "xxxxxx" not in r.stderr
+    assert len(werte) == 57 and "GEHEIM" in {w["name"] for w in werte}
+    assert r.stderr == ""
+
+
+@pytest.mark.parametrize("n, rc", [(199, 0), (200, 2)])     # dazu kommt der Dummy-Schlüssel von --modell-mock openai: 200 bzw. 201 Werte
+def test_modell_protokoll_genau_200_werte_ok_201_exit2(umg, tmp_path, n, rc):
+    mit_mock(umg, tmp_path, *[a for i in range(n) for a in ("--env", f"W{i:03d}=wert-{i:03d}-xyz")])
+    umg.konfig({"exec -i": {"stdout": '{"eintraege":[],"gekuerzt":0}\n'}})
+    r = modell(umg, "--protokoll")
+    assert r.returncode == rc, r.stderr
+    if rc == 0:
+        assert len(json.loads(exec_aufrufe(umg)[0]["stdin"])["werte"]) == 200
+    else:
+        assert "201" in r.stderr and "wert-" not in r.stderr and exec_aufrufe(umg) == []
 
 
 def test_modell_protokoll_wert_zu_lang_exit2(umg, tmp_path):

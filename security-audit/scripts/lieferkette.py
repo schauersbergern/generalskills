@@ -8,7 +8,8 @@ Aufruf (immer als einzelner einfacher Befehl, siehe Netzregel):
 
 `secrets` (Budget 300 s; `gitleaks dir` zuerst höchstens 120 s ab Start, nach den Vorsuchen mindestens 60 s, die Schwärzung danach
 bis zum Gesamtbudget, ein Ablauf ist Exit 4) schwärzt zuerst jede von gitleaks erkannte Secret-Fundstelle der Arbeitskopie (gleiche
-Länge, Zeichen `*`, `\\n` und `\\r` bleiben), setzt dann den Marker `<zustand>/lieferkette/geschwaerzt` (mit der Kennung der Arbeitskopie
+Länge, Zeichen `*`, `\\n` und `\\r` bleiben) und prüft das mit einem zweiten `gitleaks dir`-Lauf nach (die Spalten von gitleaks stimmen bei
+sehr langen Zeilen nicht: Restfunde werden zeilenweise ganz geschwärzt, bleibt danach einer, ist es Exit 4), setzt dann den Marker `<zustand>/lieferkette/geschwaerzt` (mit der Kennung der Arbeitskopie
 aus `quelle.fertig`; wird die Kopie währenddessen neu erstellt, Exit 4 ohne Marker) und prüft danach die Historie in einem
 Spiegelklon des Repos. `secrets` und `abhaengigkeiten` teilen sich je Lauf eine Sperre (flock auf `<zustand>/lieferkette`): wer sie
 nicht bekommt, endet mit Exit 1, ohne etwas zu löschen. Ausgabe (JSON auf stdout): `befunde_roh` je (Regel, Datei) mit `regel`,
@@ -17,7 +18,7 @@ nicht bekommt, endet mit Exit 1, ohne etwas zu löschen. Ausgabe (JSON auf stdou
 gitleaks-Felder `Secret`, `Match`, `Author`, `Email`, `Message` und `Fingerprint` werden nie ausgegeben, kein Secret-Wert
 verlässt den Prozess. Grenze: gitleaks überspringt mit `useDefault = true` bestimmte Pfade (`STANDARD_AUSNAHMEN`, z. B.
 `node_modules/`, Lockfiles, `*.svg`); Textdateien dieser Klassen in der Arbeitskopie werden weder geprüft noch geschwärzt und
-stehen deshalb im Hinweis „gitleaks-Standardausnahmen nicht geprüft: …“. Secrets ohne bekanntes Muster erkennt gitleaks nirgends: „geschwärzt“ heißt „soweit gitleaks sie erkennt“.
+stehen deshalb im Hinweis „gitleaks-Standardausnahmen nicht geprüft: …“. Secrets ohne bekanntes Muster erkennt gitleaks nirgends, und in sehr langen Zeilen übersieht es Secrets an seinen Puffergrenzen (8.30.1 gemessen: ab etwa Byte 124 955 einer Zeile): „geschwärzt“ heißt „soweit gitleaks sie erkennt“.
 
 `abhaengigkeiten` (Budget 300 s) kopiert jedes Lockfile (npm `package-lock.json`/`npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`;
 ohne `node_modules/`) mit seinem Dateinamen in einen eigenen leeren Ordner unter `<zustand>/lieferkette/abh/` und ruft darauf
@@ -25,7 +26,7 @@ ohne `node_modules/`) mit seinem Dateinamen in einen eigenen leeren Ordner unter
 Kundenrepo, keine `osv-scanner.toml` des Repos). Ausgabe (JSON auf stdout): `pakete` je Paket (nicht je Advisory) mit `paket`,
 `version`, `lockfile`, `zeile`, `advisories` (`id`, `aliase`, `zusammenfassung` ≤ 200, `details` ≤ 500 Zeichen, einzeilig),
 `behoben_in` (je Advisory die kleinste Fix-Version oberhalb der installierten im passenden Versionsbereich, davon das Maximum),
-`dev` (true nur bei `dev: true` im npm-Lockfile, sonst false; yarn und pnpm tragen keine Dev-Angabe) und `kev` (true/false, null
+`dev` (true nur bei `dev: true` im npm-Lockfile oder im pnpm-Lockfile bis Format 6.0, sonst false; yarn und pnpm ab Format 9 tragen keine Dev-Angabe) und `kev` (true/false, null
 wenn der Katalog nicht geladen werden konnte), dazu `hinweise`. Der KEV-Katalog der CISA wird je Lauf einmal geladen und zwischengespeichert
 (Cache `<zustand>/lieferkette/kev.json`; scheitert das Zwischenspeichern, lädt der nächste Aufruf erneut; Weiterleitungen nur auf https); `SECURITY_AUDIT_KEV_DATEI` ersetzt den Download durch eine lokale Datei. Aus Kundendateien
 erscheinen nur Paketnamen, Versionen und Pfade.
@@ -85,8 +86,8 @@ MAX_COMMITS = 20
 MAX_BEFUNDE_ROH = 200          # Einträge in `befunde_roh` (Rest als Hinweis; die in HEAD vorhandenen zuerst)
 MAX_NENNUNGEN = 10             # Dateien je Hinweis zur Repo-Konfiguration
 GITLEAKS_TOML = "[extend]\nuseDefault = true\n"
-KONFIG_NAMEN = (".gitleaks.toml", ".gitleaksignore", "osv-scanner.toml")
-ARBEIT = ("leer", "leer-ignore", "gitleaks.toml", "gl-dir.json", "gl-git.json", "spiegel.git", "abh")   # unter <zustand>/lieferkette/
+KONFIG_NAMEN = (".gitleaks.toml", ".gitleaksignore")     # `osv-scanner.toml` meldet `abhaengigkeiten` selbst
+ARBEIT = ("spiegel.git", "leer", "leer-ignore", "gitleaks.toml", "gl-dir.json", "gl-git.json", "abh")   # unter <zustand>/lieferkette/; der Spiegel (ungeschwärzte Historie) zuerst
 VOLLER_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 ALLOW_MARKE = b"gitleaks:allow"
 
@@ -142,15 +143,30 @@ STANDARD_AUSNAHMEN = (
             gross_klein=True),
     _klasse("gitleaks.toml", r"gitleaks\.toml", "gitleaks.toml", ".gitleaks.toml", "sub/gitleaks.toml", "old-gitleaks.toml",
             "gitleaks.toml.example"),
-    _klasse(".git-Ordner", r"(?:^|/)\.git/", "sub/.git/a.js", "x/.git/config", gross_klein=True),
+    _klasse(".git (Ordner oder Datei)", r"(?:^|/)\.git(?:/|$)", "sub/.git/a.js", "x/.git/config", ".git", "sub/.git", gross_klein=True),
+    _klasse("Python-Umgebungen (venv, site-packages, dist-info)",
+            r"(?:^|/)(?:v?env|virtualenv)/lib(?:64)?(?:/.*)?$"
+            r"|(?:^|/)(?:lib(?:64)?/python[23](?:\.\d{1,2})+|python/[23](?:\.\d{1,2})+/lib(?:64)?)(?:/.*)?$"
+            r"|(?:^|/)[a-z0-9_.]+-[0-9.]+\.dist-info(?:/.+)?$",
+            "venv/lib/python3.11/site-packages/a.py", "env/lib/python3.9/site-packages/a.py", "lib/python3.11/site-packages/a.py",
+            "python/3.11/lib/site-packages/a.py", "foo-1.0.dist-info/METADATA", "x/virtualenv/lib64/a.py", "venv/lib",
+            ".venv/lib/python3.12/a.py", "ENV/LIB/a.py", "a/lib64/python3.11/b.py", gross_klein=True),
+    _klasse("JavaScript-Bibliotheken (angular, bootstrap, jquery, plotly, swagger-ui) und javascript.json",
+            r"(?:^|/)(?:angular|bootstrap|jquery(?:-?ui)?|plotly|swagger-?ui)[a-zA-Z0-9.-]*(?:\.min)?\.js(?:\.map)?$"
+            r"|(?:^|/)javascript\.json$",
+            "static/jquery-3.6.0.min.js", "bootstrap.js", "web/angular.min.js.map", "plotly-latest.min.js", "swagger-ui-bundle.js",
+            "jquery-ui.js", "static/javascript.json", gross_klein=True),
+    _klasse("Sonstiges (Ruby-Gem, Gradle-Prüfsummen, Datenbank-Refaktorlog)",
+            r"\.gem$|verification-metadata\.xml|Database.refactorlog",
+            "a.gem", "gradle/verification-metadata.xml", "db/Database.refactorlog", "sub/verification-metadata.xml.bak"),
     _klasse("Bilder (bmp, gif, jpg, png, svg, tif)", r"\.(?:bmp|gif|jpe?g|png|svg|tiff?)$",
             "x.svg", "x.png", "x.jpg", "x.jpeg", "x.gif", "x.bmp", "x.tif", "x.tiff", "x.SVG", gross_klein=True),
     _klasse("Schriften (eot, otf, ttf, woff)", r"\.(?:eot|otf|ttf|woff2?)$",
             "x.eot", "x.otf", "x.ttf", "x.woff", "x.woff2", "x.TTF", gross_klein=True),
     _klasse("Office- und Binärformate (doc, xls, pdf, exe, gltf u. ä.)",
-            r"\.(?:docx?|xlsx?|pdf|bin|socket|vsidx|v2|suo|wsuo|pdb|exe|gltf)$",
+            r"\.(?:docx?|xlsx?|pdf|bin|socket|vsidx|v2|suo|wsuo|.dll|pdb|exe|gltf)$",      # `.dll` mit Punkt als Platzhalter, wie bei gitleaks
             "x.doc", "x.docx", "x.xls", "x.xlsx", "x.pdf", "x.bin", "x.socket", "x.vsidx", "x.v2", "x.suo", "x.wsuo", "x.pdb",
-            "x.exe", "x.gltf", "x.PDF", gross_klein=True),
+            "x.exe", "x.gltf", "x.PDF", "x.adll", gross_klein=True),
     _klasse("Archive (zip, tar, gz, bz2, xz, zst, lz4, 7z, rar)", r"\.(?:zip|tar|gz|bz2|xz|zst|lz4|7z|rar)",
             "x.zip", "x.tar", "x.gz", "x.bz2", "x.xz", "x.zst", "x.lz4", "x.7z", "x.rar", "x.tar.gz", "x.GZ", gross_klein=True),
 )
@@ -211,9 +227,18 @@ def _sperre(lk: str):
 
 
 def _aufraeumen(lk: str) -> None:
-    """Arbeitsdateien unter `<zustand>/lieferkette/` löschen (Spiegel, Reports, Config, leere Ordner); der Marker bleibt."""
+    """Arbeitsdateien unter `<zustand>/lieferkette/` löschen (Spiegel zuerst, dann Reports, Config, leere Ordner); der Marker
+    bleibt. Jeder Eintrag wird versucht, auch nach einem Fehler (der Spiegel mit der ungeschwärzten Historie darf nicht an einem
+    anderen Eintrag hängen bleiben); danach wirft die Funktion einen PocFehler (Exit 1) mit allen Fehlern. Auch rohe OSErrors
+    aus dem Löschen sind PocFehler."""
+    fehler = []
     for name in ARBEIT:
-        poc._entferne(os.path.join(lk, name), lk)
+        try:
+            poc._entferne(os.path.join(lk, name), lk)
+        except (PocFehler, OSError) as e:
+            fehler.append(f"{name}: {_t(e, 150)}")
+    if fehler:
+        raise PocFehler("; ".join(fehler), code=1)
 
 
 def _ausgabe(daten: dict) -> None:
@@ -392,9 +417,12 @@ def _bytes_von(text: str) -> bytes:
     return text.encode("utf-8", "surrogateescape")
 
 
-def _schwaerze_treffer(orig: bytes, neu: bytearray, starts: list[int], t: dict, anzeige: str) -> list[str]:
+def _schwaerze_treffer(orig: bytes, neu: bytearray, starts: list[int], t: dict, anzeige: str,
+                       ganze_zeilen: bool = False) -> list[str]:
     """Eine Fundstelle in `neu` schwärzen (Koordinaten gegen das unveränderte `orig`). gitleaks 8.30 meldet Byte-Spalten,
-    1-basiert, Ende inklusiv; ab Zeile 2 sind Start- und Endspalte um 1 zu groß; `EndColumn` kann hinter dem Zeilenende liegen."""
+    1-basiert, Ende inklusiv; ab Zeile 2 sind Start- und Endspalte um 1 zu groß; `EndColumn` kann hinter dem Zeilenende liegen.
+    Die Spalten stimmen nicht immer (bei Zeilen ab etwa 120 KB zählt gitleaks ab einer internen Stückgrenze): `ganze_zeilen`
+    ignoriert sie und schwärzt die Zeilen `StartLine` bis `EndLine` ganz (nur die Zeilennummern müssen stimmen)."""
     sl, el = _ganzzahl(t.get("StartLine")), _ganzzahl(t.get("EndLine"))
     sc, ec = _ganzzahl(t.get("StartColumn")), _ganzzahl(t.get("EndColumn"))
     if not 1 <= sl <= el <= len(starts):
@@ -403,6 +431,10 @@ def _schwaerze_treffer(orig: bytes, neu: bytearray, starts: list[int], t: dict, 
     def zeilen_ende(zeile: int) -> int:           # Offset des Zeilenendes ohne `\n`
         return starts[zeile + 1] - 1 if zeile + 1 < len(starts) else len(orig)
 
+    if ganze_zeilen:
+        von, bis = starts[sl - 1], zeilen_ende(el - 1)
+        neu[von:bis] = re.sub(rb"[^\r\n]", b"*", bytes(orig[von:bis]))
+        return [f"Schwärzung unscharf: {anzeige}:{sl} (ganze Zeile)"]
     sc0 = max(sc - 1 if sl > 1 else sc, 1)
     ec0 = ec - 1 if el > 1 else ec
     beginn = starts[sl - 1] + sc0 - 1
@@ -435,11 +467,13 @@ def _schwaerze_treffer(orig: bytes, neu: bytearray, starts: list[int], t: dict, 
     return hinweise
 
 
-def schwaerzen(datei: str, treffer: list[dict], wurzel: str | None = None) -> list[str]:
+def schwaerzen(datei: str, treffer: list[dict], wurzel: str | None = None, ganze_zeilen: bool = False) -> list[str]:
     """Fundstellen (Einträge aus dem gitleaks-Bericht) in `datei` überschreiben: nur der Secret-Anteil, byteweise `*`, gleiche
     Länge, `\\n` und `\\r` bleiben. Die Datei wird an Ort und Stelle beschrieben (Rechte und Inode bleiben), nie über einen
     Symlink. Rückgabe: Hinweise („Schwärzung unscharf: <datei>:<zeile>“, wenn Präfix/Suffix nicht an der berechneten Stelle
-    stehen; dann wird die ganze Spanne ohne Zeilenumbrüche geschwärzt). Wirft SchwaerzFehler, wenn die Datei nicht lesbar oder
+    stehen; dann wird die ganze Spanne ohne Zeilenumbrüche geschwärzt). Ob die berechnete Stelle wirklich das Secret trifft,
+    weiß diese Funktion nicht (gitleaks meldet bei langen Zeilen falsche Spalten, `Match` ist mit `--redact` leer): das prüft
+    `_nachpruefen` mit einem zweiten gitleaks-Lauf; `ganze_zeilen` schwärzt die Zeilen ganz. Wirft SchwaerzFehler, wenn die Datei nicht lesbar oder
     beschreibbar ist oder eine Fundstelle nicht in der Datei liegt (dann bleibt die Datei unverändert)."""
     anzeige = _t(os.path.relpath(datei, wurzel) if wurzel else datei)
     try:
@@ -460,7 +494,7 @@ def schwaerzen(datei: str, treffer: list[dict], wurzel: str | None = None) -> li
         neu = bytearray(orig)
         hinweise: list[str] = []
         for t in treffer:
-            hinweise += _schwaerze_treffer(orig, neu, starts, t, anzeige)
+            hinweise += _schwaerze_treffer(orig, neu, starts, t, anzeige, ganze_zeilen)
         if bytes(neu) != orig:
             os.lseek(fd, 0, os.SEEK_SET)
             geschrieben = 0
@@ -474,11 +508,13 @@ def schwaerzen(datei: str, treffer: list[dict], wurzel: str | None = None) -> li
         os.close(fd)
 
 
-def _schwaerze_arbeitskopie(quelle: str, bericht: list[dict], ende: float | None = None) -> tuple[int, list[str]]:
+def _schwaerze_arbeitskopie(quelle: str, bericht: list[dict], ende: float | None = None,
+                             ganze_zeilen: bool = False, zaehlhinweis: bool = True) -> tuple[int, list[str]]:
     """Alle Fundstellen des `dir`-Berichts in der Arbeitskopie schwärzen. `File` wird aufgelöst (realpath) und muss innerhalb
     der Arbeitskopie liegen, sonst wird nichts geschrieben. Je Datei wird vorher die Frist `ende` (Wert von `time.monotonic()`)
     geprüft: ein Ablauf ist ein SchwaerzFehler (Teile der Arbeitskopie sind dann schon geschwärzt, es gibt keinen Marker).
-    Rückgabe: (Anzahl geschwärzter Fundstellen, Hinweise)."""
+    Rückgabe: (Anzahl geschwärzter Fundstellen, Hinweise); `zaehlhinweis=False` lässt den Hinweis mit der Anzahl weg.
+    Hinweise „Schwärzung unscharf“ stehen je (Datei, Zeile) einmal."""
     je_datei: dict[str, list[dict]] = {}
     draussen = 0
     for t in bericht:
@@ -496,13 +532,44 @@ def _schwaerze_arbeitskopie(quelle: str, bericht: list[dict], ende: float | None
     for nr, real in enumerate(sorted(je_datei)):
         if ende is not None and time.monotonic() >= ende:
             raise SchwaerzFehler(f"Zeitbudget für die Schwärzung erschöpft ({nr} von {len(je_datei)} Dateien geschwärzt)")
-        hinweise += schwaerzen(real, je_datei[real], quelle)
+        hinweise += schwaerzen(real, je_datei[real], quelle, ganze_zeilen)
         anzahl += len(je_datei[real])
     if draussen:
         hinweise.append(f"{draussen} Fundstellen außerhalb der Arbeitskopie ignoriert (nichts geschrieben)")
-    if anzahl:
+    if anzahl and zaehlhinweis:
         hinweise.insert(0, f"{anzahl} Secret-Fundstellen in der Arbeitskopie geschwärzt")
-    return anzahl, hinweise
+    return anzahl, list(dict.fromkeys(hinweise))
+
+
+def _innerhalb(quelle: str, bericht: list[dict]) -> list[dict]:
+    """Die Fundstellen des Berichts, deren Datei (realpath) in der Arbeitskopie liegt; SchwaerzFehler bei ungültigem Pfad."""
+    innen = []
+    for t in bericht:
+        pfad = t.get("File")
+        if not isinstance(pfad, str) or not pfad or "\0" in pfad:
+            raise SchwaerzFehler("Fundstelle ohne gültigen Dateipfad")
+        real = os.path.realpath(pfad if os.path.isabs(pfad) else os.path.join(quelle, pfad))
+        if os.path.commonpath([real, quelle]) == quelle:
+            innen.append(t)
+    return innen
+
+
+def _nachpruefen(quelle: str, lk: str, ende: float) -> list[str]:
+    """Fail-closed nach der Schwärzung: ein zweiter `gitleaks dir`-Lauf auf der Arbeitskopie darf nichts mehr finden. Die
+    Spalten von gitleaks sind nicht verlässlich (lange Zeilen), die Schwärzung kann daneben liegen. Restfunde werden deshalb
+    zeilenweise ganz geschwärzt und noch einmal geprüft; bleibt dann ein Fund (oder läuft die Frist ab), ist das ein
+    SchwaerzFehler (Exit 4, kein Marker). Rückgabe: Hinweise; die Nachschwärzung steht in einem eigenen Hinweis und zählt nicht
+    in `geschwaerzt` (das ist die Anzahl des ersten Laufs)."""
+    rest = _innerhalb(quelle, _gitleaks_dir(quelle, lk, ende))
+    if not rest:
+        return []
+    anzahl, hinweise = _schwaerze_arbeitskopie(quelle, rest, ende, ganze_zeilen=True, zaehlhinweis=False)
+    hinweise.insert(0, f"{anzahl} weitere Secret-Fundstellen bei der Nachprüfung zeilenweise geschwärzt "
+                       f"(nicht in `geschwaerzt` enthalten)")
+    uebrig = _innerhalb(quelle, _gitleaks_dir(quelle, lk, ende))
+    if uebrig:
+        raise SchwaerzFehler(f"nach der Schwärzung bleiben {len(uebrig)} Secret-Fundstellen in der Arbeitskopie")
+    return hinweise
 
 
 def _gitleaks_dir(quelle: str, lk: str, ende: float) -> list[dict]:
@@ -716,7 +783,12 @@ def _secrets_mit_sperre(a: argparse.Namespace, repo: str, quelle: str, lk: str, 
         return _secrets(a, repo, quelle, lk, marker, kopie, start, teil, ende)
     finally:
         gitkopie.frist_setzen(None)
-        _aufraeumen(lk)
+        try:
+            _aufraeumen(lk)
+        except PocFehler as e:
+            if not os.path.lexists(marker):       # ohne Marker bleibt es Exit 1 (Rest könnte in eine neue Kopie hineinragen)
+                raise
+            print(f"lieferkette.py: Aufräumen unvollständig, Marker gültig: {_t(e, 200)}", file=sys.stderr)
 
 
 def _secrets(a: argparse.Namespace, repo: str, quelle: str, lk: str, marker: str, kopie: str, start: float, teil: float,
@@ -735,6 +807,8 @@ def _secrets(a: argparse.Namespace, repo: str, quelle: str, lk: str, marker: str
         bericht = _gitleaks_dir(quelle, lk, ende_dir)
         _kopie_unveraendert(a.lauf, kopie)                # vor dem ersten Schreiben: der Bericht gilt dieser Kopie
         anzahl, schwaerz_hinweise = _schwaerze_arbeitskopie(quelle, bericht, ende)
+        if anzahl:
+            schwaerz_hinweise += _nachpruefen(quelle, lk, ende)
         _kopie_unveraendert(a.lauf, kopie)
     except SchwaerzFehler as e:
         return _schwaerzung_gescheitert(str(e))
@@ -750,8 +824,19 @@ def _secrets(a: argparse.Namespace, repo: str, quelle: str, lk: str, marker: str
         hinweise.append("Secret-Prüfung abgebrochen (Zeitbudget)")
     except (GitFehler, ReportFehler) as e:
         hinweise.append(f"Secret-Prüfung der Historie fehlgeschlagen ({_t(e, 200)})")
-    _aufraeumen(lk)                               # vor der Ausgabe: scheitert das Löschen, endet der Befehl mit Exit 1
-    _ausgabe({"befunde_roh": [{"regel": b["regel"], "datei": _t(b["datei"], 500), "zeile": b["zeile"],
+    steuer, lang = _pfad_hinweis_zaehler([b["datei"] for b in befunde])
+    if steuer:
+        hinweise.append(f"{steuer} Secret-Fundstellen der Historie mit unbrauchbarem Dateipfad (Zeilenangabe, Steuer- oder "
+                        f"unsichtbare Zeichen) nicht ausgegeben: Historie von Hand prüfen")
+    if lang:
+        hinweise.append(f"{lang} Secret-Fundstellen der Historie mit überlangem Dateipfad (über {PFAD_MAX} Zeichen) nicht "
+                        f"ausgegeben: Historie von Hand prüfen")
+    befunde = [b for b in befunde if _pfad_problem(b["datei"]) is None]
+    try:
+        _aufraeumen(lk)                           # vor der Ausgabe; der Marker ist gesetzt, die Kopie geschwärzt
+    except PocFehler as e:                        # kein Abbruch: SKILL.md liest jedes Exit ≠ 0 als „nicht geschwärzt“
+        hinweise.append(f"Aufräumen der Arbeitsdateien unvollständig ({_t(e, 200)}): {_t(lk)} von Hand löschen")
+    _ausgabe({"befunde_roh": [{"regel": b["regel"], "datei": b["datei"], "zeile": b["zeile"],
                                "commits": b["commits"], "in_head": b["in_head"]} for b in befunde],
               "hinweise": hinweise, "geschwaerzt": anzahl})
     return 0
@@ -882,15 +967,23 @@ def _einzeilig(text: object, grenze: int) -> str:
 
 def _lockfiles_finden(quelle: str, hinweise: list[str]) -> list[str]:
     """Relative Pfade (`/`) aller Lockfiles in der Arbeitskopie, sortiert; `node_modules` und `.git` werden nicht betreten,
-    Symlinks nicht angenommen (Hinweis)."""
+    Symlinks nicht angenommen (Hinweis). Eine Repo-eigene `osv-scanner.toml` wirkt nicht und steht als Hinweis in `hinweise`."""
     gefunden: list[str] = []
+    osv_toml: list[str] = []
+    unbrauchbar = {"steuer": 0, "lang": 0}
     for ordner, unter, dateien in os.walk(quelle):
         unter[:] = sorted(u for u in unter if u not in ("node_modules", ".git"))
-        for name in dateien:
+        for name in sorted(dateien):
+            if name == "osv-scanner.toml":
+                osv_toml.append(os.path.relpath(os.path.join(ordner, name), quelle).replace(os.sep, "/"))
             if name not in LOCKFILE_NAMEN:
                 continue
             pfad = os.path.join(ordner, name)
             rel = os.path.relpath(pfad, quelle).replace(os.sep, "/")
+            problem = _pfad_problem(rel)
+            if problem:                           # kein gültiger `lockfile`-Pfad im Schema: nicht prüfen, nur zählen
+                unbrauchbar[problem] += 1
+                continue
             try:
                 st = os.lstat(pfad)
             except OSError as e:
@@ -904,6 +997,12 @@ def _lockfiles_finden(quelle: str, hinweise: list[str]) -> list[str]:
                 hinweise.append(f"Lockfile zu groß (> {LOCKFILE_MAX // (1024 * 1024)} MiB), übersprungen: {_t(rel)}")
             else:
                 gefunden.append(rel)
+    if osv_toml:                                  # osv-scanner läuft auf einer Kopie ohne die Konfiguration des Repos
+        hinweise.append(f"osv-scanner.toml im Repo vorhanden, beim Audit ignoriert: {_nennung(osv_toml)}")
+    if unbrauchbar["steuer"]:
+        hinweise.append(f"{unbrauchbar['steuer']} Lockfiles mit Steuerzeichen oder ungültigen Zeichen im Pfad übersprungen")
+    if unbrauchbar["lang"]:
+        hinweise.append(f"{unbrauchbar['lang']} Lockfiles mit überlangem Pfad (über {PFAD_MAX} Zeichen) übersprungen")
     gefunden.sort()
     if len(gefunden) > MAX_LOCKFILES:
         hinweise.append(f"{len(gefunden)} Lockfiles gefunden, nur die ersten {MAX_LOCKFILES} geprüft")
@@ -1304,7 +1403,8 @@ def _lockfile_eintraege(rel: str, name: str, text: bytes, osv_daten: object, end
         return []
     inhalt = text.decode("utf-8", "replace")
     zeilen = inhalt.splitlines()
-    index = _npm_index(inhalt) if name in NPM_LOCKFILES else _NpmIndex({}, {})
+    index = (_npm_index(inhalt) if name in NPM_LOCKFILES else _NpmIndex(_pnpm_dev(inhalt), {}) if name == "pnpm-lock.yaml"
+             else _NpmIndex({}, {}))
     sortiert = sorted(pakete, key=lambda p: (p[0], _version_key(p[1])))
     zeilen_index = _ZeilenIndex(zeilen, index, name, [(n, v) for n, v, _ in sortiert])
     erg = []
@@ -1315,7 +1415,7 @@ def _lockfile_eintraege(rel: str, name: str, text: bytes, osv_daten: object, end
             ohne_zeile += 1
         else:
             zeile = zeilen_index.zeile(pname, version)
-        erg.append({"paket": _t(pname, 214), "version": _t(version, 100), "lockfile": _t(rel, 500), "zeile": zeile,
+        erg.append({"paket": _t(pname, 214), "version": _t(version, 100), "lockfile": rel, "zeile": zeile,
                     "vulns": vulns, "behoben_in": behoben_in(vulns, pname, version),
                     "dev": index.dev.get((pname, version), False)})
     if ohne_zeile and hinweise is not None:
@@ -1426,6 +1526,11 @@ YAML_PRAEFIX = re.compile(r"(?:-\s+|(?:run|script|before_script|after_script|com
 ENV_ZUWEISUNG = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 BEFEHLSTRENNER = re.compile(r"&&|\|\||;|\|")
 KURZ_GLOBAL = re.compile(r"-[A-Za-z]*g[A-Za-z]*")
+# npm-Aliasse von `install` (npm `lib/utils/cmd-list.js`, `install-test` mit `it`); `ci` und seine Aliasse sind lockfile-treu
+NPM_INSTALL_ALIASSE = ("install", "i", "in", "ins", "inst", "insta", "instal", "isnt", "isnta", "isntal", "isntall", "add",
+                       "install-test", "it")
+PNPM_REKURSIV = ("recursive", "multi", "m")
+NPX_WERT_OPTIONEN = frozenset(("-p", "--package", "-c", "--call"))
 WERT_OPTIONEN = frozenset(("--prefix", "-C", "--cwd", "--workspace", "-w", "--registry", "--cache", "--loglevel",
                            "--userconfig", "--filter", "-F", "--dir", "--modules-folder"))
 VORSATZ_BEFEHLE = ("sudo", "env", "exec", "time", "nohup", "timeout")
@@ -1525,6 +1630,23 @@ def _sauber(name: str, datei: bool = False) -> bool:
     return (name.isascii() and name.isprintable()) or _t(name, 10**9) == name
 
 
+def _pfad_problem(rel: str) -> str | None:
+    """None, wenn `rel` (relativer Pfad, `/`) als `datei` oder `lockfile` ins Befund-Schema passt; sonst "lang" (über
+    `PFAD_MAX`) oder "steuer" (Steuer-, Format- oder unsichtbare Zeichen, Backtick, Zeilenangabe am Ende, nicht normalisiert).
+    Solche Pfade werden nie gekappt (der Pfad passte dann nicht mehr zum Repo), sondern ausgelassen und gemeldet."""
+    if len(rel) > PFAD_MAX:
+        return "lang"
+    if not _sauber(rel, True) or bericht._pfad_fehler(rel):
+        return "steuer"
+    return None
+
+
+def _pfad_hinweis_zaehler(rels: list[str]) -> tuple[int, int]:
+    """(Anzahl mit Pfadproblem "steuer", Anzahl mit "lang") unter `rels`."""
+    probleme = [_pfad_problem(r) for r in rels]
+    return probleme.count("steuer"), probleme.count("lang")
+
+
 def _eltern(ordner: str) -> list[str]:
     """`a/b` -> [`a/b`, `a`, ``]: der Ordner und alle Elternordner bis zur Wurzel der Arbeitskopie (leerer String)."""
     teile = ordner.split("/") if ordner else []
@@ -1543,6 +1665,7 @@ class _Baum:
         self.pakete: list[tuple[str, int]] = []          # package.json
         self.texte: list[tuple[str, str, int]] = []      # (rel, art, größe) mit art docker | ci | make
         self.konfig: dict[tuple[str, str], tuple[str, int]] = {}    # (Ordner, Name) -> (rel, größe)
+        self.pfade_uebersprungen = 0                     # Pfade mit Steuerzeichen oder über PFAD_MAX (Dateien und Ordner)
 
 
 def _art(name: str, ordner: str) -> str | None:
@@ -1622,6 +1745,7 @@ def _baum_suchen(quelle: str, ende: float, s: _Sammler) -> _Baum:
 
 
 def _pfad_hinweise(baum: _Baum, steuer: int, lang: int, s: _Sammler) -> _Baum:
+    baum.pfade_uebersprungen = steuer + lang
     if steuer:
         s.hinweis(f"{steuer} Pfade mit Steuerzeichen oder ungültigen Zeichen übersprungen")
     if lang:
@@ -1808,30 +1932,52 @@ def _flag_an(args: list[str], name: str) -> bool:
     return an
 
 
-def _bewerte(tok: list[str]) -> tuple[str, str | None, bool | None] | None:
-    """(Paketmanager, Label, skripte_aus) für npm-, pnpm- und yarn-Befehle, die installieren; sonst None. Label None: der Aufruf
-    ist lockfile-treu (`npm ci`, `--frozen-lockfile`, `--immutable`, jeweils nicht `=false`) oder ein Sonderfall (global,
-    nur Lockfile). `skripte_aus` nur für npm- und pnpm-Installationen: trägt der Aufruf `--ignore-scripts`?"""
-    pm = tok[0]
-    if pm not in ("npm", "pnpm", "yarn"):
-        return None
-    args = tok[1:]
-    flags = {a.split("=", 1)[0] for a in args if a.startswith("-")}
-    sub = None
-    i = 0
+def _naechstes_wort(args: list[str], ab: int) -> tuple[str | None, int]:
+    """Erstes Wort ohne führendes `-` ab Index `ab` (Optionen mit Wert, `WERT_OPTIONEN`, überspringen ihr Argument) und sein
+    Index; (None, len(args)) ohne ein solches Wort."""
+    i = ab
     while i < len(args):
         a = args[i]
         if a.startswith("-"):
             i += 2 if (a in WERT_OPTIONEN and "=" not in a) else 1
             continue
-        sub = a
-        break
+        return a, i
+    return None, len(args)
+
+
+def _bewerte_npx(args: list[str]) -> tuple[str, str | None, bool | None] | None:
+    """`npx [Optionen] <npm|pnpm|yarn>[@Version] …`: wie der Paketmanager ohne `npx` bewerten; sonst None."""
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        i += 2 if args[i] in NPX_WERT_OPTIONEN else 1
+    if i >= len(args):
+        return None
+    name = args[i].split("@", 1)[0]
+    return _bewerte([name, *args[i + 1:]]) if name in ("npm", "pnpm", "yarn") else None
+
+
+def _bewerte(tok: list[str]) -> tuple[str, str | None, bool | None] | None:
+    """(Paketmanager, Label, skripte_aus) für npm-, pnpm- und yarn-Befehle, die installieren; sonst None. Label None: der Aufruf
+    ist lockfile-treu (`npm ci`, `--frozen-lockfile`, `--immutable`, jeweils nicht `=false`) oder ein Sonderfall (global,
+    nur Lockfile). `skripte_aus` nur für npm- und pnpm-Installationen: trägt der Aufruf `--ignore-scripts`?"""
+    pm = tok[0]
+    if pm == "npx":                                          # `npx -y pnpm install` führt den Paketmanager aus
+        return _bewerte_npx(tok[1:])
+    if pm not in ("npm", "pnpm", "yarn"):
+        return None
+    args = tok[1:]
+    flags = {a.split("=", 1)[0] for a in args if a.startswith("-")}
+    sub, i = _naechstes_wort(args, 0)
+    if pm == "pnpm" and sub in PNPM_REKURSIV:                # `pnpm recursive install`: das Wort danach ist der Unterbefehl
+        sub, i = _naechstes_wort(args, i + 1)
+        if sub is None:
+            return None
     ist_global = bool({"--global", "--package-lock-only", "--lockfile-only"} & flags) or "--location=global" in args or \
         any(KURZ_GLOBAL.fullmatch(a) for a in args if not a.startswith("--"))
     if pm == "npm":
-        if sub not in ("install", "i", "ci", "clean-install") or ist_global:
+        if sub not in NPM_INSTALL_ALIASSE + ("ci", "clean-install") or ist_global:
             return None
-        return pm, (f"npm {sub}" if sub in ("install", "i") else None), _flag_an(args, "--ignore-scripts")
+        return pm, (f"npm {sub}" if sub in NPM_INSTALL_ALIASSE else None), _flag_an(args, "--ignore-scripts")
     if sub is None and flags & {"--version", "-v", "--help", "-h"}:
         return None
     if pm == "pnpm":
@@ -1936,6 +2082,46 @@ def _pnpm_name(kopf: str) -> str:
         start = schraeg + 1
     m = re.search(r"[@/]", h[start:])
     return h if m is None else h[:start + m.start()]
+
+
+def _pnpm_version(kopf: str, name: str) -> str | None:
+    """Version aus dem Kopf eines `packages:`-Eintrags (`/name@1.0.0`, `name@1.0.0(peer@2)`, `/name/1.0.0_peer@x`)."""
+    h = kopf.strip().rstrip(":").strip().strip("\"'").lstrip("/")
+    if not h.startswith(name) or len(h) <= len(name) or h[len(name)] not in "@/":
+        return None
+    version = re.split(r"[(_]", h[len(name) + 1:], maxsplit=1)[0]
+    return version or None
+
+
+def _pnpm_dev(text: str) -> dict[tuple[str, str], bool]:
+    """(Name, Version) -> True, wenn jeder `packages:`-Eintrag dazu `dev: true` trägt (Lockfile-Format 5.x und 6.0; ab Format 9
+    gibt es die Angabe nicht mehr: dann leer, `dev` bleibt false)."""
+    m = re.search(r"^lockfileVersion:\s*['\"]?(\d+)", text, re.MULTILINE)
+    if m is None or int(m.group(1)) >= 9:
+        return {}
+    eintraege: list[tuple[tuple[str, str], bool]] = []          # (Schlüssel, trägt `dev: true`) je Eintrag der Datei
+    in_paketen = False
+    for z in text.splitlines():
+        if z and not z[0].isspace() and z[0] != "#":
+            in_paketen = z.rstrip() == "packages:"
+            continue
+        if not in_paketen:
+            continue
+        k = re.match(r"  (\S.*):\s*$", z)
+        if k and not z.startswith("   "):
+            name = _pnpm_name(k.group(1))
+            version = _pnpm_version(k.group(1), name)
+            if version:
+                eintraege.append(((name, version), False))
+            else:
+                eintraege.append((("", ""), False))              # nicht lesbarer Kopf: Zeilen darunter gehören keinem Paket
+        elif eintraege and re.fullmatch(r"    dev:\s*true\s*", z):
+            eintraege[-1] = (eintraege[-1][0], True)
+    dev: dict[tuple[str, str], bool] = {}
+    for schluessel, ist_dev in eintraege:
+        if schluessel != ("", ""):
+            dev[schluessel] = dev.get(schluessel, True) and ist_dev
+    return dev
 
 
 def _pnpm_skript_pakete(text: str) -> list[tuple[str, int]]:

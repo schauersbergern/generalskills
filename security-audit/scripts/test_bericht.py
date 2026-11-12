@@ -120,6 +120,44 @@ def test_basisname_und_kollision(tmp_path):
     assert bericht.kontext(str(r), None, JETZT)["basisname"] == k1["basisname"] + "-3"
 
 
+def test_vorhandene_ergebnisdateien_ohne_reservierung_kollidieren_r1_5(tmp_path):
+    """R1-5: Früherer Lauf gerendert (`rendern` löscht `.reserviert`), gleicher Repo/SHA/Tag: Basisname -2, nichts überschrieben."""
+    r = neues_repo(tmp_path / "kunde-portal", origin="https://github.com/a/kunde-portal.git")
+    k1 = bericht.kontext(str(r), None, JETZT)
+    ordner = k1["ausgabe_ordner"]
+    os.remove(os.path.join(ordner, k1["basisname"] + ".reserviert"))           # wie nach `rendern`
+    for ext in (".md", ".json"):
+        with open(os.path.join(ordner, k1["basisname"] + ext), "w") as f:
+            f.write("alt")
+        k2 = bericht.kontext(str(r), None, JETZT)
+        assert k2["basisname"] == k1["basisname"] + "-2", ext
+        os.remove(os.path.join(ordner, k2["basisname"] + ".reserviert"))
+        os.remove(os.path.join(ordner, k1["basisname"] + ext))
+
+
+def test_teilpfad_mit_steuerzeichen_ist_ungueltig_auch_wenn_der_pfad_existiert_r1_20(tmp_path):
+    r = neues_repo(tmp_path / "r", {"src\nx/a.js": "x", "ok.js": "y"})
+    with pytest.raises(bericht.KontextFehler, match="Ungültiger Teilpfad"):
+        bericht.kontext(str(r), "src\nx", JETZT)
+
+
+def test_kontext_zeitbudget_nach_repo_hinweise_reserviert_nichts_r1_20(tmp_path, monkeypatch):
+    r = neues_repo(tmp_path / "kunde-portal", origin="https://github.com/a/kunde-portal.git")
+    monkeypatch.setattr(bericht.gitkopie, "repo_hinweise", lambda *a, **k: [])
+    monkeypatch.setattr(bericht.gitkopie, "frist_erschoepft", lambda: True)
+    with pytest.raises(bericht.KontextFehler, match="Zeitbudget"):
+        bericht.kontext(str(r), None, JETZT)
+    ordner = os.path.join(str(tmp_path / "home"), ".claude", "security-reviews", "kunde-portal")
+    assert not os.path.isdir(ordner) or not os.listdir(ordner)
+
+
+def test_kontext_ausgabe_ist_ascii_r1_20(tmp_path):
+    r = neues_repo(tmp_path / "r", {"ä/a.js": "x"})
+    p = lauf("kontext", "--repo", str(r), "--teilpfad", "ä")
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.isascii() and json.loads(p.stdout)["teilpfad"] == "ä"
+
+
 def test_teilpfad_slug_und_normalisierung(tmp_path):
     r = neues_repo(tmp_path / "kunde-portal", {"Src/API v2/x.js": "x", "lib/b.js": "y"},
                    origin="https://github.com/a/kunde-portal.git")
@@ -192,8 +230,9 @@ def test_kontext_bleibt_beim_ermittelten_sha_wenn_head_wandert_haertung_b3(tmp_p
         return echt(wurzel)
 
     monkeypatch.setattr(bericht, "_repo_name", wanderer)
-    k = bericht.kontext(str(r), "a", JETZT)
-    assert k["sha"] == sha1 and k["repo_konfiguration"] == []
+    k = bericht.kontext(str(r), "a", JETZT, repo_konfig_geprueft=True)
+    # Versioniert (im gemeldeten SHA) ist nichts; die vom Wanderer geschriebene `.mcp.json` liegt aber im Arbeitsbaum (R1-18).
+    assert k["sha"] == sha1 and k["repo_konfiguration"] == [".mcp.json (nur im Arbeitsbaum, nicht im geprüften Commit)"]
     assert not any("Symlink" in h for h in k["hinweise"]), k["hinweise"]
     assert roh(r, "rev-parse", "HEAD") != sha1
 
@@ -246,10 +285,56 @@ def test_ausgabe_ordner_standard_unter_home(tmp_path, monkeypatch):
 
 def test_repo_konfiguration_escaped_durchgereicht(tmp_path):
     r = neues_repo(tmp_path / "r", {".mcp.json": "{}", "sub/.claude/commands/x\ny.md": "x", "src/a.js": "x"})
-    k = bericht.kontext(str(r), None, JETZT)
+    k = bericht.kontext(str(r), None, JETZT, repo_konfig_geprueft=True)
     assert ".mcp.json" in k["repo_konfiguration"]
     assert "sub/.claude/commands/x\\ny.md" in k["repo_konfiguration"]
     assert all("\n" not in p for p in k["repo_konfiguration"])
+
+
+def test_repo_konfiguration_ohne_schalter_bricht_vor_der_reservierung_ab_r1_14(tmp_path):
+    """R1-14: kein `.reserviert` bleibt liegen, der Neustart mit Schalter bekommt den normalen Basisnamen (kein -2)."""
+    r = neues_repo(tmp_path / "kunde-portal", {".mcp.json": "{}", "src/a.js": "x"}, origin="https://github.com/a/kunde-portal.git")
+    with pytest.raises(bericht.KontextFehler) as e:
+        bericht.kontext(str(r), None, JETZT)
+    assert ".mcp.json" in str(e.value) and "repo-konfig-geprueft" in str(e.value)
+    ordner = os.path.join(str(tmp_path / "home"), ".claude", "security-reviews", "kunde-portal")
+    assert not [n for n in os.listdir(ordner) if n.endswith(".reserviert")] if os.path.isdir(ordner) else True
+    k = bericht.kontext(str(r), None, JETZT, repo_konfig_geprueft=True)
+    assert k["basisname"] == f"2026-11-09-{k['sha7']}"
+    assert k["repo_konfiguration"] == [".mcp.json"]
+
+
+def test_repo_konfiguration_im_arbeitsbaum_wird_gemeldet_r1_18(tmp_path):
+    """R1-18: ungetrackte/ignorierte Konfiguration lädt Claude Code trotzdem; sie wird ohne Inhaltszugriff gemeldet."""
+    r = neues_repo(tmp_path / "kunde-portal", {"src/a.js": "x", ".claude/settings.json": "{}"},
+                   origin="https://github.com/a/kunde-portal.git")
+    assert bericht.kontext(str(r), None, JETZT, repo_konfig_geprueft=True)["repo_konfiguration"] == [".claude/settings.json"]
+    (r / ".claude" / "settings.local.json").write_text("{}")
+    (r / ".mcp.json").write_text("{}")
+    (r / ".claude" / "commands").mkdir()
+    with pytest.raises(bericht.KontextFehler) as e:
+        bericht.kontext(str(r), None, JETZT)
+    for erwartet in (".claude/settings.json", ".claude/settings.local.json (nur im Arbeitsbaum, nicht im geprüften Commit)",
+                     ".mcp.json (nur im Arbeitsbaum, nicht im geprüften Commit)", ".claude/commands (nur im Arbeitsbaum, nicht im geprüften Commit)"):
+        assert erwartet in str(e.value), erwartet
+
+
+def test_arbeitsbaum_konfiguration_nur_unversioniertes_und_nie_inhalt_r1_18(tmp_path):
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.json").write_text("{}")
+    (tmp_path / ".claude" / "skills").mkdir()
+    (tmp_path / ".claude" / "settings.local.json").symlink_to(tmp_path / "gibt-es-nicht")     # lstat: kaputter Link zählt
+    assert bericht.gitkopie.arbeitsbaum_konfiguration(str(tmp_path), [".claude/settings.json", ".claude/skills/x/SKILL.md"]) == \
+        [".claude/settings.local.json"]
+    assert bericht.gitkopie.arbeitsbaum_konfiguration(str(tmp_path / "leer"), []) == []
+
+
+def test_repo_konfiguration_cli_exit_3_und_schalter_r1_14(tmp_path, capsys):
+    r = neues_repo(tmp_path / "kunde-portal", {".mcp.json": "{}"}, origin="https://github.com/a/kunde-portal.git")
+    assert bericht.main(["kontext", "--repo", str(r)]) == 3
+    assert "Gefunden: .mcp.json" in capsys.readouterr().err
+    assert bericht.main(["kontext", "--repo", str(r), "--repo-konfig-geprueft"]) == 0
+    assert json.loads(capsys.readouterr().out)["repo_konfiguration"] == [".mcp.json"]
 
 
 def test_hinweise_aus_repo_hinweise(tmp_path):
@@ -375,6 +460,42 @@ def test_schema_teilpfad_und_projekt_gesetzt():
     d["teilpfad"] = "src"
     d["projekt"] = None
     assert bericht.pruefe_schema(d) == []
+
+
+@pytest.mark.parametrize("status", ["bestaetigt", "bestätigt ", "BESTÄTIGT", "offen", "", None, 1])
+def test_schema_ungueltiger_status_wird_abgelehnt_r1_5(status):
+    """R1-5: Ein Status außerhalb der vier erlaubten hätte sonst weder poc- noch code_pfad-Pflicht, und `markdown()` übergeht ihn."""
+    d = beispiel()
+    d["befunde"] = [befund(id="S-9", status=status)]
+    fehler = bericht.pruefe_schema(d)
+    assert any("S-9" in f and "status" in f for f in fehler), fehler
+
+
+@pytest.mark.parametrize("version", [2, 0, "1", 1.0, True, None])
+def test_schema_version_muss_1_sein_r1_20(version):
+    d = beispiel()
+    d["version"] = version
+    assert "version muss 1 sein" in bericht.pruefe_schema(d)
+
+
+@pytest.mark.parametrize("eintrag", [{"flaeche": "API", "dateien": [1]}, {"flaeche": "API", "dateien": "x.js"},
+                                     {"flaeche": 1, "dateien": []}, {"dateien": []}, "API", None])
+def test_schema_karte_nicht_text_wirft_nie_r1_20(eintrag):
+    """R1-20: `pruefe_schema` wirft nie, auch bei Nicht-Text in `karte[].dateien`."""
+    d = beispiel()
+    d["karte"] = [eintrag]
+    assert any(f.startswith("karte[0]") for f in bericht.pruefe_schema(d))
+
+
+def test_rendern_json_groessengrenze_r1_20(tmp_path, monkeypatch, capsys):
+    pfad = tmp_path / "b.json"
+    pfad.write_text(json.dumps(beispiel()))
+    grenze = os.path.getsize(pfad)
+    monkeypatch.setattr(bericht, "MAX_JSON_BYTES", grenze)
+    assert bericht._rendern(str(pfad)) == 0                      # genau an der Grenze: erlaubt
+    pfad.write_text(json.dumps(beispiel()) + " ")
+    assert bericht._rendern(str(pfad)) == 2                      # ein Byte darüber: abgelehnt
+    assert "größer als 16 MB" in capsys.readouterr().err
 
 
 PFLICHT_JE_STATUS = [("bestätigt", "poc"), ("unbestätigt", "code_pfad"), ("verworfen", "grund")]
@@ -566,7 +687,8 @@ def test_schema_commits_grenzen():
     [{"name": "x", "version": "1"}], [{"name": "x", "version": "1", "advisories": "GHSA-1"}],
     [{"name": "x", "version": "1", "advisories": [1]}], [{"name": "x", "version": "1", "advisories": ["a\nb"]}],
     [{"name": "", "version": "1", "advisories": []}], [{"name": "x", "version": 1, "advisories": []}],
-    [{"name": "x", "version": "1", "advisories": [], "kev": "ja"}],
+    [{"name": "x", "version": "1", "advisories": [], "kev": "ja"}], [{"name": "x", "version": "1", "advisories": [], "kev": 1}],
+    [{"name": "x", "version": "1", "advisories": [], "kev": 0}],
     [{"name": "x", "version": "1", "advisories": [], "behoben_in": 5}]])
 def test_schema_pakete_ungueltig(pakete):
     assert any("pakete" in f for f in bericht.pruefe_schema(mit(osv_befund(pakete=pakete))))
@@ -658,7 +780,7 @@ def test_markdown_pakete_escaped_backticks_und_leere_advisories():
 # ------------------------------------------------------------------------------------ KI-Felder (TF3)
 
 def ki_befund(**kw):
-    return befund(owasp_ki=["ASI01", "LLM02"], annahme_modell=True, **kw)
+    return befund(owasp_ki=["ASI01", "LLM02"], annahme_modell=True, **{"klasse": "K1 Tool mit Wirkung", **kw})
 
 
 def test_schema_owasp_ki_gueltig():
@@ -704,8 +826,18 @@ def test_schema_annahme_modell_true_nur_mit_bestaetigt(status):
 
 def test_schema_annahme_modell_true_status_nfd_ist_bestaetigt():
     import unicodedata
-    b = befund(status=unicodedata.normalize("NFD", "bestätigt"), annahme_modell=True)
+    b = befund(status=unicodedata.normalize("NFD", "bestätigt"), annahme_modell=True, klasse="K1 Tool mit Wirkung")
     assert not any("annahme_modell" in x for x in bericht.pruefe_schema(mit(b)))
+
+
+@pytest.mark.parametrize("klasse", ["K3 Tool-Rechte", "K5 Geheimnisse im Prompt", "K6 Speicher über Mandanten", "K7 MCP-Herkunft",
+                                    "keine weiteren", "K10 x", "k1 x", "K1x", "x K1 y"])
+def test_schema_annahme_modell_true_nur_bei_k1_k2_k4_review_r1_9(klasse):
+    """Review R1-9: `annahme_modell: true` gehört nur an bestätigte K1-, K2- und K4-Befunde. Sonst zeigte der Bericht „bestätigt (Modell-Mock,
+    Annahme: Modell folgt)“ bei einem Befund ohne Modellentscheidung."""
+    f = bericht.pruefe_schema(mit(befund(klasse=klasse, annahme_modell=True)))
+    assert any("S-1" in x and "annahme_modell" in x and "K1, K2 oder K4" in x for x in f), f
+    assert bericht.pruefe_schema(mit(befund(klasse=klasse, annahme_modell=False))) == []
 
 
 @pytest.mark.parametrize("klasse", ["K1 Tool mit Wirkung nach fremd befülltem Kontext", "K2 Tool-Argumente in Senke", "K4 Modellausgabe in Senke",
@@ -762,7 +894,7 @@ def test_markdown_annahme_modell_statusanzeige():
 
 
 def test_markdown_ki_felder_lassen_befundliste_unveraendert():
-    basis = codeblock(bericht.markdown(mit(befund())))
+    basis = codeblock(bericht.markdown(mit(befund(klasse="K1 Tool mit Wirkung"))))
     mit_ki = codeblock(bericht.markdown(mit(ki_befund())))
     assert mit_ki == basis
     block = "\n".join(mit_ki)

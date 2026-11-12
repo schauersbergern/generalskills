@@ -17,7 +17,7 @@ Exit-Codes: 0 ok, 2 ungültige Argumente, 3 Docker fehlt oder Daemon nicht errei
 
 `starten --modell-mock openai,anthropic` startet vor der App den Modell-Mock `<netz>-llm` (Alias `llm`, Port 4010, nur im internen Netz)
 und setzt in der App die Variablen der gewählten APIs (Dummy-Schlüssel). `--env`: jeder Wert läuft durch die Netzregel (Exit 2 bei
-fremdem Host, die Meldung nennt nie den Wert); mit `--modell-mock` sind die vier Variablen des Mocks für `--env` reserviert.
+fremdem Host, die Meldung nennt nie den Wert); mit `--modell-mock` sind die Namen in `MOCK_RESERVIERT` für `--env`, `--start-befehl` und `--seed` reserviert.
 
 `modell --lauf <id> --rolle <r> (--antworten-datei <datei> | --protokoll [--suche <marker>])` steuert den Modell-Mock der Rolle
 (ein `docker exec` auf `<netz>-llm`, unter der geteilten Rollensperre, Budget 60 s, nur verkürzbar). `--antworten-datei` prüft die
@@ -88,9 +88,9 @@ APP_PORT_DB = 5432
 POSTGRES_IMAGE = "postgres:16-alpine"
 DB_URL = "postgres://poc:poc@db:5432/poc"
 ANTWORTEN_MAX = 20               # Einträge einer Antwortliste für den Modell-Mock
-ANTWORTEN_DATEI_MAX = 64 * 1024  # `--antworten-datei` (Grenze des Mocks für stdin)
-ANTWORT_TEXT_MAX = 16384         # Zeichen je `text` (Grenze des Mocks)
-MASKIER_WERTE_MAX = 50           # Werte, die `modell --protokoll` dem Mock zum Maskieren übergibt
+ANTWORTEN_DATEI_MAX = 64 * 1024  # `--antworten-datei`: Größe der Datei (grobe Schranke; maßgeblich ist `STDIN_MAX_MOCK` für die Serialisierung)
+ANTWORT_TEXT_MAX = 16384         # UTF-16-Einheiten je `text` (Zählweise und Grenze des Mocks)
+MASKIER_WERTE_MAX = 200          # Grenze des Mocks für die Zahl der Werte (`modell --protokoll`); mehr: Exit 2
 MASKIER_WERT_MIN = 6             # kürzere --env-Werte werden nicht maskiert
 MASKIER_WERT_MAX = 4096          # Grenze des Mocks je Wert (Zeichen)
 MASKIER_NAME_MAX = 64            # Grenze des Mocks für den Namen
@@ -113,9 +113,119 @@ MOCK_RESERVIERT = frozenset({name for paare in MOCK_ENV.values() for name, _ in 
 _RESERVIERT_NAMEN = "|".join(sorted(MOCK_RESERVIERT))
 # `NAME=` und `NAME+=` (Anhängen), mit Wortgrenze davor (`NEXT_PUBLIC_OPENAI_BASE_URL=` ist ein anderer Name).
 MOCK_RESERVIERT_RE = re.compile(r"(?<![A-Za-z0-9_])(" + _RESERVIERT_NAMEN + r")\+?=", re.IGNORECASE)
-# Aufheben statt Setzen: `unset … NAME` (im selben Befehl, nicht über `;`, `&`, `|`, Zeilenende hinweg), `env -u NAME`, `--unset NAME`.
-MOCK_ENTFERNT_RE = re.compile(r"(?<![A-Za-z0-9_])(?:unset\b[^;&|\n]*?\s|(?<![\w-])-u\s*|--unset[=\s]\s*)(" + _RESERVIERT_NAMEN + r")(?![A-Za-z0-9_])",
-                              re.IGNORECASE)
+# Alles andere, was einen Namen aufhebt, überschreibt oder die Umgebung leert, erkennt `_segment_umgehung` an den Wörtern eines einfachen Befehls
+# (ein Durchgang, linear; die Prüfung läuft vor jedem Zeitbudget): `unset … NAME`, `env -u NAME` (auch gruppiert), `--unset NAME`, `read NAME`,
+# `for NAME in`, `printf -v NAME`, `export -n NAME`, `typeset +x NAME`, `declare -n x=NAME` und `env -i`.
+_NAME_ANFANG_RE = re.compile("(" + _RESERVIERT_NAMEN + r")(?![A-Za-z0-9_])", re.IGNORECASE)
+_SEGMENT_TRENNER_RE = re.compile(r"[;&|\n]")
+_DEKLARATION_FLAG_RE = re.compile(r"-[A-Za-z]*n[A-Za-z]*|\+[A-Za-z]*x[A-Za-z]*")     # export -n, typeset +x, declare -n (Namensreferenz)
+_OPTION_BUCHSTABEN_RE = re.compile(r"-([A-Za-z]*)")
+_PRINTF_OPTION_RE = re.compile(r"[-]v")      # Absicht: kein Anführungszeichen-Literal der Option im Quelltext (Wächtertest gegen Host-Mounts)
+_ENV_WORT_RE = re.compile(r"(?:.*/)?env")
+_ENV_KURZ_MIT_ARGUMENT = frozenset("uCPL")                                           # `env -u NAME`, `-C DIR`, `-P PATH`, `-L`
+_ENV_LANG_MIT_ARGUMENT = frozenset({"--unset", "--chdir", "--split-string", "--argv0", "--default-signal", "--ignore-signal",
+                                    "--block-signal"})
+_WORT_ANFANG = "$`({!"                                                               # `$(env -i …)`, `(read X)`, `! unset X`
+_FLAG_LAENGE_MAX = 16                                                                # längere Wörter sind keine Optionsbündel (Laufzeit)
+
+
+def _name_am_anfang(wort: str, pos: int = 0) -> str | None:
+    m = _NAME_ANFANG_RE.match(wort, pos)
+    return m.group(1) if m else None
+
+
+def _segment_umgehung(tokens: list[str]) -> str | None:
+    """Ein einfacher Befehl (Wörter ohne `;`, `&`, `|`, Zeilenende), ein Durchgang über die Wörter. Rückgabe: der gesperrte Name,
+    `""` für `env -i` (leert die Umgebung) oder None."""
+    nach_unset = nach_read = nach_printf = False
+    deklaration: bool | None = None          # None: kein export/typeset/declare/local; False: gesehen; True: danach `-n` oder `+x`
+    erwarte_name = False                     # das nächste Wort ist ein Name: `-u`, `--unset`, `printf -v`, `for`
+    for roh in tokens:
+        w = roh.lstrip(_WORT_ANFANG)
+        treffer = None
+        if erwarte_name or nach_unset or nach_read:
+            treffer = _name_am_anfang(w)
+        erwarte_name = False
+        if treffer is None and deklaration:
+            treffer = _name_am_anfang(w, w.find("=") + 1)
+        if treffer:
+            return treffer
+        if w == "unset":
+            nach_unset = True
+        elif w == "read":
+            nach_read = True
+        elif w == "printf":
+            nach_printf = True
+        elif w == "for":
+            erwarte_name = True
+        elif w in ("export", "typeset", "declare", "local"):
+            deklaration = False
+        elif deklaration is False and len(w) <= _FLAG_LAENGE_MAX and _DEKLARATION_FLAG_RE.fullmatch(w):
+            deklaration = True
+        if nach_printf and _PRINTF_OPTION_RE.match(w):                          # `printf -v NAME` und `printf -vNAME`
+            if len(w) == 2:
+                erwarte_name = True
+            elif (treffer := _name_am_anfang(w, 2)):
+                return treffer
+        if w == "--unset":
+            erwarte_name = True
+        elif w.startswith("--unset="):
+            treffer = _name_am_anfang(w, len("--unset="))
+            if treffer:
+                return treffer
+        elif len(w) > 1 and w[0] == "-" and w[1] != "-":                       # Optionsbündel: `-u NAME`, `-uNAME`, `-vu NAME`
+            for j, b in enumerate(_OPTION_BUCHSTABEN_RE.match(w).group(1)):
+                if b != "u":
+                    continue
+                if 2 + j == len(w):
+                    erwarte_name = True
+                elif (treffer := _name_am_anfang(w, 2 + j)):
+                    return treffer
+    return _env_leert_umgebung(tokens)
+
+
+def _env_leert_umgebung(tokens: list[str]) -> str | None:
+    """`""` bei `env -i`, `env -` oder `env --ignore-environment` an beliebiger Stelle der env-Optionen: Optionen mit Argument (`-u X`, `-C dir`,
+    `--unset X`) werden übersprungen, der Rest eines `-S…`-Bündels wird weitergelesen. Die Optionen enden am ersten Wort ohne `-` (Befehl
+    oder `NAME=wert`); das Wort `env` unter den bereits gelesenen Optionen ist ein Argument und startet keine zweite Suche."""
+    k = 0
+    while k < len(tokens):
+        if not _ENV_WORT_RE.fullmatch(tokens[k].lstrip(_WORT_ANFANG)):
+            k += 1
+            continue
+        k += 1
+        zurueck: list[str] = []                                                # Rest eines `-S…`-Bündels, noch zu lesen
+        while zurueck or k < len(tokens):
+            if zurueck:
+                w = zurueck.pop()
+            else:
+                w = tokens[k]
+                k += 1
+            if w == "-" or w == "--ignore-environment":
+                return ""
+            if w.startswith("--"):
+                if w in _ENV_LANG_MIT_ARGUMENT:
+                    k += 1
+                continue
+            if not w.startswith("-"):
+                break
+            kurz = w[1:]
+            for j, b in enumerate(kurz[:_FLAG_LAENGE_MAX]):
+                if b == "i":
+                    return ""
+                if b == "S":
+                    if len(kurz) > j + 1:
+                        zurueck.append(kurz[j + 1:])
+                    break
+                if b in _ENV_KURZ_MIT_ARGUMENT:
+                    if j + 1 == len(kurz):
+                        k += 1
+                    break
+                if not b.isalnum():
+                    break
+    return None
+
+
 _QUOTES_RE = re.compile(r"\\\r?\n|[\"'\\]")     # Zeilenfortsetzung, Anführungszeichen und Rückstrich: die Shell entfernt sie vor dem Lesen des Namens
 
 # Hinweis-Kategorien, die `bauen` ausgeben kann (`hinweis: <kategorie>`); SKILL.md und bericht-format.md nennen jede.
@@ -564,6 +674,34 @@ def _lock_laden(quelle: str) -> dict | None:
 
 
 FREMDE_PRAEFIXE = ("git+", "git://", "github:", "gitlab:", "bitbucket:", "gist:", "file:", "link:", "ssh://")
+SPEC_FELDER = frozenset({"dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "requires", "overrides"})
+# Registry-Spec: Semver-Range oder dist-Tag (kein `:`, `/` oder `@`), optional `$name` (overrides) oder `npm:<name>[@<range>]`.
+_REGISTRY_RANGE = re.compile(r"[A-Za-z0-9._+*^~<>=|, -]*")
+_REGISTRY_ALIAS = re.compile(r"npm:(?:@[a-z0-9~][a-z0-9._~-]*/)?[a-z0-9~][a-z0-9._~-]*(?:@[A-Za-z0-9._+*^~<>=|, -]*)?")
+_REGISTRY_REF = re.compile(r"\$[A-Za-z0-9._~@/-]+")
+
+
+def _registry_spec(spec: object) -> bool:
+    """Spec-String zeigt nur auf die npm-Registry (Range, Tag, `npm:`-Alias, overrides-Verweis `$name`)."""
+    if not isinstance(spec, str):
+        return False
+    s = spec.strip()
+    return bool(_REGISTRY_RANGE.fullmatch(s) or _REGISTRY_ALIAS.fullmatch(s) or _REGISTRY_REF.fullmatch(s))
+
+
+def _specs_fremd(feld: dict) -> bool:
+    """Eine Spec-Map (name → Spec, bei overrides verschachtelt) enthält etwas außerhalb der Registry. Karten alter
+    Lockfiles (`dependencies` name → Objekt) werden vom Aufrufer weiter durchsucht, hier nur Strings geprüft."""
+    stapel: list[object] = [feld]
+    while stapel:
+        wert = stapel.pop()
+        if isinstance(wert, dict):
+            stapel.extend(wert.values())
+        elif isinstance(wert, list):
+            return True
+        elif isinstance(wert, str) and not _registry_spec(wert):
+            return True
+    return False
 
 
 def _fremde_quelle(daten: object) -> bool:
@@ -577,6 +715,17 @@ def _fremde_quelle(daten: object) -> bool:
                     return True
                 if k == "link" and v is True:
                     return True
+                if k in SPEC_FELDER and isinstance(v, dict):
+                    for name, spec in v.items():
+                        if isinstance(spec, dict):
+                            if k == "overrides":
+                                if _specs_fremd(spec):
+                                    return True
+                            else:
+                                stapel.append((name, spec))     # v1-Lockfile: dependencies name → Eintrag
+                        elif not _registry_spec(spec):
+                            return True
+                    continue
                 stapel.append((k, v))
         elif isinstance(wert, list):
             stapel.extend((schluessel, v) for v in wert)
@@ -589,6 +738,53 @@ def _fremde_quelle(daten: object) -> bool:
     return False
 
 
+_SEMVER = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?")
+_VERSION_ALIAS = re.compile(r"npm:(?:@[a-z0-9~][a-z0-9._~-]*/)?[a-z0-9~][a-z0-9._~-]*@" + _SEMVER.pattern)
+
+
+def _reine_version(version: object) -> bool:
+    """Reine Registry-Version: Semver oder `npm:<name>@<semver>`; alles andere (Git-Kurzform, URL, Range) nicht."""
+    return isinstance(version, str) and bool(_SEMVER.fullmatch(version) or _VERSION_ALIAS.fullmatch(version))
+
+
+def _ohne_resolved(daten: dict) -> bool:
+    """Ein Paket hat kein `resolved` und keine reine Registry-Version (gebündelte Pakete ausgenommen): npm ginge dann nach
+    einer Spec statt nach Registry-Name und -Version los. Gilt für `packages` unter `node_modules/` (v2/v3) und für die
+    `dependencies`-Einträge alter Lockfiles (v1, rekursiv). Einträge ohne `resolved` mit reiner Version kommen in echten
+    Lockfiles vor (dedupe) und holen `name@version` aus der Registry."""
+    pakete = daten.get("packages")
+    if isinstance(pakete, dict) and any(
+            isinstance(e, dict) and "node_modules/" in pfad and "resolved" not in e and e.get("inBundle") is not True
+            and not _reine_version(e.get("version")) for pfad, e in pakete.items()):
+        return True
+    stapel = [daten.get("dependencies")]
+    while stapel:                                      # iterativ: tiefe Verschachtelung sprengt nichts
+        karte = stapel.pop()
+        if not isinstance(karte, dict):
+            continue
+        for e in karte.values():
+            if not isinstance(e, dict):
+                continue
+            if "resolved" not in e and e.get("bundled") is not True and e.get("inBundle") is not True \
+                    and not _reine_version(e.get("version")):
+                return True
+            stapel.append(e.get("dependencies"))
+    return False
+
+
+def _package_json_fremd(quelle: str) -> bool:
+    pfad = os.path.join(quelle, "package.json")
+    if not os.path.isfile(pfad):
+        return False
+    try:
+        daten = _json_datei(pfad)
+    except (OSError, ValueError, RecursionError):
+        return True       # nicht lesbar: nicht bauen (kein stilles Durchwinken)
+    if not isinstance(daten, dict):
+        return True
+    return _fremde_quelle({k: v for k, v in daten.items() if k in SPEC_FELDER})
+
+
 def lockfile_pruefen(quelle: str) -> str | None:
     """Kategorie, wenn die Quelle nicht gebaut werden darf, sonst None."""
     lock = os.path.join(quelle, "package-lock.json")
@@ -599,7 +795,7 @@ def lockfile_pruefen(quelle: str) -> str | None:
     daten = _lock_laden(quelle)
     if daten is None:
         return "lockfile-fehlt"
-    if _fremde_quelle(daten):
+    if _fremde_quelle(daten) or _ohne_resolved(daten) or _package_json_fremd(quelle):
         return "lockfile-fremde-quelle"
     return None
 
@@ -819,9 +1015,11 @@ def _vorbereiten(a: argparse.Namespace, repo: str, ordner: str, quelle: str, mar
     _entferne(schwaerz_marker(a.lauf), os.path.join(ordner, "lieferkette"))    # neue Kopie ist ungeschwärzt: `secrets` erneut
     _entferne(marker, ordner)          # erst der Marker, dann die Kopie: ein Absturz dazwischen hinterlässt keine „fertige“ Kopie
     _entferne(quelle, ordner)          # lokale Dateioperation: wird nicht unterbrochen, zählt aber gegen das Budget
-    sha = a.sha or "HEAD"
     try:
-        meldungen = gitkopie.arbeitskopie(repo, quelle, sha)
+        # Der Commit wird einmal aufgelöst und genau dieser Hash kopiert und im Marker festgehalten: weder ein stiller
+        # Ersatzwert „HEAD“ noch ein Wandern von HEAD zwischen Kopie und rev-parse.
+        kopiert = gitkopie.git(repo, "rev-parse", "--verify", f"{a.sha or 'HEAD'}^{{commit}}").stdout.decode().strip()
+        meldungen = gitkopie.arbeitskopie(repo, quelle, kopiert)
     except gitkopie.GitFehler as e:
         print("kategorie: git-fehler")
         print(f"git-Fehler: {e}", file=sys.stderr)
@@ -835,15 +1033,7 @@ def _vorbereiten(a: argparse.Namespace, repo: str, ordner: str, quelle: str, mar
     if any("Arbeitskopie unvollständig" in m for m in meldungen):
         print("kategorie: arbeitskopie-unvollstaendig")
         return 4
-    try:
-        kopiert = gitkopie.git(repo, "rev-parse", "--verify", f"{sha}^{{commit}}").stdout.decode().strip()
-    except gitkopie.ZeitbudgetFehler as e:         # keine „fertige“ Kopie ohne geklärten Commit nach Ablauf des Budgets
-        print("kategorie: git-fehler")
-        print(f"git-Fehler: {e}", file=sys.stderr)
-        return 4
-    except gitkopie.GitFehler:
-        kopiert = sha
-    _schreibe_atomar(marker, {"fertig": True, "sha": kopiert, "id": secrets.token_hex(16)})
+    _schreibe_atomar(marker, {"fertig": True, "sha": kopiert, "repo": gitkopie.repo_name(repo), "id": secrets.token_hex(16)})
     print(quelle)
     return 0
 
@@ -958,6 +1148,11 @@ def _starte(lauf: str, rolle: str, p: dict) -> int:
     r = _docker(["network", "create", "--internal", netz], KURZ_TIMEOUT)
     if not r.ok and "already exists" not in r.text:
         return _start_fehler(lauf, rolle, f"Netz {netz} nicht erstellt: {r.text}")
+    if not r.ok:       # Netz gab es schon (Rest eines früheren Starts): nur weiterverwenden, wenn es `--internal` ist
+        intern = _docker(["network", "inspect", "--format", "{{.Internal}}", netz], KURZ_TIMEOUT)
+        if not intern.ok or intern.text.strip() != "true":
+            return _start_fehler(lauf, rolle, f"Netz {netz} existiert schon und ist nicht als intern bestätigt "
+                                              f"(`network inspect`: {_tail(intern.text, 2) or 'keine Antwort'})")
     if p["modell_mock"]:
         fehler = _mock_starten(lauf, rolle)
         if fehler is not None:
@@ -1007,15 +1202,34 @@ def _starte(lauf: str, rolle: str, p: dict) -> int:
     return 0
 
 
+_URL_ANFANG_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://")
+
+
+def _fremde_hosts_env(wert: str) -> list[str]:
+    """Nicht erlaubte Hosts in einem `--env`-Wert. Die Netzregel liest die Authority bis `/`, `?`, `#` oder Leerzeichen; in einer Liste
+    `https://app:3000,http://localhost:5173` wäre das `app:3000,http:`. Enthält ein gefundener „Host“ `,` oder `;` (das kommt in keinem Host
+    vor) und beginnt jedes Listenelement mit einem URL-Schema, wird jedes Element für sich geprüft. Fehlt einem Element das Schema
+    (`http://app,evil.com`), bleibt es beim Ergebnis für den ganzen Wert: Die Netzregel sähe `evil.com` allein nicht als Host.
+    Die Bash-Prüfung (`netzregel.ist_poc_aufruf`) bleibt unberührt."""
+    fremd = netzregel.verstoesse_poc(wert)
+    if any("," in h or ";" in h for h in fremd):
+        teile = [t.strip() for t in re.split(r"[,;]", wert)]
+        if all(_URL_ANFANG_RE.match(t) for t in teile if t):
+            fremd = []
+            for teil in teile:
+                fremd += [h for h in netzregel.verstoesse_poc(teil) if h not in fremd]
+    return fremd
+
+
 def _env_pruefen(env: list[str], modell_mock: list[str]) -> None:
     """Regeln für `--env` (Exit 2, Meldungen nennen nur Namen und Host, nie den Wert): jeder Wert läuft durch die Netzregel
     (`netzregel.verstoesse_poc`: nur app, db, llm, localhost und Loopback); mit `--modell-mock` sind die Namen in `MOCK_RESERVIERT`
-    (alle vier, auch die der nicht gewählten API) gesperrt, weil `starten` sie selbst setzt."""
+    (auch die der nicht gewählten API) gesperrt, weil `starten` sie selbst setzt."""
     for e in env:
         name, _, wert = e.partition("=")
         if modell_mock and name.upper() in MOCK_RESERVIERT:
             raise PocFehler(f"--env {name}: reservierter Name bei --modell-mock")
-        fremd = netzregel.verstoesse_poc(wert)
+        fremd = _fremde_hosts_env(wert)
         if fremd:
             raise PocFehler(f"--env {name}: nicht erlaubter Host {_entschaerfen(fremd[0])[:100]}")
 
@@ -1023,14 +1237,22 @@ def _env_pruefen(env: list[str], modell_mock: list[str]) -> None:
 def _start_befehl_pruefen(befehl: str, modell_mock: list[str], option: str = "--start-befehl") -> None:
     """Regeln für `--start-befehl` und `--seed` (`option`; Exit 2, die Meldung nennt nur Namen oder Host, nie den Befehl): mit `--modell-mock`
     darf der Befehl keinen Namen aus `MOCK_RESERVIERT` zuweisen oder aufheben (`NAME=`, `NAME+=`, auch nach `env` und `export`, `unset NAME`,
-    `env -u NAME`; Anführungszeichen, Rückstriche und Zeilenfortsetzungen im Namen zählen nicht: `OPENAI_BASE_UR""L=` wird erkannt);
+    `env -u NAME` auch gruppiert, `read NAME`, `for NAME in`, `printf -v NAME`, `export -n NAME`, `typeset +x NAME`, `declare -n x=NAME`; Anführungszeichen,
+    Rückstriche und Zeilenfortsetzungen im Namen zählen nicht: `OPENAI_BASE_UR""L=` wird erkannt) und kein `env -i`, `env -` oder `env --ignore-environment` (leeren die Umgebung);
     unabhängig davon läuft er durch die Netzregel (nur URL-Hosts). Nicht erkennbar ist, was die Shell erst beim Ausführen zusammensetzt
-    (`eval`, Variablennamen aus Variablen, `process.env[…]` in einem Skript): die Sperre ist das interne Netz, nicht diese Prüfung."""
+    (`eval`, Variablennamen aus Variablen, `process.env[…]` in einem Skript) und weitere Builtins, die Variablen setzen (`mapfile`, `getopts`,
+    `let`, `${NAME:=…}`): die Sperre ist das interne Netz, nicht diese Prüfung."""
     if modell_mock:
         for text in (befehl, _QUOTES_RE.sub("", befehl)):
-            m = MOCK_RESERVIERT_RE.search(text) or MOCK_ENTFERNT_RE.search(text)
+            m = MOCK_RESERVIERT_RE.search(text)
             if m:
                 raise PocFehler(f"{option}: reservierter Name {m.group(1)} bei --modell-mock")
+            for segment in _SEGMENT_TRENNER_RE.split(text):
+                r = _segment_umgehung(segment.split())
+                if r:
+                    raise PocFehler(f"{option}: reservierter Name {r} bei --modell-mock")
+                if r is not None:
+                    raise PocFehler(f"{option}: env -i leert die Umgebung samt der Mock-Variablen bei --modell-mock")
     fremd = netzregel.url_verstoesse(befehl)
     if fremd:
         raise PocFehler(f"{option}: nicht erlaubter Host {_entschaerfen(fremd[0])[:100]}")
@@ -1100,6 +1322,11 @@ def cmd_anfrage(a: argparse.Namespace) -> int:
 
 # ------------------------------------------------------------------------------------ modell (Steuerung des Modell-Mocks)
 
+def _antworten_serialisieren(daten: object) -> str:
+    """Was der Mock auf stdin bekommt: kompaktes JSON (Trennzeichen ohne Leerzeichen), kein NaN und kein Infinity."""
+    return json.dumps(daten, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+
+
 def _antworten_lesen(pfad: str) -> list:
     """Antwortliste aus `--antworten-datei`: höchstens 64 KiB (+ 1 Byte gelesen), sonst Exit 2. Prüft Form und Netzregel
     (Rohtext und geparstes JSON) und gibt die geprüfte Liste zurück; jede Abweichung endet mit Exit 2 ohne Docker-Aufruf."""
@@ -1116,10 +1343,12 @@ def _antworten_lesen(pfad: str) -> list:
     except (ValueError, RecursionError):
         raise PocFehler("--antworten-datei: kein gültiges JSON (UTF-8)") from None
     try:
-        neu = json.dumps(daten, ensure_ascii=False)
-        neu.encode("utf-8")                                    # ein einzelnes Surrogat (\ud800) ist kein UTF-8
+        neu = _antworten_serialisieren(daten)                  # NaN und Infinity (auch aus `1e999`) kennt JSON nicht
+        eingabe = neu.encode("utf-8")                          # ein einzelnes Surrogat (\ud800) ist kein UTF-8
     except (ValueError, RecursionError):
         raise PocFehler("--antworten-datei: kein gültiges JSON (UTF-8)") from None
+    if len(eingabe) > STDIN_MAX_MOCK:                          # so viele Bytes bekäme der Mock auf stdin (`1e2` wird zu `100.0`)
+        raise PocFehler(f"--antworten-datei: nach dem Serialisieren größer als {STDIN_MAX_MOCK // 1024} KiB")
     for fremd in (netzregel.verstoesse_poc(text), netzregel.verstoesse_poc(neu)):        # Rohtext und geparster Inhalt
         if fremd:
             raise PocFehler(f"--antworten-datei: nicht erlaubter Host {_entschaerfen(fremd[0])[:100]}")
@@ -1128,7 +1357,7 @@ def _antworten_lesen(pfad: str) -> list:
 
 
 def _antworten_pruefen(daten: object) -> None:
-    """Form der Antwortliste (Exit 2 bei Abweichung): Liste mit höchstens 20 Einträgen; je Eintrag genau `text` (String) oder
+    """Form der Antwortliste (Exit 2 bei Abweichung): Liste mit höchstens 20 Einträgen; je Eintrag genau `text` (String, höchstens 16 384 UTF-16-Einheiten) oder
     `werkzeug` (`name` nach `[A-Za-z0-9_.-]{1,64}`, `argumente` ein Objekt, optional), optional `wenn_enthaelt` nach `POCMARKER-…`."""
     def falsch(grund: str) -> PocFehler:
         return PocFehler(f"--antworten-datei: {grund}")
@@ -1142,7 +1371,7 @@ def _antworten_pruefen(daten: object) -> None:
             raise falsch(f"Eintrag {i}: Objekt mit text oder werkzeug (und wenn_enthaelt) erwartet")
         if ("text" in e) == ("werkzeug" in e):
             raise falsch(f"Eintrag {i}: genau eines von text und werkzeug")
-        if "text" in e and not (isinstance(e["text"], str) and len(e["text"]) <= ANTWORT_TEXT_MAX):
+        if "text" in e and not (isinstance(e["text"], str) and _utf16_laenge(e["text"]) <= ANTWORT_TEXT_MAX):
             raise falsch(f"Eintrag {i}: text muss ein String mit höchstens {ANTWORT_TEXT_MAX} Zeichen sein")
         if "werkzeug" in e:
             w = e["werkzeug"]
@@ -1175,8 +1404,8 @@ def _maskier_paare(z: dict) -> list[tuple[str, str]]:
 
 def _maskier_werte(z: dict) -> bytes:
     """stdin für `llm-mock.mjs --protokoll`: `{"werte":[{name,wert}]}` mit den Werten aus `_maskier_paare` ab 6 Zeichen, längste zuerst.
-    Mehr als 50 Werte: die 50 längsten (Hinweis auf stderr, ohne Werte). Ein Wert über 4096 UTF-16-Einheiten (Zählweise des Mocks) oder
-    eine Liste über 64 KiB lässt sich nicht maskieren, ebenso ein Wert mit ungültigem UTF-8: Exit 2 statt Werte wegzulassen."""
+    Mehr als 200 Werte (Grenze des Mocks), ein Wert über 4096 UTF-16-Einheiten (Zählweise des Mocks), eine Liste über 64 KiB oder ein Wert
+    mit ungültigem UTF-8 lassen sich nicht maskieren: Exit 2 statt Werte wegzulassen."""
     gesehen: set[tuple[str, str]] = set()
     werte = []
     for name, wert in _maskier_paare(z):
@@ -1192,8 +1421,7 @@ def _maskier_werte(z: dict) -> bytes:
         if _utf16_laenge(wert) > MASKIER_WERT_MAX:
             raise PocFehler(f"--env {name}: Wert länger als {MASKIER_WERT_MAX} Zeichen, lässt sich nicht maskieren")
     if len(werte) > MASKIER_WERTE_MAX:
-        print(f"modell: {len(werte)} Werte zu maskieren, nur die {MASKIER_WERTE_MAX} längsten werden maskiert", file=sys.stderr)
-        werte = werte[:MASKIER_WERTE_MAX]
+        raise PocFehler(f"{len(werte)} Werte der Rolle zu maskieren, höchstens {MASKIER_WERTE_MAX} möglich: weniger --env-Werte übergeben")
     nutzlast = json.dumps({"werte": [{"name": n, "wert": w} for n, w in werte]}, ensure_ascii=False).encode("utf-8", "replace")
     if len(nutzlast) > STDIN_MAX_MOCK:
         raise PocFehler(f"Maskierwerte der Rolle zusammen größer als {STDIN_MAX_MOCK // 1024} KiB, lassen sich nicht maskieren")
@@ -1216,7 +1444,7 @@ def cmd_modell(a: argparse.Namespace) -> int:
         if not z["modell_mock"]:
             raise PocFehler(f"Rolle {a.rolle} läuft ohne Modell-Mock (`starten --modell-mock`)", code=1)
         if antworten is not None:
-            modus, eingabe = ["--setzen"], json.dumps(antworten, ensure_ascii=False).encode("utf-8")
+            modus, eingabe = ["--setzen"], _antworten_serialisieren(antworten).encode("utf-8")
         else:
             modus = ["--protokoll"] + (["--suche", a.suche] if a.suche else [])
             eingabe = _maskier_werte(z)
@@ -1325,12 +1553,47 @@ def cmd_auflisten(_a: argparse.Namespace) -> int:
     except DockerFehlt as e:
         unvollstaendig = True
         print(f"auflisten: Docker nicht erreichbar ({e}); nur Zustandsordner aufgelistet", file=sys.stderr)
+    laufend = _laufende_laeufe()
     for lauf in sorted(laeufe):
         e = laeufe[lauf]
-        print(f"{lauf} ordner={e['ordner']} container={e['container']} netze={e['netze']} images={e['images']}")
+        print(f"{lauf} ordner={e['ordner']} container={e['container']} netze={e['netze']} images={e['images']} "
+              f"{_lauf_angaben(lauf, laufend)}")
     if laeufe:
-        print("auflisten: je Lauf aufräumen mit `poc.py aufraeumen --lauf <id>` (nur eigene, beendete Läufe!)", file=sys.stderr)
+        print("auflisten: je Lauf aufräumen mit `poc.py aufraeumen --lauf <id>` (nur eigene Läufe mit laeuft=nein; ein "
+              "paralleles Audit sieht gleich aus: im Zweifel den User fragen)", file=sys.stderr)
     return 1 if unvollstaendig else 0
+
+
+def _laufende_laeufe() -> set[str] | None:
+    """Lauf-IDs mit mindestens einem laufenden Container; None, wenn Docker nicht lesbar ist."""
+    try:
+        r = _docker(["ps", "--format", "{{.Names}}"], KURZ_TIMEOUT)
+    except DockerFehlt:
+        return None
+    if not r.ok:
+        return None
+    treffer = (_LAUF_NAME.fullmatch(z.strip()) for z in r.out.decode("utf-8", "replace").splitlines())
+    return {m.group(1) for m in treffer if m}
+
+
+def _lauf_angaben(lauf: str, laufend: set[str] | None) -> str:
+    """`repo=<name> alter_min=<n> laeuft=ja|nein|?` aus Fertig-Marker (Repo), Zustandsordner (letzte Änderung) und `docker ps`.
+    Fehlende Angaben heißen `?`, nie geraten."""
+    ordner = zustand_ordner(lauf)
+    repo = alter = "?"
+    try:
+        alter = str(max(0, int((time.time() - os.lstat(ordner).st_mtime) // 60)))
+    except OSError:
+        pass
+    try:
+        with open(os.path.join(ordner, "quelle.fertig"), encoding="utf-8") as f:
+            marker = json.load(f)
+        if isinstance(marker, dict) and isinstance(marker.get("repo"), str):
+            repo = re.sub(r"\s", "_", _entschaerfen(marker["repo"]))[:60] or "?"   # Ordnername des Kunden: eine Zeile, entschärft
+    except (OSError, ValueError):
+        pass
+    laeuft = "?" if laufend is None else ("ja" if lauf in laufend else "nein")
+    return f"repo={repo} alter_min={alter} laeuft={laeuft}"
 
 
 # ------------------------------------------------------------------------------------ Argumente

@@ -8,9 +8,12 @@ am Wortlaut, und eine stille Änderung hätte keinen anderen Test rot gemacht.
 
 Aufruf: python3 -m pytest security-audit/scripts/test_skill_text.py -q
 """
+import contextlib
+import io
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 
@@ -24,6 +27,7 @@ BRIEFINGS = os.path.join(REFERENCES, "agenten-briefings.md")
 BERICHT_FORMAT = os.path.join(REFERENCES, "bericht-format.md")
 ERWARTUNG = os.path.join(SKILL_DIR, "evals", "expected", "fixture-web.json")
 # Geschwister-Skill (TF5): per realpath, damit auch ein Symlink ~/.claude/skills/security-audit den Pfad findet
+PR_REVIEW_LOOP_MD = os.path.join(os.path.dirname(os.path.realpath(SKILL_DIR)), "pr-review-loop", "SKILL.md")
 FIX_FINDINGS_MD = os.path.join(os.path.dirname(os.path.realpath(SKILL_DIR)), "fix-findings", "SKILL.md")
 
 sys.path.insert(0, HIER)
@@ -204,6 +208,68 @@ def test_optionen_existieren(pfad):
             if option != "--help" and option not in hilfe:
                 schlecht.append((skript, unter, option))
     assert not schlecht, schlecht
+
+
+_WERT_NACH_OPTION = {"--lauf": "0a1b2c3d", "--rolle": "p1", "--port": "3000", "--sha": "a" * 40, "--methode": "GET",
+                     "--suche": "POCMARKER-p1-0a1b2c3d"}     # `poc.py modell --protokoll --suche <marker>` (TF3)
+
+
+def _argv(zeile: str, optionale: bool) -> tuple[str, list[str]]:
+    """(skript, argv) einer Aufrufzeile für den argparse-Parser des Skripts. Optionale Teile `[…]` bleiben stehen
+    (Klammern entfernt) oder entfallen; Platzhalter `<…>` werden durch gültige Werte ersetzt."""
+    zeile = re.sub(r"\[([^\]]*)\]", (lambda m: m.group(1)) if optionale else "", zeile)
+    teile = shlex.split(zeile)
+    skript = re.search(r"/scripts/(poc|bericht)\.py$", teile[2]).group(1)
+    argv, vorher = [], ""
+    for tok in teile[3:]:
+        if re.fullmatch(r"<[^>]+>", tok) and vorher in _WERT_NACH_OPTION:
+            tok = _WERT_NACH_OPTION[vorher]
+        else:
+            tok = re.sub(r"<[^>]*>", "x", tok)
+        argv.append(tok)
+        vorher = tok if tok.startswith("--") else vorher if tok == "--" else ""
+    return skript, argv
+
+
+def _parse(skript: str, argv: list[str]) -> str | None:
+    """Fehlertext des echten Parsers (`allow_abbrev=False`, Pflichtoptionen, Typen) oder None."""
+    parser = (poc if skript == "poc" else bericht)._parser()
+    mit_fehler = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(mit_fehler):
+            if skript == "poc" and argv[0] == "ausfuehren" and "--" in argv:     # wie poc.main: Befehl nach `--` abtrennen
+                i = argv.index("--")
+                argv, befehl = argv[:i], argv[i + 1:]
+                if not befehl:
+                    parser.error("ausfuehren: Befehl nach `--` fehlt")
+            parser.parse_args(bericht._argv_mit_werten(argv) if skript == "bericht" else argv)
+    except SystemExit:
+        return mit_fehler.getvalue().strip() or "SystemExit"
+    return None
+
+
+@pytest.mark.parametrize("pfad", [SKILL_MD, BRIEFINGS, BERICHT_FORMAT], ids=os.path.basename)
+def test_aufrufzeilen_parsen_mit_dem_echten_parser(pfad):
+    """Jede Aufrufzeile (mit und ohne ihre optionalen `[…]`-Teile) erfüllt den argparse-Parser des Skripts: Pflichtoptionen
+    vorhanden, Optionsnamen vollständig (`allow_abbrev=False`), Werte vom richtigen Typ."""
+    zeilen = [z for z in _aufrufzeilen(_lies(pfad)) if re.search(r"/scripts/(?:poc|bericht)\.py ", z)]
+    assert zeilen
+    schlecht = []
+    for zeile in zeilen:
+        for optionale in (True, False):
+            skript, argv = _argv(zeile, optionale)
+            fehler = _parse(skript, argv)
+            if fehler:
+                schlecht.append((zeile, argv, fehler.splitlines()[-1]))
+    assert not schlecht, schlecht
+
+
+def test_parser_test_erkennt_mutierte_aufrufzeilen():
+    """Die beiden Mutationen aus R1-19: `--start-befehl` → `--start` und `--rolle p1` aus der starten-Zeile entfernt."""
+    zeile = [z for z in _aufrufzeilen(_lies(SKILL_MD)) if " starten " in z][0]
+    assert _parse(*_argv(zeile, True)) is None
+    assert _parse(*_argv(zeile.replace("--start-befehl", "--start"), True))
+    assert _parse(*_argv(zeile.replace("--rolle p1 ", ""), True))
 
 
 def test_skill_md_nennt_jeden_poc_unterbefehl():
@@ -401,6 +467,78 @@ def test_audit_kopfzeile_vertrag():
     assert not re.fullmatch(muster, "PR #12 · Code · Runde 1/3 · geprüft auf abc1234")
     eingabe = "mergen\nbitte fixen:\n```\n" + kopf + "\n```"
     assert sum(1 for z in eingabe.split("\n") if re.fullmatch(muster, z.strip())) == 1
+
+
+@pytest.mark.parametrize("repo, sha", [
+    ("My_App.v2", "0123456"),
+    ("Web_App", "a" * 64),
+    ("a", "b" * 40),
+    ("x.y-z_9", "0123456789abcdef"),
+], ids=["gross-punkt-unterstrich-sha7", "unterstrich-sha64", "ein-zeichen", "mischform"])
+def test_audit_kopfzeile_vertrag_schemaraender(repo, sha):
+    """Review R1-2: Die Regex deckt den ganzen Wertebereich des Schemas ab (repo [A-Za-z0-9._-]+, sha 7 bis 64 Hex), nicht nur die
+    Beispielzeile; eine Verengung (z. B. `[a-z-]+`, `{40}`) wird rot."""
+    daten = json.loads(json.dumps(_beispiel_json()))
+    daten["repo"], daten["sha"] = repo, sha
+    assert bericht.pruefe_schema(daten) == []
+    kopf = _bloecke(bericht.markdown(daten))[0][1].split("\n")[0]
+    assert kopf == f"Repo {repo} · Security-Audit · geprüft auf {sha}", kopf
+    assert re.fullmatch(_audit_muster(), kopf), (_audit_muster(), kopf)
+
+
+def _audit_erkennung() -> str:
+    text = _lies(FIX_FINDINGS_MD)
+    m = re.search(r"\*\*Erkennung:\*\*.*?(?=\n\s*<!-- audit-kopfzeile -->)", text, re.S)
+    assert m, "Erkennungsabsatz vor dem Marker nicht gefunden"
+    return m.group(0)
+
+
+def test_audit_erkennung_pr_kopfzeile_hat_vorrang():
+    """Review R1-5: Zitiert eine pr-review-loop-Liste die Audit-Kopfzeile in einem Befund, gewinnt der PR-Weg."""
+    erkennung = _audit_erkennung()
+    assert "Vorrang" in erkennung and "PR #[0-9]+ · " in erkennung
+    m = re.search(r"`(PR #\[0-9\]\+ · )`", erkennung)
+    assert m, "Vorrangmuster nicht im Erkennungsabsatz"
+    vorlage = [z for z in _lies(PR_REVIEW_LOOP_MD).split("\n") if z.startswith("PR #<n> · ")]
+    assert vorlage, "Kopfzeilen-Vorlage in pr-review-loop/SKILL.md nicht gefunden"
+    pr_kopf = vorlage[0].replace("<n>", "12")
+    assert re.match("^" + m.group(1), pr_kopf), (m.group(1), pr_kopf)
+    assert not re.match("^" + m.group(1), "Repo beispiel-shop · Security-Audit · geprüft auf abc1234")
+
+
+def test_fix_findings_audit_weg_zielt_gh_explizit_auf_origin():
+    """Review R1-1/R2-2: Ohne Argument löst gh das Repo über `gh repo set-default`/upstream auf, gepusht wird aber nach origin, und
+    zwar an dessen Push-URL (`remote.origin.pushurl`). Sichtbarkeit und compare-Link prüfen daher `get-url --push`, die Basis (aus
+    origin/* gefetcht) die Fetch-URL."""
+    text = _lies(FIX_FINDINGS_MD)
+    aufrufe = re.findall(r"gh repo view[^`]*", text)
+    assert len(aufrufe) == 3, aufrufe
+    erwartet = {"defaultBranchRef": "get-url origin", "visibility": "get-url --push origin", "url": "get-url --push origin"}
+    for a in aufrufe:
+        feld = a.rsplit("--json ", 1)[1].strip()
+        assert a.startswith(f'gh repo view "$(git remote {erwartet[feld]})"'), a
+    assert "gh repo view --json" not in text
+
+
+def test_fix_findings_kein_unerreichbarer_ohne_github_zweig():
+    """Review R2-1: Gepusht wird nur nach erfolgreichem `gh repo view <origin>`, also immer bei GitHub-Origin; ein Sonst-Zweig für
+    „Branch gepusht“ ohne compare-Link ist unerreichbar."""
+    assert "Branch gepusht" not in _lies(FIX_FINDINGS_MD)
+
+
+def test_fix_findings_basis_hereinholen_ist_fast_forward():
+    """Review R1-3: Die Basis enthält den geprüften SHA immer, `git merge` ist daher ein Fast-forward ohne Konfliktzweig."""
+    text = _lies(FIX_FINDINGS_MD)
+    punkt = re.search(r"\*\*Basis hereinholen:\*\*[^\n]*", text).group(0)
+    assert "git merge --ff-only origin/<basis>" in punkt
+    assert "eigener Merge-Commit" not in punkt and "Konflikt" not in punkt
+
+
+def test_fix_findings_audit_ohne_push_gilt_als_ohne_ci():
+    """Review R1-4: Wird nicht gepusht (öffentlich/unbestimmbar), läuft nie eine CI, also läuft die ganze Suite vor dem Abschluss."""
+    text = _lies(FIX_FINDINGS_MD)
+    punkt = re.search(r"- \*\*Audit-Liste:\*\* Fehlt `\.github/workflows/`[^\n]*", text).group(0)
+    assert "nicht gepusht" in punkt and "ohne CI" in punkt and "Sichtbarkeit" in punkt
 
 
 def test_fix_findings_nennt_bericht_repo():
@@ -742,10 +880,10 @@ def test_skill_typische_fehler_netzregel_stimmt_fachlich_m6():
     lk = ("python3 -I /pfad/skill/scripts/lieferkette.py secrets --lauf 0a1b2c3d --repo /home/u/my.app.com "
           "--quelle /tmp/z/quelle --sha 0123456789abcdef0123456789abcdef01234567")
     assert netzregel.verstoesse_bash(lk, []) == [] and not netzregel.ist_poc_aufruf(lk)     # kein Fehlalarm, kein poc-Aufruf
-    assert netzregel.ist_poc_aufruf("python3 -I /pfad/skill/scripts/poc.py pruefen")
-    assert netzregel.verstoesse_bash("python3 -I /pfad/skill/scripts/poc.py pruefen && echo ok", []) == []   # Kette ohne URL
-    assert netzregel.verstoesse_bash("python3 -I /pfad/skill/scripts/poc.py anfrage --rolle p1 --url http://app:3000/x 2>&1", [])
-    assert not netzregel.ist_poc_aufruf("python3 -I /pfad/skill/scripts/poc.py pruefen && ls")
+    assert netzregel.ist_poc_aufruf("python3 -I /pfad/security-audit/scripts/poc.py pruefen")
+    assert netzregel.verstoesse_bash("python3 -I /pfad/security-audit/scripts/poc.py pruefen && echo ok", []) == []   # Kette ohne URL
+    assert netzregel.verstoesse_bash("python3 -I /pfad/security-audit/scripts/poc.py anfrage --rolle p1 --url http://app:3000/x 2>&1", [])
+    assert not netzregel.ist_poc_aufruf("python3 -I /pfad/security-audit/scripts/poc.py pruefen && ls")
 
 
 def test_beispiel_json_k8_text_m7():
@@ -1587,16 +1725,16 @@ def test_protokoll_ist_daten_in_schritt_6_und_im_briefing_m24_m25_m4():
     assert "replace(/[\\r\\n\\u2028\\u2029]/g" in b                                         # fundstelle ist einzeilig
 
 
-def test_mehr_als_50_maskierwerte_ist_ein_hinweis_im_bericht_task4_m6():
-    """4ab M-6: Der stderr-Hinweis bedeutet, dass kürzere Werte unmaskiert bleiben können; die Hauptsession schreibt ihn als Hinweis in
-    den Bericht."""
-    assert poc.MASKIER_WERTE_MAX == 50
-    assert "nur die {MASKIER_WERTE_MAX} längsten werden maskiert" in _lies(os.path.join(HIER, "poc.py"))
-    s6 = _s6()
-    z = _punkt(s6, r"nur die 50 längsten werden maskiert")
-    assert "kürzere Werte" in z and "unmaskiert" in z and "`bericht.hinweise`" in z and "`HINWEIS:`" in z, z
-    briefing = _punkt(_mock_abschnitt_briefing(), r"nur die 50 längsten werden maskiert")
-    assert "HINWEIS:" in briefing
+def test_mehr_als_200_maskierwerte_sind_exit_2_ohne_protokoll_review_r1_5():
+    """Review R1-5: Die Grenze ist die des Mocks (200). Mehr Werte sind ein Fehler (Exit 2), nie ein Weglassen; SKILL.md und das Briefing sagen das."""
+    quelle = _lies(os.path.join(HIER, "poc.py"))
+    assert poc.MASKIER_WERTE_MAX == 200 and "nur die {MASKIER_WERTE_MAX} längsten" not in quelle
+    assert "höchstens {MASKIER_WERTE_MAX} möglich" in quelle
+    assert "daten.werte.length > 200" in _lies(os.path.join(HIER, "..", "docker", "llm-mock.mjs"))       # dieselbe Grenze im Mock
+    z = _punkt(_s6(), r"mehr als 200 zu maskierende Werte")
+    assert "Exit 2" in z and "ohne Protokoll" in z and "`unbestätigt`" in z and "50 längsten" not in z, z
+    briefing = _punkt(_mock_abschnitt_briefing(), r"höchstens 200 möglich")
+    assert "Exit 2" in briefing and "unbestätigt" in briefing and "50 längsten" not in briefing
 
 
 def test_grundregel_3_und_schritt_3_nennen_den_d3_satz_m3():

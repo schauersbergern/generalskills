@@ -13,7 +13,7 @@
 //       erst danach wird jeder Body auf 8 KiB gekürzt. --suche sucht im maskierten Body und liefert je Eintrag zusätzlich
 //       `fundstelle`: der einzeilige Ausschnitt (höchstens 300 Zeichen) um das erste Vorkommen, auch hinter der Kürzung.
 //       `standard: true` heißt: kein Eintrag der Antwortliste passte, der Mock antwortete mit „ok“. `aelter` ist die Zahl der Requests, die der
-//       Ring (die letzten 50) schon verdrängt hat; `gekuerzt` zählt dagegen die wegen der Ausgabegrenze weggelassenen Einträge.
+//       Ring (die letzten 50) schon verdrängt hat; `gekuerzt` zählt dagegen die wegen der Ausgabegrenze weggelassenen Einträge (zuerst die, die keinen Antworteintrag verbraucht haben, ältester zuerst).
 // API-Endpunkte (mit oder ohne /v1): POST chat/completions, responses, messages, embeddings sowie GET models.
 // Exit-Codes: 0 = ok, 1 = Fehler (Steuerung nicht erreichbar, Port belegt, …), 2 = ungültige Argumente oder ungültiger stdin.
 
@@ -199,6 +199,7 @@ function naechsteAntwort(body, eintrag) {
     return { typ: "text", text: "ok" };
   }
   const [e] = zustand.warteschlange.splice(i, 1);
+  eintrag.verbraucht = true;                     // nur intern: die Kürzung der Protokollausgabe schützt diese Einträge zuletzt
   if (e.werkzeug) return { typ: "werkzeug", name: e.werkzeug.name, argumente: e.werkzeug.argumente };
   return { typ: "text", text: e.text };
 }
@@ -239,11 +240,17 @@ function maskierer(werte) {
   const formen = [];
   for (const { name, wert } of werte) {
     if (wert.length === 0) continue;
-    // Rohform, einmal escapt (JSON-Body) und zweimal escapt (Tool-Ergebnis als JSON-String in einem JSON-Body), je mit \uXXXX klein und groß.
-    const jsonForm = JSON.stringify(wert).slice(1, -1);
-    const doppelForm = JSON.stringify(jsonForm).slice(1, -1);
+    // Rohform, einmal escapt (JSON-Body) und zweimal escapt (Tool-Ergebnis als JSON-String in einem JSON-Body). Nicht-ASCII-Zeichen
+    // stehen roh oder als \uXXXX (klein oder groß); in der zweiten Stufe kann schon die erste Stufe \uXXXX enthalten (Python-Standard),
+    // dann steht der Backslash doppelt im Body.
     const grossHex = (f) => f.replace(/[\u007f-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0").toUpperCase()}`);
-    const kandidaten = new Set([wert, jsonForm, ascii(jsonForm), grossHex(jsonForm), doppelForm, ascii(doppelForm), grossHex(doppelForm)]);
+    const jsonForm = JSON.stringify(wert).slice(1, -1);
+    const kandidaten = new Set([wert]);
+    for (const stufe1 of [jsonForm, ascii(jsonForm), grossHex(jsonForm)]) {
+      kandidaten.add(stufe1);
+      const doppel = JSON.stringify(stufe1).slice(1, -1);
+      for (const f of [doppel, ascii(doppel), grossHex(doppel)]) kandidaten.add(f);
+    }
     for (const form of kandidaten) {
       if (form.length > 0) formen.push({ form, name });
     }
@@ -287,25 +294,30 @@ function protokollAusgabe(werte, suche) {
     pfad: maske(e.pfad).slice(0, PFAD_MAX), // erst maskieren, dann kürzen
     body: maske(e.body), // erst maskieren, dann kürzen
     ...(e.standard ? { standard: true } : {}),
+    verbraucht: e.verbraucht === true,           // wird vor der Ausgabe wieder entfernt
   }));
   const aelter = zustand.nr - zustand.ring.length; // Requests, die der Ring schon verdrängt hat (auch bei --suche der Gesamtstand)
   if (suche !== null) eintraege = eintraege.filter((e) => e.body.includes(suche));
   const strings = eintraege.map((e) => {
-    const ausgabe = { ...e, body: kuerzen(e.body) };
+    const { verbraucht, ...rest } = e;
+    const ausgabe = { ...rest, body: kuerzen(e.body) };
     if (suche !== null) ausgabe.fundstelle = fundstelle(e.body, suche);
-    return jsonAscii(ausgabe);
+    return { text: jsonAscii(ausgabe), verbraucht };
   });
   let gekuerzt = 0;
   const gesamt = () => {
     const kopf = `{"eintraege":[`;
     const fuss = `],"gekuerzt":${gekuerzt},"aelter":${aelter}}`;
-    return Buffer.byteLength(kopf) + Buffer.byteLength(fuss) + strings.reduce((s, x) => s + Buffer.byteLength(x), 0) + Math.max(0, strings.length - 1);
+    return Buffer.byteLength(kopf) + Buffer.byteLength(fuss) + strings.reduce((s, x) => s + Buffer.byteLength(x.text), 0) + Math.max(0, strings.length - 1);
   };
+  // Der Request, der einen Antworteintrag verbraucht hat, ist der Beleg: Er fällt zuletzt weg. Zuerst fallen alle anderen Einträge weg
+  // (Rückfallantworten, Embeddings, models, 404, 413, …), die ältesten zuerst; erst danach die verbrauchenden, wieder die ältesten zuerst.
   while (strings.length > 0 && gesamt() > AUSGABE_MAX) {
-    strings.shift(); // die ältesten Einträge zuerst
+    const i = strings.findIndex((x) => !x.verbraucht);
+    strings.splice(i < 0 ? 0 : i, 1);
     gekuerzt += 1;
   }
-  return `{"eintraege":[${strings.join(",")}],"gekuerzt":${gekuerzt},"aelter":${aelter}}`;
+  return `{"eintraege":[${strings.map((x) => x.text).join(",")}],"gekuerzt":${gekuerzt},"aelter":${aelter}}`;
 }
 
 // ---------------------------------------------------------------- Chat Completions
@@ -614,7 +626,7 @@ const ROUTEN = {
 
 async function apiBehandeln(req, res) {
   const { text: body, zuGross } = await bodyLesen(req, BODY_MAX_REQUEST);
-  // Ein zu großer Body wird nicht protokolliert: Maskierung braucht den ganzen Wert.
+  // Ein zu großer Body steht mit leerem Body im Ring (verbraucht eine nr): Die Maskierung braucht den ganzen Wert.
   const eintrag = ringEintragen(req.method, req.url ?? "", body);
   if (zuGross) return zuGrossAntworten(res);
   const pfad = normalisierePfad(req.url ?? "");

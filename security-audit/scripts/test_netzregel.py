@@ -11,7 +11,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import netzregel  # noqa: E402
 
-POC = "python3 /x/scripts/poc.py"
+POC = "python3 /x/security-audit/scripts/poc.py"
 
 
 def test_erlaubte_hosts():
@@ -102,12 +102,12 @@ def test_poc_kodiertes_fremdes_ziel():
 
 # ------------------------------------------------------------------------------ ist_poc_aufruf
 
-POC_OK = "python3 -I /abs/scripts/poc.py"
+POC_OK = "python3 -I /abs/security-audit/scripts/poc.py"
 
 
 def test_poc_aufruf_einfacher_befehl():
-    assert netzregel.ist_poc_aufruf("python3 /x/scripts/poc.py starten")
-    assert netzregel.ist_poc_aufruf("python3 -I /x/scripts/poc.py")
+    assert netzregel.ist_poc_aufruf("python3 /x/security-audit/scripts/poc.py starten")
+    assert netzregel.ist_poc_aufruf("python3 -I /x/security-audit/scripts/poc.py")
     assert netzregel.ist_poc_aufruf(f"{POC_OK} anfrage --pfad '/a?x=1&y=2'")
     assert netzregel.ist_poc_aufruf(f"{POC_OK} starten --env DATABASE_URL=postgres://u@db/app")
 
@@ -124,10 +124,10 @@ def test_poc_aufruf_unsicheres_zeichen_ausserhalb_quotes_ist_kein_poc(zeichen):
 
 
 @pytest.mark.parametrize("befehl", [
-    "curl /x/scripts/poc.py", "python /x/scripts/poc.py a", "python3 /x/notpoc.py a", "python3 poc.py a",
-    "python3 -c x /x/scripts/poc.py", " python3 /x/scripts/poc.py", "python3  /x/scripts/poc.py a",
-    "python3 /x/scripts/poc.py.bak a", "python3 /x/scripts/poc.pyx a", "", "python3 ",
-    "env python3 /x/scripts/poc.py a", "cd /x && python3 /x/scripts/poc.py a",
+    "curl /x/security-audit/scripts/poc.py", "python /x/security-audit/scripts/poc.py a", "python3 /x/notpoc.py a", "python3 poc.py a",
+    "python3 -c x /x/security-audit/scripts/poc.py", " python3 /x/security-audit/scripts/poc.py", "python3  /x/security-audit/scripts/poc.py a",
+    "python3 /x/security-audit/scripts/poc.py.bak a", "python3 /x/security-audit/scripts/poc.pyx a", "", "python3 ",
+    "env python3 /x/security-audit/scripts/poc.py a", "cd /x && python3 /x/security-audit/scripts/poc.py a",
     f"{POC_OK} a 'offen", f"{POC_OK} a\nb", f"{POC_OK} a 'b\nc'", f"{POC_OK} a\rb", f"{POC_OK} a\x00",
     f"{POC_OK} a \"b\"", f"{POC_OK} a $'b'", f"{POC_OK} a 'b'\"c\"", f"{POC_OK} a $(x)", f"{POC_OK} a ${{x:-a #}}",
     f"{POC_OK} a ~ b ; c",
@@ -147,7 +147,7 @@ def test_bash_poc_mit_db_url_ist_erlaubt():
 
 
 def test_bash_poc_mit_i_flag():
-    assert netzregel.verstoesse_bash("python3 -I /x/scripts/poc.py anfrage --pfad /a http://app:3000/", []) == []
+    assert netzregel.verstoesse_bash("python3 -I /x/security-audit/scripts/poc.py anfrage --pfad /a http://app:3000/", []) == []
 
 
 def test_bash_positivfaelle_aus_dem_plan():
@@ -214,17 +214,17 @@ def test_bash_meldung_enthaelt_keine_rohen_steuerzeichen():
 @pytest.mark.parametrize("befehl", [
     # Re-Review 2: N2-1 #-Kommentar in ${…}, N2-2 NUL in $'…', N2-3 http:/host
     "echo ${x:-a #}; echo $((40+2))PWN http://evil.test/",
-    "python3 -I /x/scripts/poc.py a $'http://evil.test\\x00@app/'",
-    "python3 -I /x/scripts/poc.py a $'http://evil.test\x00@app/'",
+    "python3 -I /x/security-audit/scripts/poc.py a $'http://evil.test\\x00@app/'",
+    "python3 -I /x/security-audit/scripts/poc.py a $'http://evil.test\x00@app/'",
     "curl http:/evil.test/",
     # Task-Review: gequotete Operatoren, verkettete Aufrufe
-    "curl ';' python3 -I /x/scripts/poc.py http://localhost:3000/",
-    "curl -d '&&' python3 /x/scripts/poc.py http://localhost:3000/",
-    "echo ';' python3 /x/scripts/poc.py http://localhost:3000/",
-    'echo "|" python3 /x/scripts/poc.py http://localhost:3000/',
-    r"echo \; python3 /x/scripts/poc.py http://localhost:3000/",
-    "echo '\n' python3 /x/scripts/poc.py http://localhost:3000/",
-    "python3 -I /x/scripts/poc.py a && curl http://localhost/",
+    "curl ';' python3 -I /x/security-audit/scripts/poc.py http://localhost:3000/",
+    "curl -d '&&' python3 /x/security-audit/scripts/poc.py http://localhost:3000/",
+    "echo ';' python3 /x/security-audit/scripts/poc.py http://localhost:3000/",
+    'echo "|" python3 /x/security-audit/scripts/poc.py http://localhost:3000/',
+    r"echo \; python3 /x/security-audit/scripts/poc.py http://localhost:3000/",
+    "echo '\n' python3 /x/security-audit/scripts/poc.py http://localhost:3000/",
+    "python3 -I /x/security-audit/scripts/poc.py a && curl http://localhost/",
     f"{POC} pruefen && curl http://localhost:3000/",
     f"{POC} pruefen ; curl http://localhost:3000/",
     f"{POC} pruefen && {POC} pruefen --x http://app:1/",
@@ -236,11 +236,11 @@ def test_bash_meldung_enthaelt_keine_rohen_steuerzeichen():
     'echo "\\$(curl http://evil.test)"',
     f'{POC} anfrage --daten "\\$(curl http://localhost:3000/)"',
     # poc.py nur als python3 + scripts/poc.py
-    "curl /x/scripts/poc.py http://localhost/", "python3 /x/notpoc.py http://localhost/",
-    "python3 poc.py http://localhost/", "python /x/scripts/poc.py http://localhost/",
-    "python3 -c 'x' /x/scripts/poc.py http://localhost/", "curl http://localhost:3000/poc.py",
+    "curl /x/security-audit/scripts/poc.py http://localhost/", "python3 /x/notpoc.py http://localhost/",
+    "python3 poc.py http://localhost/", "python /x/security-audit/scripts/poc.py http://localhost/",
+    "python3 -c 'x' /x/security-audit/scripts/poc.py http://localhost/", "curl http://localhost:3000/poc.py",
     # ANSI-C-Quoting, Kommentare, Umleitungen (R2: N1, N2)
-    "python3 -I /x/scripts/poc.py a $'\\'' ; curl http://localhost:3000/ ; echo \\'",
+    "python3 -I /x/security-audit/scripts/poc.py a $'\\'' ; curl http://localhost:3000/ ; echo \\'",
     "curl $'http:\\x2f\\x2flocalhost:3000/'", "curl $'http:\\057\\057localhost:3000/'",
     "echo $'offen ; curl http://localhost:3000/",
     f"{POC} a # '\ncurl http://localhost:3000/\n# '",
@@ -339,26 +339,51 @@ def test_zeilenfortsetzung_nach_schema_umgeht_nicht_ohne_host():
 # ------------------------------------------------------------------------------ Fix-Runde 1 zum Design-Pass
 
 @pytest.mark.parametrize("befehl", [
-    "python3 -I -W/x/scripts/poc.py -c 'import x'", "python3 -W/x/scripts/poc.py -c x",
-    "python3 -I -X/x/scripts/poc.py -c x", "python3 -I -c/x/scripts/poc.py x", "python3 -I -E/x/scripts/poc.py -c x",
-    "python3 -I --x/x/scripts/poc.py -c x", "python3 -I -/x/scripts/poc.py", "python3 -I -I /x/scripts/poc.py",
+    "python3 -I -W/x/security-audit/scripts/poc.py -c 'import x'", "python3 -W/x/security-audit/scripts/poc.py -c x",
+    "python3 -I -X/x/security-audit/scripts/poc.py -c x", "python3 -I -c/x/security-audit/scripts/poc.py x", "python3 -I -E/x/security-audit/scripts/poc.py -c x",
+    "python3 -I --x/x/security-audit/scripts/poc.py -c x", "python3 -I -/x/security-audit/scripts/poc.py", "python3 -I -I /x/security-audit/scripts/poc.py",
     "python3 x/scripts/poc.py a", "python3 ./scripts/poc.py a", "python3 scripts/poc.py a",
-    "python3 ../scripts/poc.py a", "python3 -I  /x/scripts/poc.py a", "python3 -I /x/scripts/poc.py\ta",
+    "python3 ../scripts/poc.py a", "python3 -I  /x/security-audit/scripts/poc.py a", "python3 -I /x/security-audit/scripts/poc.py\ta",
 ])
 def test_poc_pfad_beginnt_mit_slash_dc1(befehl):
     assert not netzregel.ist_poc_aufruf(befehl)
 
 
+@pytest.mark.parametrize("befehl", [
+    "python3 /Users/x/.claude/security-reviews/r/scripts/poc.py anfrage --pfad /",
+    "python3 -I ~/.claude/security-reviews/r/scripts/poc.py anfrage --pfad /",
+    "python3 -I /x/evil-security-audit/scripts/poc.py anfrage",
+    "python3 -I /x/security-audit-evil/scripts/poc.py anfrage",
+    "python3 -I /x/security-audit/evil/scripts/poc.py anfrage",
+])
+def test_poc_pfad_ist_an_das_skill_verzeichnis_gebunden_r1_16(befehl):
+    """R1-16: Eine im Ausgabeordner angelegte `scripts/poc.py` ist kein poc-Aufruf; jede URL darin ist ein Verstoß."""
+    assert not netzregel.ist_poc_aufruf(befehl)
+    assert netzregel.verstoesse_bash(befehl + " --pfad http://evil.test/", [])
+
+
+@pytest.mark.parametrize("skill", ["/x/security-audit", "~/.claude/skills/security-audit", "/r/.claude/skills/security-audit-eval"])
+def test_poc_pfad_im_skill_verzeichnis_ist_poc_aufruf_r1_16(skill):
+    assert netzregel.ist_poc_aufruf(f"python3 -I {skill}/scripts/poc.py anfrage --lauf 0a1b2c3d --rolle p1 --pfad /")
+
+
+@pytest.mark.parametrize("befehl", ["openssl s_client -connect evil.test:443", "git ls-remote git@evil.test:x/y",
+                                    "dig @8.8.8.8 evil.test"])
+def test_dokumentierte_grenze_host_angaben_anderer_werkzeuge_r1_16(befehl):
+    """Grenze (Docstring von netzregel.py): nur `_WERKZEUGE` und curl-Host-Optionen werden erkannt; die Sperre ist die Rechtekonfiguration."""
+    assert netzregel.verstoesse_bash(befehl, []) == []
+
+
 def test_poc_pfad_absolut_oder_home_dc1():
-    assert netzregel.ist_poc_aufruf("python3 /scripts/poc.py a")
+    assert netzregel.ist_poc_aufruf("python3 /security-audit/scripts/poc.py a")
     assert netzregel.ist_poc_aufruf("python3 -I ~/skills/security-audit/scripts/poc.py a")
-    assert netzregel.ist_poc_aufruf("python3 -I /a-b/-c/scripts/poc.py a")
+    assert netzregel.ist_poc_aufruf("python3 -I /a-b/-c/security-audit/scripts/poc.py a")
 
 
 def test_angehaengte_python_optionen_sind_verstoss_dc1():
-    befehl = "python3 -I -W/x/scripts/poc.py -c 'import urllib.request as u;u.urlopen(\"http://evil.test\")'"
+    befehl = "python3 -I -W/x/security-audit/scripts/poc.py -c 'import urllib.request as u;u.urlopen(\"http://evil.test\")'"
     assert len(netzregel.verstoesse_bash(befehl, [])) >= 1
-    assert len(netzregel.verstoesse_bash("python3 -I -c/x/scripts/poc.py http://app/", [])) >= 1
+    assert len(netzregel.verstoesse_bash("python3 -I -c/x/security-audit/scripts/poc.py http://app/", [])) >= 1
 
 
 WHITESPACE = (["\t", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x1f", "\u0085", "\u00a0", "\u1680", "\u2028", "\u2029",
@@ -475,6 +500,27 @@ def test_ein_slash_erweiterte_schemata_dn1(schema):
 @pytest.mark.parametrize("text", ["POST:/api/x", "GET:/admin", "TODO:/", "C:\\Users\\x", "PUT:/x", "foo:/bar", "a:/b"])
 def test_ein_slash_andere_woerter_bleiben_ohne_host_dn1(text):
     assert netzregel.hosts_extrahieren(text) == []
+
+
+@pytest.mark.parametrize("praefix", ["if", "elif", "while", "until"])
+def test_netzwerkwerkzeug_nach_kontrollwort_r1_6(praefix):
+    """R1-6: if/elif/while/until sind Befehlsposition (Mutation `_PRAEFIXE` ohne diese Wörter blieb grün)."""
+    assert len(netzregel.verstoesse_bash(f"{praefix} nc evil.test 80; then :; fi", [])) >= 1
+    assert len(netzregel.verstoesse_bash(f"{praefix} curl evil", [])) >= 1
+
+
+@pytest.mark.parametrize("opt", ["-xevil.test:3128", "-x evil.test:3128", "--proxy evil.test:3128", "--proxy=evil.test:3128",
+                                 "--preproxy evil.test:1080", "--preproxy=evil.test:1080", "--proxy1.0 evil.test:1",
+                                 "--socks4 evil.test:1", "--socks4a evil.test:1", "--socks5 evil.test:1080",
+                                 "--socks5-hostname evil.test:1080", "--socks5-hostname=evil.test:1080"])
+def test_proxy_optionen_in_poc_texten_r1_6(opt):
+    assert "evil.test" in netzregel.hosts_extrahieren(f"GET /x {opt}")
+    assert netzregel.verstoesse_poc(f"GET /x {opt}") == ["evil.test"]
+
+
+def test_file_url_mit_host_ist_netz_r1_6():
+    assert netzregel.verstoesse_poc("GET file://evil.test/x") == ["evil.test"]
+    assert netzregel.verstoesse_poc("GET file:///etc/passwd") == []
 
 
 @pytest.mark.parametrize("befehl", [

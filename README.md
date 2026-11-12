@@ -4,7 +4,7 @@ Sammlung lokaler Skills fuer agentische Coding- und Content-Workflows.
 Jeder Skill liegt in einem eigenen Verzeichnis mit einer `SKILL.md` als
 Einstiegspunkt und optionalen Referenzen oder Scripts.
 
-Der aktuelle Stand des Repos umfasst zehn produktiv nutzbare Skills plus drei Agent-Definitionen:
+Der aktuelle Stand des Repos umfasst zehn produktiv nutzbare Skills, den F&E-Skill `architektur-rat` (in keinen Workflow eingebunden) plus drei Agent-Definitionen:
 
 | Skill | Zweck | Wichtige Dateien |
 |---|---|---|
@@ -15,10 +15,11 @@ Der aktuelle Stand des Repos umfasst zehn produktiv nutzbare Skills plus drei Ag
 | `viral-post-wizard` | Erstellt LinkedIn-Posts im Stil von Nikolaus Schausberger auf Basis fester Schreibregeln | `viral-post-wizard/SKILL.md`, `viral-post-wizard/references/*` |
 | `pr-review-loop` | Reviewer-Thread: startet ohne Fixer-Namen sofort je PR einen eigenen Fixer, prueft Runde 1 mit 1–3 Opus-Reviewern je nach PR-Art (Doku/Ops 1, Code klein 1, Code 2, Code mit Risiko 3 inkl. Tests-Fokus), Fixer auf Sonnet/high, eigene Test-DB je mutierendem Reviewer, reproduziert Befunde, liefert P1/P2/P3-Liste an den Fixer-Thread, re-reviewt nur das Delta mit einem `sonnet-high` (kleine, Doku- und P3-Deltas selbst, Merges nur per `--remerge-diff`), zweiter P2 an derselben Heuristik geht als Entscheidung an den User, Runde 3+ nur nach P1/P2, ohne `runden=<n>` bis sauber oder Stillstand; Agent-Statistik unter `~/.claude/agent-stats/` inkl. Thread-Tokens per Skript; aendert nie Code, merged nie | `pr-review-loop/SKILL.md` |
 | `fix-findings` | Fixer-Thread (Effort high, von `pr-review-loop` mit Sonnet gestartet): prueft eingefuegte Review-Befunde, setzt angenommene per Test → Fix → Commit um, vor dem Push nur Typecheck und abhaengige Tests (ganze Suite in der CI, ohne CI einmal vor dem Push), pusht, liefert Entscheidungstabelle; Merge/Deploy nur auf Befehlswort; nimmt auch die Befundliste aus `security-audit` ohne PR an (eigener Worktree vom geprueften SHA, Push des Branches ausser bei oeffentlichen Repos, PR-Link, kein PR) | `fix-findings/SKILL.md` |
-| `auto-feature` | Autonomer Feature-Workflow aus einem Feature-File ohne Zwischenhalt: Spec (Opus 5.5) → Opus-Review max. 2 → Plan (Opus 5.5) → Opus-Review max. 2 → Sonnet-5.5-Umsetzung → Haertung → PRs → harter Stopp (HITL); Effort xhigh, nur Re-Reviews, lesende Refactor-/UI-Reviews und mechanische Tasks mit `sonnet-high`; ganze Suite einmal je TF; Agent-Statistik Pflicht (Format gilt fuer alle Skills, Skript `scripts/agent-stats.py` fuer Eintrag, Auswertung (auch je Skill-Stand), Thread-Tokens aus Transkripten und den Stempel `Skills: generalskills@<sha>` im Kopf jeder Statistik); kein PR-Review-Loop, kein Merge; Format des Feature-Files mit DoD-IDs und Nachweis-Art in `references/feature-file.md` | `auto-feature/SKILL.md`, `auto-feature/references/feature-file.md`, `auto-feature/scripts/agent-stats.py` |
+| `auto-feature` | Autonomer Feature-Workflow aus einem Feature-File ohne Zwischenhalt: Spec (Opus 5.5) → Opus-Review max. 2 → Plan (Opus 5.5) → Opus-Review max. 2 → Sonnet-5.5-Umsetzung → Haertung → PRs → harter Stopp (HITL); Effort xhigh, nur Re-Reviews, lesende Refactor-/UI-Reviews und mechanische Tasks mit `sonnet-high`; ganze Suite einmal je TF; Agent-Statistik Pflicht (Format gilt fuer alle Skills, Skript `scripts/agent-stats.py` fuer Eintrag, Auswertung (auch je Skill-Stand), Thread-Tokens aus Transkripten und den Stempel `Skills: generalskills@<sha>` im Kopf jeder Statistik); kein PR-Review-Loop, kein Merge; Format des Feature-Files mit DoD-IDs und Nachweis-Art in `references/feature-file.md`; Retro am Laufende (auch in `pr-review-loop` und `fix-findings`) legt Fehlerklassen-Kandidaten zur Freigabe ab, Rezept `references/retro.md`, Ablage per `scripts/fehlerklassen.py` | `auto-feature/SKILL.md`, `auto-feature/references/feature-file.md`, `auto-feature/references/retro.md`, `auto-feature/scripts/agent-stats.py`, `auto-feature/scripts/fehlerklassen.py` |
 | `feature-file` | Macht aus Kundenwunsch, Call-Notiz oder Idee ein Feature-File fuer `auto-feature`: Ist-Stand im Code zuerst, Interview nur fuer Entscheidungen von User oder Kunde, Recherche nur als Default mit Quelle, Builder-Check durch einen frischen `opus-xhigh`, Freigabe-Zeile erst nach OK | `feature-file/SKILL.md` |
-| `security-audit` | Auditiert ganze Node/TS-Repos auf ausnutzbare Luecken: Karte der Angriffsflaeche, bis zu 6 Opus-Reviewer, 2 Pruefer, die jeden P1/P2 widerlegen oder per Docker-PoC im internen Netz belegen; dazu Abhaengigkeiten (osv-scanner, CISA KEV, Erreichbarkeit im Code), Lieferkette (Lockfile, `npm install` statt `npm ci`, offene Install-Skripte) und Secrets in der Git-Historie (gitleaks, Arbeitskopie vor dem Lesen geschwaerzt, Werte nie im Bericht); KI- und Agenten-Apps: Erkennung ueber `package.json` (`ki.py`), eigene Pruefpunkte K1 bis K7 (fremde Inhalte steuern Agenten, Tools mit Wirkung, Modellausgabe in Senken, Geheimnisse im Prompt), belegt per Modell-Mock im internen Docker-Netz, nie gegen eine echte Modell-API; Bericht ausserhalb des Repos unter `~/.claude/security-reviews/<repo>/`, Befundliste fuer `/fix-findings`; dazu ein Kundenbericht (Markdown und PDF, Sie-Form, Kundenstufen, Risiko und Massnahme je Befund, ohne Exploit-Details; Kopf mit dem Projektnamen aus `projekt=`); aendert das Repo nie | `security-audit/SKILL.md`, `security-audit/references/*`, `security-audit/scripts/bericht.py`, `security-audit/scripts/poc.py`, `security-audit/scripts/netzregel.py`, `security-audit/scripts/gitkopie.py`, `security-audit/scripts/lieferkette.py`, `security-audit/scripts/ki.py`, `security-audit/scripts/kundenbericht.py`, `security-audit/scripts/kundenbericht.html5`, `security-audit/docker/llm-mock.mjs`, `security-audit/evals/run_eval.py` |
-| `agents/opus-xhigh`, `agents/sonnet-xhigh`, `agents/sonnet-high` | Subagent-Definitionen mit `effort: xhigh` fuer Reviews bzw. Umsetzung, genutzt von `pr-review-loop`, `auto-feature`, `feature-file` (Builder-Check) und `security-audit` (Reviewer und Pruefer); `sonnet-high` (`effort: high`) fuer die Delta-Reviews in `pr-review-loop` und die Abschlaege nach der Effort-Regel in `auto-feature` | `agents/*.md` |
+| `security-audit` | Auditiert ganze Node/TS-Repos auf ausnutzbare Luecken: Karte der Angriffsflaeche, bis zu 6 Opus-Reviewer, 2 Pruefer, die jeden P1/P2 widerlegen oder per Docker-PoC im internen Netz belegen; dazu Abhaengigkeiten (osv-scanner, CISA KEV, Erreichbarkeit im Code), Lieferkette (Lockfile, `npm install` statt `npm ci`, offene Install-Skripte) und Secrets in der Git-Historie (gitleaks, Arbeitskopie vor dem Lesen geschwaerzt, Werte nie im Bericht); KI- und Agenten-Apps: Erkennung ueber `package.json` (`ki.py`), eigene Pruefpunkte K1 bis K7 (fremde Inhalte steuern Agenten, Tools mit Wirkung, Modellausgabe in Senken, Geheimnisse im Prompt), belegt per Modell-Mock im internen Docker-Netz, nie gegen eine echte Modell-API; Bericht ausserhalb des Repos unter `~/.claude/security-reviews/<repo>/`, Befundliste fuer `/fix-findings` (Eingang ohne PR ab TF5); dazu ein Kundenbericht (Markdown und PDF, Sie-Form, Kundenstufen, Risiko und Massnahme je Befund, ohne Exploit-Details; Kopf mit dem Projektnamen aus `projekt=`); aendert das Repo nie | `security-audit/SKILL.md`, `security-audit/references/*`, `security-audit/scripts/bericht.py`, `security-audit/scripts/poc.py`, `security-audit/scripts/netzregel.py`, `security-audit/scripts/gitkopie.py`, `security-audit/scripts/lieferkette.py`, `security-audit/scripts/ki.py`, `security-audit/scripts/kundenbericht.py`, `security-audit/scripts/kundenbericht.html5`, `security-audit/docker/llm-mock.mjs`, `security-audit/evals/run_eval.py` |
+| `architektur-rat` | **Forschung und Entwicklung, in keinen Workflow eingebunden, nur auf ausdruecklichen Wunsch.** Zwei unabhaengige `sonnet-high`-Voten (Pragmatiker, Risiko) zu einer offenen, schwer umkehrbaren Code-/Betriebsentscheidung; Hauptsession entscheidet und dokumentiert beide Voten. Test 2026-11-09: keine bessere Entscheidung als ohne Rat, ~360k Sonnet-Input-Aequivalent je Runde; nicht nach `~/.claude/skills/` verlinkt, fuer einen Versuch `ln -sfn ~/Projects/skillz/nikskills/architektur-rat ~/.claude/skills/architektur-rat` | `architektur-rat/SKILL.md` |
+| `agents/opus-xhigh`, `agents/sonnet-xhigh`, `agents/sonnet-high` | Subagent-Definitionen mit `effort: xhigh` fuer Reviews bzw. Umsetzung, genutzt von `pr-review-loop`, `auto-feature`, `feature-file` (Builder-Check) und `security-audit` (Reviewer und Pruefer); `sonnet-high` (`effort: high`) fuer die Delta-Reviews in `pr-review-loop`, die Abschlaege nach der Effort-Regel in `auto-feature` und die Voten im F&E-Skill `architektur-rat` | `agents/*.md` |
 
 ## Repository-Struktur
 
@@ -62,9 +63,12 @@ nikskills/
     SKILL.md
     references/
       feature-file.md
+      retro.md
     scripts/
       agent-stats.py
       test_agent_stats.py
+      fehlerklassen.py
+      test_fehlerklassen.py
   feature-file/
     SKILL.md
   security-audit/
@@ -80,6 +84,7 @@ nikskills/
       test_auswertung.py
       test_fixture.py
       expected/
+      fixture-ki/
       fixture-web/
       sdk-vertrag/
       testdaten/
@@ -97,6 +102,8 @@ nikskills/
       netzregel.py
       poc.py
       test_*.py
+  architektur-rat/
+    SKILL.md
   agents/
     opus-xhigh.md
     sonnet-xhigh.md
