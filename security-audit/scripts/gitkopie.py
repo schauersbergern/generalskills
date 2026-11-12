@@ -487,6 +487,37 @@ def arbeitskopie(repo: str, ziel: str, rev: str = "HEAD") -> list[str]:
     return meldungen
 
 
+# ------------------------------------------------------------------------------------ Repo-Name
+
+def repo_bereinigen(name: str) -> str | None:
+    """Repo-Name auf [A-Za-z0-9._-] beschränken; leer oder nur Punkte → None."""
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-")[:100]
+    return None if not name or re.fullmatch(r"\.+", name) else name
+
+
+def repo_name(wurzel: str) -> str:
+    try:
+        url = git(wurzel, "config", "--get", "remote.origin.url").stdout.decode(errors="replace").strip()
+    except GitFehler:
+        url = ""
+    if url:
+        basis = re.split(r"[/:\\]", url.rstrip("/\\"))[-1]
+        if basis.endswith(".git"):
+            basis = basis[:-4]
+        name = repo_bereinigen(basis)
+        if name:
+            return name
+    ordner = wurzel
+    try:
+        gemeinsam = os.fsdecode(git(wurzel, "rev-parse", "--path-format=absolute", "--git-common-dir")
+                                .stdout).rstrip("\n")
+        if os.path.basename(gemeinsam) == ".git":
+            ordner = os.path.dirname(gemeinsam)
+    except GitFehler:
+        pass
+    return repo_bereinigen(os.path.basename(ordner)) or "repo"
+
+
 # ------------------------------------------------------------------------------------ Konfiguration
 
 def repo_konfiguration(repo: str, rev: str = "HEAD") -> list[str]:

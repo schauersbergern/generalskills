@@ -1622,6 +1622,17 @@ def test_auflisten_nennt_repo_alter_und_laeuft_r1_13(umg, tmp_path):
     assert not any(a["args"][0] in ("rm", "rmi") or a["args"][:2] == ["network", "rm"] for a in umg.aufrufe())
 
 
+def test_auflisten_zeigt_denselben_repo_namen_wie_kontext_r2_3(umg, tmp_path):
+    """R2-3: Der Marker trägt den Repo-Namen aus origin (wie `bericht.py kontext`), nicht den Ordnernamen."""
+    repo = repo_mit(tmp_path, MINI, name="nikskills")
+    git(repo, "remote", "add", "origin", "https://github.com/a/generalskills.git")
+    assert umg.poc("vorbereiten", "--lauf", LAUF, "--repo", repo).returncode == 0
+    import bericht
+    assert bericht._repo_name(repo) == "generalskills"
+    zeilen = umg.poc("auflisten").stdout.splitlines()
+    assert any(z.startswith(LAUF) and "repo=generalskills " in z for z in zeilen), zeilen
+
+
 def test_auflisten_laeuft_unbekannt_ohne_docker_r1_13(umg, tmp_path):
     vorbereitet(umg, tmp_path)
     umg.konfig({"ps": {"rc": 1, "stderr": "Cannot connect to the Docker daemon. Is the docker daemon running?"}})

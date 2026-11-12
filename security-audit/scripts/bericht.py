@@ -42,33 +42,13 @@ class KontextFehler(Exception):
 
 # ------------------------------------------------------------------------------------ kontext
 
-def _bereinigen(name: str) -> str | None:
-    """Repo-Name auf [A-Za-z0-9._-] beschränken; leer oder nur Punkte → None."""
-    name = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-")[:100]
-    return None if not name or re.fullmatch(r"\.+", name) else name
+_bereinigen = gitkopie.repo_bereinigen
 
 
 def _repo_name(wurzel: str) -> str:
-    try:
-        url = git(wurzel, "config", "--get", "remote.origin.url").stdout.decode(errors="replace").strip()
-    except GitFehler:
-        url = ""
-    if url:
-        basis = re.split(r"[/:\\]", url.rstrip("/\\"))[-1]
-        if basis.endswith(".git"):
-            basis = basis[:-4]
-        name = _bereinigen(basis)
-        if name:
-            return name
-    ordner = wurzel
-    try:
-        gemeinsam = os.fsdecode(git(wurzel, "rev-parse", "--path-format=absolute", "--git-common-dir")
-                                .stdout).rstrip("\n")
-        if os.path.basename(gemeinsam) == ".git":
-            ordner = os.path.dirname(gemeinsam)
-    except GitFehler:
-        pass
-    return _bereinigen(os.path.basename(ordner)) or "repo"
+    """Repo-Name für Dateinamen und Bericht (aus origin, ersatzweise Ordnername): `gitkopie.repo_name`, auch von `poc.py`
+    im Fertig-Marker genutzt, damit `auflisten` denselben Namen zeigt wie `kontext`."""
+    return gitkopie.repo_name(wurzel)
 
 
 def _teilpfad(wurzel: str, teilpfad: str, sha: str = "HEAD") -> str:

@@ -812,7 +812,7 @@ def _vorbereiten(a: argparse.Namespace, repo: str, ordner: str, quelle: str, mar
     if any("Arbeitskopie unvollständig" in m for m in meldungen):
         print("kategorie: arbeitskopie-unvollstaendig")
         return 4
-    _schreibe_atomar(marker, {"fertig": True, "sha": kopiert, "repo": os.path.basename(repo)})
+    _schreibe_atomar(marker, {"fertig": True, "sha": kopiert, "repo": gitkopie.repo_name(repo)})
     print(quelle)
     return 0
 

@@ -106,7 +106,7 @@ Exit 2 liefert die Fehlerliste auf stderr: JSON korrigieren und erneut. Das Mark
 python3 -I ${CLAUDE_SKILL_DIR}/scripts/poc.py aufraeumen --lauf <id>
 ```
 
-Idempotent. Exit 1 heißt „unvollständig“ (auch wenn Docker nicht erreichbar war): nenne dem User den Befehl zum Wiederholen. Gibt es keine Lauf-ID (Abbruch vor `neu`), entfällt der Schritt. Ist die Lauf-ID verloren (abgebrochene Session), listet `poc.py auflisten` alle Läufe mit Resten (Zustandsordner, Container, Netze, Images, dazu `repo`, `alter_min` seit der letzten Änderung des Zustandsordners und `laeuft`). Aufgeräumt wird je ID mit `aufraeumen`, aber nur ein Lauf mit `laeuft=nein`, dessen `repo` zu deinem Audit passt; bei `laeuft=ja`, `?` oder einem fremden Repo (ein paralleles Audit sieht genauso aus) fragst du den User:
+Idempotent. Exit 1 heißt „unvollständig“ (auch wenn Docker nicht erreichbar war): nenne dem User den Befehl zum Wiederholen. Gibt es keine Lauf-ID (Abbruch vor `neu`), entfällt der Schritt. Ist die Lauf-ID verloren (abgebrochene Session), listet `poc.py auflisten` alle Läufe mit Resten (Zustandsordner, Container, Netze, Images, dazu `repo`, `alter_min` seit der letzten Änderung des Zustandsordners und `laeuft`). Aufgeräumt wird je ID mit `aufraeumen`, aber nur ein Lauf mit `laeuft=nein`, dessen `repo` dem `repo` aus `kontext` entspricht (derselbe Name, aus origin) und dessen `alter_min` mindestens 30 beträgt (ein paralleles Audit desselben Repos zeigt in der Bau-Phase, bis zu 9 Minuten ohne Änderung, ebenfalls `laeuft=nein`); bei `laeuft=ja`, `?`, einem fremden Repo oder einem jüngeren Lauf fragst du den User:
 
 ```
 python3 -I ${CLAUDE_SKILL_DIR}/scripts/poc.py auflisten
