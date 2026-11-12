@@ -24,7 +24,7 @@
       "klasse": "x",
       "ohne_anmeldung": false,
       "mandantenuebergreifend": false,
-      "poc": "python3 /skill/scripts/poc.py anfrage --lauf 0a1b2c3d --rolle p1 --pfad /api/projects/2"
+      "poc": "python3 /skill/security-audit/scripts/poc.py anfrage --lauf 0a1b2c3d --rolle p1 --pfad /api/projects/2"
     },
     {
       "id": "S-2",
@@ -40,7 +40,7 @@
       "klasse": "x",
       "ohne_anmeldung": false,
       "mandantenuebergreifend": false,
-      "poc": "python3 /skill/scripts/poc.py anfrage --lauf 0a1b2c3d --rolle p1 --pfad /search?q=x"
+      "poc": "python3 /skill/security-audit/scripts/poc.py anfrage --lauf 0a1b2c3d --rolle p1 --pfad /search?q=x"
     },
     {
       "id": "S-3",
@@ -75,7 +75,7 @@
       "klasse": "x",
       "ohne_anmeldung": false,
       "mandantenuebergreifend": false,
-      "poc": "python3 /skill/scripts/poc.py anfrage --lauf 0a1b2c3d --rolle p1 --pfad /webhook"
+      "poc": "python3 /skill/security-audit/scripts/poc.py anfrage --lauf 0a1b2c3d --rolle p1 --pfad /webhook"
     },
     {
       "id": "S-5",
@@ -91,7 +91,7 @@
       "klasse": "x",
       "ohne_anmeldung": false,
       "mandantenuebergreifend": false,
-      "poc": "python3 /skill/scripts/poc.py anfrage --lauf 0a1b2c3d --rolle p1 --pfad /preview?url=http://127.0.0.1/"
+      "poc": "python3 /skill/security-audit/scripts/poc.py anfrage --lauf 0a1b2c3d --rolle p1 --pfad /preview?url=http://127.0.0.1/"
     },
     {
       "id": "S-6",

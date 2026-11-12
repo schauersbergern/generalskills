@@ -47,7 +47,10 @@ TEMP_PRAEFIX = "eval-security-audit-"
 SKILL_NAME = "security-audit-eval"
 TOOLS = "Read,Glob,Grep,Write,Edit,Agent,Skill,Bash,TodoWrite,ToolSearch"
 SMOKE_PROMPT = "Antworte nur mit ok."
-PROMPTS = {"slash": f"/{SKILL_NAME}", "text": f"Nutze den Skill {SKILL_NAME} auf diesem Repo."}
+# Der Eval-Skill liegt in `.claude/skills/` des Temp-Repos (Claude-Konfiguration „nur im Arbeitsbaum“): `bericht.py kontext` bricht
+# ohne den Schalter ab. Die Konfiguration ist hier die eigene Skill-Kopie in einem Wegwerf-Repo, also gilt der Schalter in beiden Prompts.
+SCHALTER = "repo-konfig-geprueft"
+PROMPTS = {"slash": f"/{SKILL_NAME} {SCHALTER}", "text": f"Nutze den Skill {SKILL_NAME} auf diesem Repo mit dem Schalter {SCHALTER}."}
 SMOKE_TIMEOUT = 300
 DOCKER_TIMEOUT = 60
 KILL_WARTEN = 10
@@ -395,60 +398,78 @@ def _docker(args: list[str]) -> tuple[int, str]:
     return r.returncode, r.stdout.decode("utf-8", "replace")
 
 
-def _eigene(zeilen: list[str]) -> list[str]:
-    """Namen mit Präfix `security-audit-` (ohne führenden `/`), ohne Dubletten, in Reihenfolge."""
+def _eigene(zeilen: list[str], laeufe: set[str] | None = None) -> list[str]:
+    """Namen mit Präfix `security-audit-` (ohne führenden `/`), ohne Dubletten, in Reihenfolge. Mit `laeufe` nur die
+    Namen dieser Läufe (`security-audit-<lauf>` oder `security-audit-<lauf>-…`): ein parallel laufendes echtes Audit
+    mit anderer Lauf-ID bleibt unberührt (R1-3)."""
     namen: list[str] = []
     for z in zeilen:
         n = z.strip().lstrip("/")
-        if n.startswith(PRAEFIX) and n not in namen:
-            namen.append(n)
+        if not n.startswith(PRAEFIX) or n in namen:
+            continue
+        if laeufe is not None and not any(n == f"{PRAEFIX}{lauf}" or n.startswith(f"{PRAEFIX}{lauf}-") for lauf in laeufe):
+            continue
+        namen.append(n)
     return namen
 
 
-def _images() -> list[tuple[str, str]] | None:
-    """(Repository, Tag) der Images `security-audit-*`; None, wenn nicht lesbar."""
+def _images(laeufe: set[str] | None = None) -> list[tuple[str, str]] | None:
+    """(Repository, Tag) der Images `security-audit-*` (mit `laeufe` nur dieser Läufe); None, wenn nicht lesbar."""
     rc, out = _docker(["images", "--filter", f"reference={PRAEFIX}*", "--format", "{{.Repository}}|{{.Tag}}"])
     if rc != 0:
         return None
     paare = []
     for z in out.splitlines():
         repo, _, tag = z.strip().partition("|")
-        if repo.startswith(PRAEFIX) and (repo, tag) not in paare:
+        if _eigene([repo], laeufe) and (repo, tag) not in paare:
             paare.append((repo, tag))
     return paare
 
 
-def docker_listen() -> dict[str, list[str]]:
-    """`{"container": […], "netze": […], "images": […]}` nur mit Namen `security-audit-*`. Eine nicht lesbare Liste
-    fehlt im Ergebnis (die Auswertung wertet das fail-closed als D7 nicht erfüllt)."""
+def docker_listen(laeufe: set[str] | None = None) -> dict[str, list[str]]:
+    """`{"container": […], "netze": […], "images": […]}` nur mit Namen `security-audit-*` (mit `laeufe` nur die dieser
+    Läufe). Eine nicht lesbare Liste fehlt im Ergebnis (die Auswertung wertet das fail-closed als D7 nicht erfüllt)."""
     listen: dict[str, list[str]] = {}
     rc, out = _docker(["ps", "-a", "--format", "{{.Names}}"])
     if rc == 0:
-        listen["container"] = _eigene(out.splitlines())
+        listen["container"] = _eigene(out.splitlines(), laeufe)
     rc, out = _docker(["network", "ls", "--format", "{{.Name}}"])
     if rc == 0:
-        listen["netze"] = _eigene(out.splitlines())
-    images = _images()
+        listen["netze"] = _eigene(out.splitlines(), laeufe)
+    images = _images(laeufe)
     if images is not None:
-        listen["images"] = _eigene([r for r, _ in images])
+        listen["images"] = _eigene([r for r, _ in images], laeufe)
     return listen
 
 
-def docker_aufraeumen() -> bool:
-    """Entfernt Container, Netze und Images mit Präfix `security-audit-` (nur diese). True, wenn nichts übrig blieb; False
-    bei Fehlern beim Entfernen und wenn eine Liste nicht lesbar war (dann ist unbekannt, ob etwas übrig ist)."""
+def _eigene_laeufe(stream_pfad: str) -> set[str]:
+    """Lauf-IDs aus den `poc.py neu`-Ausgaben im Stream dieses Evals (leer, wenn der Stream fehlt: dann hat der Lauf nichts gestartet)."""
+    try:
+        ereignisse, _, _, _ = auswertung.lade_stream_info(stream_pfad)
+    except OSError:
+        return set()
+    return auswertung.lauf_ids(ereignisse)
+
+
+def docker_aufraeumen(laeufe: set[str]) -> bool:
+    """Entfernt Container, Netze und Images der Läufe `laeufe` (Namen `security-audit-<lauf>…`, nur diese; die Lauf-IDs
+    stammen aus den Ausgaben von `poc.py neu` im Stream des Evals, so bleibt ein parallel laufendes echtes Audit unberührt).
+    True, wenn nichts übrig blieb; False bei Fehlern beim Entfernen und wenn eine Liste nicht lesbar war (dann ist
+    unbekannt, ob etwas übrig ist). Ohne Lauf-IDs gibt es nichts zu entfernen."""
     ok = True
+    if not laeufe:
+        return ok
 
     def containerliste() -> list[str] | None:
         rc, out = _docker(["ps", "-a", "--format", "{{.Names}}"])
-        return _eigene(out.splitlines()) if rc == 0 else None
+        return _eigene(out.splitlines(), laeufe) if rc == 0 else None
 
     def netzliste() -> list[str] | None:
         rc, out = _docker(["network", "ls", "--format", "{{.Name}}"])
-        return _eigene(out.splitlines()) if rc == 0 else None
+        return _eigene(out.splitlines(), laeufe) if rc == 0 else None
 
     def imageliste() -> list[str] | None:
-        images = _images()
+        images = _images(laeufe)
         return None if images is None else [f"{r}:{t}" for r, t in images if t and t != "<none>"]
 
     schritte = (("Container", containerliste, lambda n: ["rm", "-f", "-v", *n]),
@@ -813,12 +834,13 @@ def _lauf_main(a: argparse.Namespace) -> int:
         lauf = _lauf(cmd, repo, env, stream_pfad, stderr_pfad, a.timeout)
         _log(f"Lauf beendet: rc={lauf['rc']}, Timeout={lauf['timeout']}, {lauf['dauer_s']} s")
         # 6. Nachher: Docker-Listen erfassen
-        listen = docker_listen()
+        listen = docker_listen(_eigene_laeufe(stream_pfad))
         _abbruch_pruefen()
     finally:
-        _log("Docker aufräumen (security-audit-*)")
-        if not docker_aufraeumen():
-            _log("Warnung: Docker-Reste mit Präfix security-audit- können bleiben")
+        eigene = _eigene_laeufe(stream_pfad)
+        _log(f"Docker aufräumen (Läufe dieses Evals: {', '.join(sorted(eigene)) or 'keine'})")
+        if not docker_aufraeumen(eigene):
+            _log("Warnung: Docker-Reste dieses Evals (security-audit-<lauf>-…) können bleiben")
 
     # 6. und 7. Zustand nachher, Auswertung
     try:

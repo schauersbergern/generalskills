@@ -8,9 +8,12 @@ am Wortlaut, und eine stille Änderung hätte keinen anderen Test rot gemacht.
 
 Aufruf: python3 -m pytest security-audit/scripts/test_skill_text.py -q
 """
+import contextlib
+import io
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 
@@ -196,6 +199,67 @@ def test_optionen_existieren(pfad):
             if option != "--help" and option not in hilfe:
                 schlecht.append((skript, unter, option))
     assert not schlecht, schlecht
+
+
+_WERT_NACH_OPTION = {"--lauf": "0a1b2c3d", "--rolle": "p1", "--port": "3000", "--sha": "a" * 40, "--methode": "GET"}
+
+
+def _argv(zeile: str, optionale: bool) -> tuple[str, list[str]]:
+    """(skript, argv) einer Aufrufzeile für den argparse-Parser des Skripts. Optionale Teile `[…]` bleiben stehen
+    (Klammern entfernt) oder entfallen; Platzhalter `<…>` werden durch gültige Werte ersetzt."""
+    zeile = re.sub(r"\[([^\]]*)\]", (lambda m: m.group(1)) if optionale else "", zeile)
+    teile = shlex.split(zeile)
+    skript = re.search(r"/scripts/(poc|bericht)\.py$", teile[2]).group(1)
+    argv, vorher = [], ""
+    for tok in teile[3:]:
+        if re.fullmatch(r"<[^>]+>", tok) and vorher in _WERT_NACH_OPTION:
+            tok = _WERT_NACH_OPTION[vorher]
+        else:
+            tok = re.sub(r"<[^>]*>", "x", tok)
+        argv.append(tok)
+        vorher = tok if tok.startswith("--") else vorher if tok == "--" else ""
+    return skript, argv
+
+
+def _parse(skript: str, argv: list[str]) -> str | None:
+    """Fehlertext des echten Parsers (`allow_abbrev=False`, Pflichtoptionen, Typen) oder None."""
+    parser = (poc if skript == "poc" else bericht)._parser()
+    mit_fehler = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(mit_fehler):
+            if skript == "poc" and argv[0] == "ausfuehren" and "--" in argv:     # wie poc.main: Befehl nach `--` abtrennen
+                i = argv.index("--")
+                argv, befehl = argv[:i], argv[i + 1:]
+                if not befehl:
+                    parser.error("ausfuehren: Befehl nach `--` fehlt")
+            parser.parse_args(bericht._argv_mit_werten(argv) if skript == "bericht" else argv)
+    except SystemExit:
+        return mit_fehler.getvalue().strip() or "SystemExit"
+    return None
+
+
+@pytest.mark.parametrize("pfad", [SKILL_MD, BRIEFINGS, BERICHT_FORMAT], ids=os.path.basename)
+def test_aufrufzeilen_parsen_mit_dem_echten_parser(pfad):
+    """Jede Aufrufzeile (mit und ohne ihre optionalen `[…]`-Teile) erfüllt den argparse-Parser des Skripts: Pflichtoptionen
+    vorhanden, Optionsnamen vollständig (`allow_abbrev=False`), Werte vom richtigen Typ."""
+    zeilen = [z for z in _aufrufzeilen(_lies(pfad)) if re.search(r"/scripts/(?:poc|bericht)\.py ", z)]
+    assert zeilen
+    schlecht = []
+    for zeile in zeilen:
+        for optionale in (True, False):
+            skript, argv = _argv(zeile, optionale)
+            fehler = _parse(skript, argv)
+            if fehler:
+                schlecht.append((zeile, argv, fehler.splitlines()[-1]))
+    assert not schlecht, schlecht
+
+
+def test_parser_test_erkennt_mutierte_aufrufzeilen():
+    """Die beiden Mutationen aus R1-19: `--start-befehl` → `--start` und `--rolle p1` aus der starten-Zeile entfernt."""
+    zeile = [z for z in _aufrufzeilen(_lies(SKILL_MD)) if " starten " in z][0]
+    assert _parse(*_argv(zeile, True)) is None
+    assert _parse(*_argv(zeile.replace("--start-befehl", "--start"), True))
+    assert _parse(*_argv(zeile.replace("--rolle p1 ", ""), True))
 
 
 def test_skill_md_nennt_jeden_poc_unterbefehl():
@@ -806,10 +870,10 @@ def test_skill_typische_fehler_netzregel_stimmt_fachlich_m6():
     lk = ("python3 -I /pfad/skill/scripts/lieferkette.py secrets --lauf 0a1b2c3d --repo /home/u/my.app.com "
           "--quelle /tmp/z/quelle --sha 0123456789abcdef0123456789abcdef01234567")
     assert netzregel.verstoesse_bash(lk, []) == [] and not netzregel.ist_poc_aufruf(lk)     # kein Fehlalarm, kein poc-Aufruf
-    assert netzregel.ist_poc_aufruf("python3 -I /pfad/skill/scripts/poc.py pruefen")
-    assert netzregel.verstoesse_bash("python3 -I /pfad/skill/scripts/poc.py pruefen && echo ok", []) == []   # Kette ohne URL
-    assert netzregel.verstoesse_bash("python3 -I /pfad/skill/scripts/poc.py anfrage --rolle p1 --url http://app:3000/x 2>&1", [])
-    assert not netzregel.ist_poc_aufruf("python3 -I /pfad/skill/scripts/poc.py pruefen && ls")
+    assert netzregel.ist_poc_aufruf("python3 -I /pfad/security-audit/scripts/poc.py pruefen")
+    assert netzregel.verstoesse_bash("python3 -I /pfad/security-audit/scripts/poc.py pruefen && echo ok", []) == []   # Kette ohne URL
+    assert netzregel.verstoesse_bash("python3 -I /pfad/security-audit/scripts/poc.py anfrage --rolle p1 --url http://app:3000/x 2>&1", [])
+    assert not netzregel.ist_poc_aufruf("python3 -I /pfad/security-audit/scripts/poc.py pruefen && ls")
 
 
 def test_beispiel_json_k8_text_m7():
