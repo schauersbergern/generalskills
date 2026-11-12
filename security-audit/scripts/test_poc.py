@@ -324,6 +324,27 @@ def test_package_json_nicht_lesbar_ist_keine_stille_freigabe(tmp_path):
     assert poc.lockfile_pruefen(q) == "lockfile-fremde-quelle"
 
 
+def _v1(deps):
+    return json.dumps({"lockfileVersion": 1, "dependencies": deps})
+
+
+@pytest.mark.parametrize("version", ["evil/repo#abc", "evil/repo", "git@github.com:a/b.git", "^1.0.0", "1.0", "", None, 1,
+                                     "npm:evil/repo", "npm:@a/b@https://evil.test/x.tgz"])
+def test_lockfile_v1_ohne_resolved_nur_reine_version_r2(tmp_path, version):
+    """R2 (Geschwisterstelle zu R1-2): v1-`dependencies`-Einträge ohne resolved, rekursiv, nur mit reiner Semver oder npm:-Alias."""
+    assert poc.lockfile_pruefen(lock_in(tmp_path, _v1({"x": {"version": version}}))) == "lockfile-fremde-quelle"
+    tief = _v1({"a": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/a/-/a-1.0.0.tgz",
+                      "dependencies": {"b": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/b/-/b-1.0.0.tgz",
+                                             "dependencies": {"c": {"version": version}}}}}})
+    assert poc.lockfile_pruefen(lock_in(tmp_path / "t", tief)) == "lockfile-fremde-quelle"
+
+
+@pytest.mark.parametrize("eintrag", [{"version": "1.2.3"}, {"version": "1.2.3-beta.1+b"}, {"version": "npm:b@1.2.3"},
+                                     {"version": "npm:@s/b@1.2.3"}, {"version": "evil/repo", "bundled": True}])
+def test_lockfile_v1_ohne_resolved_erlaubte_faelle_r2(tmp_path, eintrag):
+    assert poc.lockfile_pruefen(lock_in(tmp_path, _v1({"x": eintrag}))) is None
+
+
 def test_lockfile_hinweise(tmp_path):
     assert poc.lockfile_hinweise(lock_in(tmp_path, lockdatei({"node_modules/a": paket()}))) == []
     q = lock_in(tmp_path / "n", lockdatei({"node_modules/sharp": paket(hasInstallScript=True)}))

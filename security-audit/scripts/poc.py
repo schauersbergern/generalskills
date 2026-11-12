@@ -519,18 +519,37 @@ def _fremde_quelle(daten: object) -> bool:
 
 
 _SEMVER = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?")
+_VERSION_ALIAS = re.compile(r"npm:(?:@[a-z0-9~][a-z0-9._~-]*/)?[a-z0-9~][a-z0-9._~-]*@" + _SEMVER.pattern)
+
+
+def _reine_version(version: object) -> bool:
+    """Reine Registry-Version: Semver oder `npm:<name>@<semver>`; alles andere (Git-Kurzform, URL, Range) nicht."""
+    return isinstance(version, str) and bool(_SEMVER.fullmatch(version) or _VERSION_ALIAS.fullmatch(version))
 
 
 def _ohne_resolved(daten: dict) -> bool:
-    """Ein Paket unter `node_modules/` hat kein `resolved` und keine reine Semver-`version` (gebündelte Pakete
-    ausgenommen): npm ginge dann nach einer Spec statt nach Registry-Name und -Version los. Einträge ohne `resolved`
-    mit reiner Version kommen in echten Lockfiles vor (dedupe) und holen `name@version` aus der Registry."""
+    """Ein Paket hat kein `resolved` und keine reine Registry-Version (gebündelte Pakete ausgenommen): npm ginge dann nach
+    einer Spec statt nach Registry-Name und -Version los. Gilt für `packages` unter `node_modules/` (v2/v3) und für die
+    `dependencies`-Einträge alter Lockfiles (v1, rekursiv). Einträge ohne `resolved` mit reiner Version kommen in echten
+    Lockfiles vor (dedupe) und holen `name@version` aus der Registry."""
     pakete = daten.get("packages")
-    if not isinstance(pakete, dict):
-        return False
-    return any(isinstance(e, dict) and "node_modules/" in pfad and "resolved" not in e and e.get("inBundle") is not True
-               and not (isinstance(e.get("version"), str) and _SEMVER.fullmatch(e["version"]))
-               for pfad, e in pakete.items())
+    if isinstance(pakete, dict) and any(
+            isinstance(e, dict) and "node_modules/" in pfad and "resolved" not in e and e.get("inBundle") is not True
+            and not _reine_version(e.get("version")) for pfad, e in pakete.items()):
+        return True
+    stapel = [daten.get("dependencies")]
+    while stapel:                                      # iterativ: tiefe Verschachtelung sprengt nichts
+        karte = stapel.pop()
+        if not isinstance(karte, dict):
+            continue
+        for e in karte.values():
+            if not isinstance(e, dict):
+                continue
+            if "resolved" not in e and e.get("bundled") is not True and e.get("inBundle") is not True \
+                    and not _reine_version(e.get("version")):
+                return True
+            stapel.append(e.get("dependencies"))
+    return False
 
 
 def _package_json_fremd(quelle: str) -> bool:
