@@ -1,0 +1,19 @@
+# Image für den Security-Audit-PoC. Bau über scripts/poc.py (DOCKER_BUILDKIT=1, keine `# syntax=`-Zeile):
+#   Kontext      = Arbeitskopie (<zustand>/quelle), Ausschlüsse in Dockerfile.poc.dockerignore
+#   zweiter Kontext poc = security-audit/docker (liefert anfrage.mjs)
+# Kundencode läuft nur im Container: Abhängigkeiten ohne Install-Skripte, Build ohne Netz, alles als USER node.
+ARG NODE=22
+
+FROM node:${NODE}-slim AS deps
+WORKDIR /app
+RUN chown node:node /app
+USER node
+COPY --chown=node:node package.json package-lock.json ./
+RUN npm ci --ignore-scripts --registry=https://registry.npmjs.org/
+
+FROM deps AS build
+ARG BUILD_BEFEHL="npm run build --if-present"
+COPY --chown=node:node . .
+RUN --network=none sh -c "$BUILD_BEFEHL"
+# Gehört root und liegt außerhalb von /app: der Kunden-Build läuft als node und kann die Datei nicht ändern.
+COPY --from=poc --chown=root:root anfrage.mjs /poc/anfrage.mjs

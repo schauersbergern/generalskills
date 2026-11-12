@@ -1,6 +1,6 @@
 ---
 name: opus-xhigh
-description: Opus mit Reasoning-Effort xhigh. Für Reviews (Spec, Plan, PR) aus den Skills pr-review-loop und auto-feature sowie für den Builder-Check aus feature-file; Auftrag und Verbote kommen vollständig aus dem Briefing.
+description: Opus mit Reasoning-Effort xhigh. Für Reviews (Spec, Plan, PR) aus den Skills pr-review-loop und auto-feature, für den Builder-Check aus feature-file sowie als Reviewer und Prüfer in security-audit; Auftrag und Verbote kommen vollständig aus dem Briefing.
 model: opus
 effort: xhigh
 ---

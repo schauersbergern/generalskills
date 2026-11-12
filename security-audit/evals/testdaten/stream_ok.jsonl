@@ -1,0 +1,10 @@
+{"type": "system", "subtype": "init"}
+{"type": "assistant", "parent_tool_use_id": null, "message": {"content": [{"type": "text", "text": "ok"}, {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "python3 /skill/scripts/bericht.py kontext"}}]}}
+{"type": "assistant", "parent_tool_use_id": null, "message": {"content": [{"type": "text", "text": "ok"}, {"type": "tool_use", "id": "t0", "name": "Bash", "input": {"command": "python3 -I /skill/security-audit/scripts/poc.py neu"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t0", "content": "0a1b2c3d\n"}]}}
+{"type": "assistant", "parent_tool_use_id": null, "message": {"content": [{"type": "text", "text": "ok"}, {"type": "tool_use", "id": "t2", "name": "Agent", "input": {"prompt": "Reviewer 1"}}]}}
+{"type": "assistant", "parent_tool_use_id": "t2", "message": {"content": [{"type": "text", "text": "ok"}, {"type": "tool_use", "id": "t3", "name": "Bash", "input": {"command": "python3 /skill/security-audit/scripts/poc.py anfrage --lauf 0a1b2c3d --rolle p1 --pfad /x?url=http://127.0.0.1/"}}]}}
+{"type": "assistant", "parent_tool_use_id": null, "message": {"content": [{"type": "text", "text": "ok"}, {"type": "tool_use", "id": "t4", "name": "Task", "input": {"prompt": "Prüfer"}}]}}
+{"type": "assistant", "parent_tool_use_id": null, "message": {"content": [{"type": "text", "text": "ok"}, {"type": "tool_use", "id": "t5", "name": "Grep", "input": {"pattern": "fixture.invalid"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}}
+{"type": "result", "subtype": "success"}

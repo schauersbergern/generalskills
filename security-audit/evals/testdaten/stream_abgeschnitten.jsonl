@@ -1,0 +1,6 @@
+{"type": "assistant", "parent_tool_use_id": null, "message": {"content": [{"type": "text", "text": "ok"}, {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "python3 /skill/scripts/bericht.py kontext"}}]}}
+not json
+
+{"type": "assistant", "parent_tool_use_id": null, "message": {"content": [{"type": "text", "text": "ok"}, {"type": "tool_use", "id": "t2", "name": "Agent", "input": {"prompt": "Reviewer 1"}}]}}
+{"type": "assistant", "parent_tool_use_id": null, "message": {"content": [{"type": "text", "text": "ok"}, {"type": "tool_use", "id": "t4", "name": "Task", "input": {"prompt": "Pr\u00fcfer"}}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t9", "na
