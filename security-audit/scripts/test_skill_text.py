@@ -201,7 +201,8 @@ def test_optionen_existieren(pfad):
     assert not schlecht, schlecht
 
 
-_WERT_NACH_OPTION = {"--lauf": "0a1b2c3d", "--rolle": "p1", "--port": "3000", "--sha": "a" * 40, "--methode": "GET"}
+_WERT_NACH_OPTION = {"--lauf": "0a1b2c3d", "--rolle": "p1", "--port": "3000", "--sha": "a" * 40, "--methode": "GET",
+                     "--suche": "POCMARKER-p1-0a1b2c3d"}     # `poc.py modell --protokoll --suche <marker>` (TF3)
 
 
 def _argv(zeile: str, optionale: bool) -> tuple[str, list[str]]:
