@@ -18,7 +18,7 @@ nicht bekommt, endet mit Exit 1, ohne etwas zu löschen. Ausgabe (JSON auf stdou
 gitleaks-Felder `Secret`, `Match`, `Author`, `Email`, `Message` und `Fingerprint` werden nie ausgegeben, kein Secret-Wert
 verlässt den Prozess. Grenze: gitleaks überspringt mit `useDefault = true` bestimmte Pfade (`STANDARD_AUSNAHMEN`, z. B.
 `node_modules/`, Lockfiles, `*.svg`); Textdateien dieser Klassen in der Arbeitskopie werden weder geprüft noch geschwärzt und
-stehen deshalb im Hinweis „gitleaks-Standardausnahmen nicht geprüft: …“. Secrets ohne bekanntes Muster erkennt gitleaks nirgends: „geschwärzt“ heißt „soweit gitleaks sie erkennt“.
+stehen deshalb im Hinweis „gitleaks-Standardausnahmen nicht geprüft: …“. Secrets ohne bekanntes Muster erkennt gitleaks nirgends, und in sehr langen Zeilen übersieht es Secrets an seinen Puffergrenzen (8.30.1 gemessen: ab etwa Byte 124 955 einer Zeile): „geschwärzt“ heißt „soweit gitleaks sie erkennt“.
 
 `abhaengigkeiten` (Budget 300 s) kopiert jedes Lockfile (npm `package-lock.json`/`npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`;
 ohne `node_modules/`) mit seinem Dateinamen in einen eigenen leeren Ordner unter `<zustand>/lieferkette/abh/` und ruft darauf
