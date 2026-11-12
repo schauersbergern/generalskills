@@ -21,6 +21,7 @@ Feature-File: `$ARGUMENTS`
 
 ## Start
 
+0. **Fortsetzung?** Liegt zum Feature-File schon eine Stand-Datei (siehe „Kontext der Hauptsession“), setzt du den Lauf fort: Stand-Datei, Feature-File, `CLAUDE.md` und Spec/Plan des offenen TF lesen, dann beim dort genannten nächsten Schritt weitermachen. Die übrigen Start-Schritte entfallen.
 1. Das Feature-File und `CLAUDE.md` vollständig lesen. Format und Regeln des Feature-Files: `~/.claude/skills/auto-feature/references/feature-file.md`. In Teilfeatures (TF) zerlegen. Reihenfolge und Abhängigkeiten aus dem File übernehmen. Ein TF ergibt einen PR.
    - **DoD-IDs und Nachweis-Art:** Hat das File keine `TF<n>-D<m>`-IDs oder keine Nachweis-Art (ältere Files), vergibt die Spec beides: IDs in der Reihenfolge des Files, Nachweis-Art je Punkt, im Zweifel `[Test]`. Das steht im Abschlussbericht.
    - **Schreibgeschützt:** Das Feature-File bleibt im Lauf unverändert, auch ein vorhandener Abschnitt „Offene Review-Punkte“ (parallele TF-Branches würden sonst kollidieren). Abweichungen und offene Punkte stehen in Spec, Plan, PR-Body und Abschlussbericht.
@@ -55,6 +56,16 @@ Feature-File: `$ARGUMENTS`
 - `brainstorming`: Die User-Review-Schritte entfallen, das Review machen die Opus-Subagenten in Phase B.
 - `writing-plans`: Die Frage nach der Ausführungsart lautet immer subagent-driven.
 - `finishing-a-development-branch`: Die Antwort ist immer „PR öffnen“.
+
+## Kontext der Hauptsession
+
+Jeder API-Aufruf der Hauptsession liest ihren ganzen Kontext neu. Im Lauf security-audit (2026-11-09 bis 11-11) war sie mit 761 Aufrufen bei einem Kontext von im Median 490k der größte Einzelposten, gut ein Fünftel der Gesamtkosten. Ihr Kontext bleibt klein, wenn:
+
+- **Stand-Datei:** `<YYYY-MM-DD>-<lauf>-stand.md` neben der Agent-Statistik. Fortschreiben nach jedem Plan-Task (eine Zeile) und an jeder TF-Grenze: je TF Status, Branch, Worktree, PR, nächster Schritt und offene Punkte, nach Abschluss des TF dessen Teil des Abschlussberichts; dazu die Session-IDs des Laufs. Nach einer Kompaktierung liest die Hauptsession zuerst Stand-Datei, Feature-File und Spec/Plan des laufenden TF. Retro und Abschlussbericht entstehen aus der Stand-Datei, nicht aus dem Gedächtnis.
+- **Früh kompaktieren:** Der Lauf ist darauf ausgelegt, dass die Hauptsession bei etwa 300k kompaktiert (User-Einstellung `/autocompact 300k` für Opus oder `CLAUDE_CODE_AUTO_COMPACT_WINDOW=300k`). Mit der Stand-Datei geht dabei nichts verloren. Eine frische Session je TF startet der Lauf nicht selbst: Die App verweigert Session-Starts in Zügen, die eine Task-Notification ausgelöst hat. Unterbricht der User den Lauf, setzt ein neues `/auto-feature <Feature-File>` über Start-Schritt 0 fort.
+- **Kurze Berichte:** Jedes Briefing endet mit einer Grenze für den Bericht. Implementierer, Fix-Runden und Härtung: höchstens etwa 300 Wörter (Commit, Testergebnis als Zahl, Abweichungen vom Plan, gefundene Lücken je eine Zeile, offene Punkte), keine Testausgaben, Diff-Auszüge oder Nacherzählung. Reviewer: nur Befunde, Blocker und Wichtige mit Beleg, Kleinigkeiten je eine Zeile, keine Liste des Geprüften. Im Referenzlauf brachten 132 Berichte im Schnitt 7,5k Zeichen in den Kontext.
+- **Edit statt Neuschreiben:** Review-Befunde arbeitet die Hauptsession per Edit in Spec und Plan ein, nicht durch Neuschreiben des ganzen Dokuments.
+- **Statistik nur je TF** (Abschnitt „Agent-Statistik“), nicht nach jeder Notification.
 
 ## Plan (C): Review Focus
 
@@ -164,6 +175,7 @@ Vor dem PR den gebauten Code systematisch durchgehen und diese acht Fragen **sch
 ## PR (F) und Stapel
 
 - **Body:**
+  - erste Zeile `Herkunft: auto-feature` (daran legt `pr-review-loop` die Prüftiefe fest: Task-Reviews mit Mutationsproben und Härtung sind schon gelaufen)
   - was gebaut wurde
   - Links zu Spec und Plan
   - DoD als Haken mit IDs, `[Durchklick]`-Punkte als Checkliste für den User
@@ -211,9 +223,12 @@ Letzte Zeile: „Stopp. Bitte prüfen; danach `/pr-review-loop <PR>` je PR.“
 **Jeder Lauf führt eine Agent-Statistik**, als Grundlage für spätere Token-Optimierung. Dieses Format gilt auch für `pr-review-loop`, `fix-findings` und jede andere Session, die Subagenten startet. Ablage nach Repo-Konvention, sonst `docs/superpowers/runs/<YYYY-MM-DD>-<lauf>-agent-stats.md`. Außerhalb von `auto-feature` liegt sie unter `~/.claude/agent-stats/<repo>/`.
 
 - **Kopf:** Repo, Lauf, Session-ID der Hauptsession. Die Zeile „Skills:“ schreibt das Skript selbst (siehe „Skill-Stand“).
-- **Fortschreiben** nach jeder Task-Notification, nicht erst am Ende. Nach einer Kompaktierung fehlen sonst die Werte.
+- **Eintragen einmal je TF**, nicht nach jeder Task-Notification: nach dem PR des TF ein einziger Bash-Aufruf mit `import` und `bewerte` (unten). Die Messwerte liest das Skript aus den Subagent-Transkripten der Session, sie überstehen also jede Kompaktierung. Grund: Im Lauf security-audit waren rund 200 der 761 Aufrufe der Hauptsession Statistik-Einträge, etwa ein Viertel ihrer Kosten.
+- **Agent-Beschreibung = `<TF> <Rolle>`:** Die `description` jedes Agent-Aufrufs beginnt mit dem TF und nennt dann die Rolle in der Schreibweise unten, z. B. `TF2 Spec-Review R1`, `TF2 Impl T3`, `FF Builder-Check`. `import` übernimmt TF und Rolle daraus. Eine Fix-Runde per `SendMessage` bleibt in der Zeile ihres Implementierers, die Spalte Fix-Runden zählt sie. Ein frischer Fix-Implementierer heißt `TF2 Fix T3`.
 - **Werkzeug:** `~/.claude/skills/auto-feature/scripts/agent-stats.py` (nur Python-Standardbibliothek), in jedem Aufruf mit vollem Pfad, denn eine Shell-Variable überlebt den Bash-Aufruf nicht. Es hält das Format ein, damit sich die Dateien über Läufe hinweg auswerten lassen:
-  - `python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py add <datei> --rolle "<Rolle>" --typ <agent-typ> --tokens <subagent_tokens> --dauer <duration_ms> --tool-uses <n> [--tf …] [--bwk 0/1/3] [--angenommen …] [--betrieb "n: …"] [--fix-runden …] [--status …]`, bei einer `SendMessage`-Fortsetzung zusätzlich `--fortsetzung-von <#>` mit der Nummer der Erstzeile des Agenten (eine angegebene Fortsetzungszeile lenkt es auf deren Erstzeile um), dann rechnet es `(kum.)` und `Δ tokens` selbst. Eine neue Datei legt es an, Kopfzeilen per `--kopf "Repo: …"`, und stempelt dabei den Skill-Stand. Befunde nachtragen: Zelle von Hand ändern.
+  - `python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py import <datei> self [--kopf "Repo: …"]`: trägt alle fertigen, noch nicht eingetragenen Subagenten der Session ein, je Agent eine Zeile. Bereits eingetragene erkennt es an ihrer Agent-ID (Kommentarzeile `agent-stats:importiert` in der Datei), noch laufende kommen beim nächsten Aufruf. Legt die Datei bei Bedarf an und stempelt den Skill-Stand wie `add`.
+  - `python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py bewerte <datei> <<'EOF'` mit einer JSON-Zeile je bewerteter Zeile, z. B. `{"tf": "TF2", "rolle": "Spec-Review R1", "bwk": "1/4/6", "angenommen": "9", "betrieb": "2: Leck im Bericht; Absturz bei leerem Repo"}` oder mit `"nr": 12` statt TF und Rolle. Felder: `bwk`, `angenommen`, `betrieb`, `fix_runden`, `status`. Passt eine Angabe nicht auf genau eine Zeile, schreibt es nichts. Die Werte stehen ohnehin im Review-Verlauf von Spec und Plan.
+  - `python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py add <datei> --rolle "<Rolle>" --typ <agent-typ> --tokens <subagent_tokens> --dauer <duration_ms> --tool-uses <n> [--tf …] [--bwk 0/1/3] [--angenommen …] [--betrieb "n: …"] [--fix-runden …] [--status …]`, bei einer `SendMessage`-Fortsetzung zusätzlich `--fortsetzung-von <#>` mit der Nummer der Erstzeile des Agenten (eine angegebene Fortsetzungszeile lenkt es auf deren Erstzeile um), dann rechnet es `(kum.)` und `Δ tokens` selbst. Eine neue Datei legt es an, Kopfzeilen per `--kopf "Repo: …"`, und stempelt dabei den Skill-Stand. Nur für Läufe ohne Subagent-Transkript in dieser Session, etwa Evals per `claude -p`.
   - `python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py summarize <datei> --write`: am Ende des Laufs. Schreibt die Auswertung als markierten Block, beim ersten Mal unter eine neue Überschrift „Auswertung je Rolle“ am Dateiende, danach ersetzt es nur diesen Block. Ein älterer, unmarkierter Abschnitt gleichen Namens bleibt stehen und wird von Hand entfernt.
   - `python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py threads self <weitere local_…-IDs> --subagents --md`: Tokens der Hauptsession, gestarteter Threads und ihrer Subagenten aus den Transkripten, inklusive Cache-Reads und Input-Äquivalent je Modell (Cache-Write 5 min ×1,25, 1 h ×2). Fehlt eine ID, steht sie als Zeile „fehlt“ in der Tabelle, und das Skript endet mit Exit 1. Am Ende des Laufs in den Abschnitt „Threads“, **bevor** Threads archiviert oder gelöscht werden.
   - `python3 ~/.claude/skills/auto-feature/scripts/agent-stats.py summarize-all [--seit YYYY-MM-DD] [--nach-version]`: Auswertung über alle Dateien unter `~/.claude/agent-stats/` (Grundlage für Regeländerungen wie diese). Mit `--nach-version` steht je Skill-Stand eine eigene Tabelle da, so lässt sich eine Regeländerung vorher und nachher vergleichen.
@@ -223,9 +238,9 @@ Letzte Zeile: „Stopp. Bitte prüfen; danach `/pr-review-loop <PR>` je PR.“
 - **Skill-Stand:** Die Skills sind per Symlink an den Checkout von generalskills gebunden, also gilt, was dort ausgecheckt ist. `add` stempelt diesen Stand beim Anlegen der Datei als `- Skills: generalskills@<sha> (<commit-zeit>, <branch>)`, mit `-dirty` bei uncommitteten Änderungen an versionierten Dateien (unversionierte zählen nicht). Wechselt der Stand während eines Laufs, schreibt `add` `- Skills ab #<n>: …` dazu. Lässt er sich nicht ermitteln (kein git-Checkout, git fehlt oder hängt), ist er ganz unbekannt: kein Teilstand, und nach bekanntem Stand steht `- Skills ab #<n>: unbekannt`. Zwei Stände aus derselben Minute sortiert `--nach-version` nach SHA, also zufällig; ein alter, nur datierter Stempel steht vor jedem Stempel mit Uhrzeit desselben Tages. Der Timeout je git-Aufruf (Standard 10 s) steht in `AGENT_STATS_GIT_TIMEOUT`. Grenze: Eine Session folgt dem Skill-Text, den sie beim Aufruf geladen hat. Wird mitten im Lauf gemergt, zeigt die Ab-Zeile den Wechsel des Checkouts, nicht den des geladenen Texts.
 - **`<usage>` misst keinen Verbrauch:** `subagent_tokens` ist die Kontextgröße des letzten API-Aufrufs (Input, Cache-Write und Cache-Read) plus dessen Output, keine Summe über die Aufrufe. `Δ tokens` ist bei Fortsetzungen also Kontextwachstum und taugt nur für grobe Vergleiche zwischen Rollen. Kostenaussagen nur mit dem Input-Äquivalent je Modell aus `threads`.
 
-- **Quelle:** die `<usage>`-Angaben der Task-Notifications (`subagent_tokens`, `duration_ms`, `tool_uses`). Fehlt eine Angabe, steht dort „n/a“, nicht geschätzt.
+- **Quelle:** bei `import` das Subagent-Transkript: `tokens` wie `<usage>` (Kontext des letzten Aufrufs plus Output, bei Fortsetzungen also der Endkontext), `tool_uses` gezählt, `duration_ms` ohne Pausen über 10 min (Warten auf Hintergrundarbeit, auf die nächste Fix-Runde), Zeitpunkt = letzter Aufruf, `Δ tokens` = `tokens`. Bei `add` die `<usage>`-Angaben der Task-Notification. Fehlt eine Angabe, steht dort „n/a“, nicht geschätzt.
 - **Spalten:** # | Zeitpunkt | TF | Rolle | Agent-Typ | Modell | Effort | tokens | Δ tokens | duration_ms | tool_uses | B/W/K | angenommen | betriebsrelevant | Fix-Runden | Status
-- **Fortsetzungen per `SendMessage`** (Fix-Runden, Nachträge):
+- **Fortsetzungen per `add --fortsetzung-von`** (nur ältere Dateien und Handeinträge):
   - `tokens` = gemeldeter Wert, gekennzeichnet mit „(kum.)“: Der Endkontext einer Fortsetzung enthält den Kontext der Vorläufe desselben Agenten.
   - `Δ tokens` = gemeldeter Wert minus Vorwert, also minus dem zuletzt gemeldeten Wert desselben Agenten.
   - Ist der gemeldete Wert kleiner als der Vorwert, ist der Kontext geschrumpft, etwa durch eine Kompaktierung. Dann gilt `Δ tokens` = `tokens`, ohne „(kum.)“, und die Auswertung hält das fest.
@@ -242,7 +257,8 @@ Letzte Zeile: „Stopp. Bitte prüfen; danach `/pr-review-loop <PR>` je PR.“
 | „Runde 2 hat noch Wichtiges, eine dritte schadet nicht“ | Genau so entstehen Endlosschleifen. Offenes kommt in „Offene Review-Punkte“, dann weiter. |
 | „Vier Zeilen schreibe ich schneller selbst“ | Die Hauptsession orchestriert und prüft. Implementiert wird nur von Sonnet. |
 | „Zur Sicherheit nach jedem Task die ganze Suite“ | Die läuft einmal je TF in der Verifikation und dann in der CI. Je Task Typecheck und die abhängigen Tests. |
-| „Die Statistik schreibe ich am Ende zusammen“ | Nach einer Kompaktierung sind die `<usage>`-Werte weg. Nach jeder Notification fortschreiben, per `agent-stats.py add`. |
+| „Ich trage jeden Agenten gleich nach seiner Notification ein“ | Jeder Eintrag ist ein eigener Aufruf auf dem vollen Kontext der Hauptsession, im Lauf security-audit ein Viertel ihrer Kosten. Die Werte stehen im Transkript: einmal je TF `import` und `bewerte`. |
+| „Der Bericht des Implementierers darf ruhig ausführlich sein“ | Er bleibt bis zur Kompaktierung im Kontext und wird bei jedem weiteren Aufruf mitgelesen. Höchstens etwa 300 Wörter, Details stehen im Commit. |
 | „Die Tabelle tippe ich schneller von Hand“ | Handtabellen drifteten (eigene Spalten, fehlendes Δ, fehlende Uhrzeiten) und fielen aus der Auswertung über alle Läufe. |
 | „Tests grün, also PR“ | Grüne Tests finden keine Absturzfenster. Erst kommt die Härtung. |
 | „Die Tests decken den neuen Zweig ab, steht ja im Namen“ | Erst eine Mutation zeigt, ob ein Test rot wird. Ohne Probe bleibt die Lücke bis zum Review. |

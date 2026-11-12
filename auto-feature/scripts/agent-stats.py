@@ -7,6 +7,8 @@ Format und Spalten: Skill auto-feature, Abschnitt „Agent-Statistik“. Nur Sta
       --dauer 500731 --tool-uses 57 [--tf 171] [--bwk 0/1/3] [--angenommen 2] \
       [--betrieb "1: Stichwort"] [--fix-runden 1] [--status fertig] [--fortsetzung-von 3] \
       [--kopf "Repo: …" --kopf "PR: …"]
+  agent-stats.py import <datei> <local_…|cli-uuid|self> [--kopf "Repo: …"]
+  agent-stats.py bewerte <datei>  < JSON-Zeilen {"tf": "TF2", "rolle": "Spec-Review R1", "bwk": "0/1/3", …}
   agent-stats.py summarize <datei> [--write]
   agent-stats.py summarize-all [--root ~/.claude/agent-stats] [--seit 2026-10-22] [--nach-version]
   agent-stats.py stamp <datei> [--stand "generalskills@abc1234 (…)"] [--hinweis "…"] [--ersetzen]
@@ -516,6 +518,170 @@ def cmd_threads(a):
         sys.exit(f"Fehlend: {', '.join(fehlt)}")
 
 
+# ---------- import ----------
+
+IMPORTIERT = re.compile(r"^<!-- agent-stats:importiert(.*?)-->$")
+# Präfix der Agent-Beschreibung: „TF2 Spec-Review R1“, „FF Builder-Check“, „PR12 Review R1 Tests“, „audit Fix R1“.
+PRAEFIX = re.compile(r"^(TF\d+\w*|FF|audit|PR ?#?(\d+))\s+(.+)$")
+PAUSE_MS = 600_000  # Wartezeiten über 10 min (Hintergrundarbeit, Fortsetzung) zählen nicht zur Dauer
+
+
+def zeitstempel(text):
+    try:
+        return dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return None
+
+
+def subagent_werte(pfad):
+    """Kennzahlen eines Subagenten aus seinem Transkript, wie sie <usage> meldet: tokens = Kontext des
+    letzten API-Aufrufs plus dessen Output; dazu Werkzeugaufrufe, aktive Dauer und Fortsetzungen."""
+    je_msg, werkzeuge, zeiten, forts = {}, set(), [], 0
+    for zeile in open(pfad, encoding="utf-8"):
+        try:
+            e = json.loads(zeile)
+        except ValueError:
+            continue
+        if not isinstance(e, dict):
+            continue
+        t = zeitstempel(e.get("timestamp"))
+        if t:
+            zeiten.append(t)
+        if e.get("type") == "user" and isinstance(e.get("origin"), dict) \
+                and e["origin"].get("kind") == "coordinator":
+            forts += 1  # Nachricht der Hauptsession per SendMessage
+        m = e.get("message")
+        if e.get("type") != "assistant" or not isinstance(m, dict) or m.get("model") == "<synthetic>":
+            continue
+        if isinstance(m.get("usage"), dict):
+            je_msg[m.get("id") or e.get("uuid")] = m["usage"]
+        for b in m.get("content") or []:
+            if isinstance(b, dict) and b.get("type") == "tool_use":
+                werkzeuge.add(b.get("id"))
+    if not je_msg:
+        return None
+    u = list(je_msg.values())[-1]
+    tokens = sum(u.get(k) or 0 for k in ("input_tokens", "cache_creation_input_tokens",
+                                         "cache_read_input_tokens", "output_tokens"))
+    zeiten.sort()
+    dauer = sum(min((b - a).total_seconds() * 1000, PAUSE_MS) for a, b in zip(zeiten, zeiten[1:]))
+    ende = zeiten[-1].astimezone().strftime("%Y-%m-%d %H:%M") if zeiten else "n/a"
+    return {"tokens": tokens, "tool_uses": len(werkzeuge), "dauer": int(dauer), "ende": ende,
+            "forts": forts}
+
+
+def cmd_import(a):
+    sid, titel = cli_id(a.session)
+    dateien = glob.glob(os.path.join(PROJECTS, "*", f"{sid}.jsonl")) if sid else []
+    if not dateien:
+        sys.exit(titel if not sid else f"Transkript {sid}.jsonl nicht gefunden")
+    ordner = os.path.join(os.path.splitext(max(dateien, key=os.path.getsize))[0], "subagents")
+
+    pfad = os.path.expanduser(a.datei)
+    zeilen = open(pfad, encoding="utf-8").read().splitlines() if os.path.exists(pfad) else []
+    marke = next((i for i, z in enumerate(zeilen) if IMPORTIERT.match(z.strip())), None)
+    bekannt = set(IMPORTIERT.match(zeilen[marke].strip()).group(1).split()) if marke is not None else set()
+
+    neu, offen = [], 0
+    for p in sorted(glob.glob(os.path.join(ordner, "agent-*.jsonl")), key=os.path.getmtime):
+        aid = os.path.basename(p)[len("agent-"):-len(".jsonl")]
+        if aid in bekannt:
+            continue
+        meta_pfad = os.path.splitext(p)[0] + ".meta.json"
+        meta = json.load(open(meta_pfad, encoding="utf-8")) if os.path.exists(meta_pfad) else {}
+        if not meta.get("finished"):
+            offen += 1  # läuft noch oder abgebrochen: beim nächsten Import
+            continue
+        w = subagent_werte(p)
+        if w is None:
+            continue
+        beschr = (meta.get("description") or aid).strip()
+        m = PRAEFIX.match(beschr)
+        tf, rolle = ((m.group(2) or m.group(1)), m.group(3)) if m else ("–", beschr)
+        typ = meta.get("agentType") or "?"
+        modell, effort = TYPEN.get(typ, (meta.get("model") or "?", "n/a"))
+        neu.append((aid, [w["ende"], tf, rolle, typ, modell, effort, w["tokens"], w["tokens"], w["dauer"],
+                          w["tool_uses"], "–", "–", "–", w["forts"] or "–", "fertig"]))
+    if offen:
+        print(f"{offen} Subagenten noch nicht fertig, nicht importiert.", file=sys.stderr)
+    if not neu:
+        print("Nichts Neues zu importieren.")
+        return
+
+    daten = [zellen(z) for z in zeilen if ist_datenzeile(z)]
+    nr = max([int(z[0]) for z in daten], default=0)
+    stand = skills_stand()
+    tabelle = [zeile_md([nr + i + 1, *werte]) for i, (_, werte) in enumerate(neu)]
+    ende = agenten_ende(zeilen)
+    if ende is not None:
+        zeilen[ende:ende] = tabelle
+    else:
+        if not zeilen:
+            zeilen = [f"# Agent-Statistik · {os.path.splitext(os.path.basename(pfad))[0]}", ""]
+            kopf = [f"- {k}" for k in a.kopf] + ([f"- Skills: {stand}"] if stand else [])
+            zeilen += kopf + ([""] if kopf else [])
+        else:
+            zeilen.append("")
+        zeilen += ["## Agenten", "", zeile_md(SPALTEN), zeile_md(["---"] * len(SPALTEN)), *tabelle]
+    bisher = staende(zeilen)
+    jetzt = stand or "unbekannt"
+    if (bisher and stand_kern(bisher[-1][1]) != stand_kern(jetzt)) or (not bisher and stand):
+        stand_einfuegen(zeilen, f"- Skills ab #{nr + 1}: {jetzt}")
+    ids = " ".join(sorted(bekannt | {aid for aid, _ in neu}))
+    marke = next((i for i, z in enumerate(zeilen) if IMPORTIERT.match(z.strip())), None)
+    if marke is None:
+        zeilen += ["", f"<!-- agent-stats:importiert {ids} -->"]
+    else:
+        zeilen[marke] = f"<!-- agent-stats:importiert {ids} -->"
+    schreibe(pfad, zeilen)
+    for (_, w), z in zip(neu, range(nr + 1, nr + 1 + len(neu))):
+        print(f"#{z} {w[1]} {w[2]} · {w[3]} · {w[6]} tokens")
+
+
+# ---------- bewerte ----------
+
+BEWERTBAR = {"bwk": 11, "angenommen": 12, "betrieb": 13, "fix_runden": 14, "status": 15}
+
+
+def cmd_bewerte(a):
+    """Urteilsspalten mehrerer Zeilen in einem Aufruf; erst alles prüfen, dann schreiben."""
+    pfad = os.path.expanduser(a.datei)
+    zeilen = open(pfad, encoding="utf-8").read().splitlines()
+    eintraege = []
+    for n, roh in enumerate(sys.stdin, 1):
+        if not roh.strip():
+            continue
+        try:
+            e = json.loads(roh)
+        except ValueError as ex:
+            sys.exit(f"Eingabezeile {n}: kein JSON ({ex}).")
+        if not isinstance(e, dict):
+            sys.exit(f"Eingabezeile {n}: JSON-Objekt erwartet.")
+        unbekannt = set(e) - set(BEWERTBAR) - {"nr", "tf", "rolle"}
+        if unbekannt:
+            sys.exit(f"Eingabezeile {n}: unbekannte Felder {sorted(unbekannt)}.")
+        if "nr" in e:
+            treffer = [i for i, z in enumerate(zeilen) if ist_datenzeile(z) and zellen(z)[0] == str(e["nr"])]
+        elif "rolle" in e:
+            treffer = [i for i, z in enumerate(zeilen) if ist_datenzeile(z) and zellen(z)[3] == e["rolle"]
+                       and ("tf" not in e or zellen(z)[2] == str(e["tf"]))]
+        else:
+            sys.exit(f"Eingabezeile {n}: „nr“ oder „rolle“ (mit „tf“) angeben.")
+        if len(treffer) != 1:
+            sys.exit(f"Eingabezeile {n}: {len(treffer)} passende Zeilen statt genau einer.")
+        eintraege.append((treffer[0], e))
+    if not eintraege:
+        sys.exit("Keine Eingabe auf stdin.")
+    for i, e in eintraege:
+        c = zellen(zeilen[i])[:len(SPALTEN)]
+        for feld, spalte in BEWERTBAR.items():
+            if feld in e:
+                c[spalte] = str(e[feld])
+        zeilen[i] = zeile_md(c)
+    schreibe(pfad, zeilen)
+    print(f"{len(eintraege)} Zeilen bewertet.")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -563,6 +729,16 @@ def main():
     s.add_argument("--subagents", action="store_true", help="Subagenten je Thread einzeln aufführen")
     s.add_argument("--md", action="store_true", help="als Markdown-Tabelle")
     s.set_defaults(fn=cmd_threads)
+
+    s = sub.add_parser("import", help="fertige Subagenten einer Session aus den Transkripten eintragen")
+    s.add_argument("datei")
+    s.add_argument("session", help="local_…-ID der Desktop-App, CLI-Session-UUID oder self")
+    s.add_argument("--kopf", action="append", default=[], help="Kopfzeile bei neuer Datei (mehrfach)")
+    s.set_defaults(fn=cmd_import)
+
+    s = sub.add_parser("bewerte", help="B/W/K, angenommen, betriebsrelevant u. a. aus JSON-Zeilen (stdin)")
+    s.add_argument("datei")
+    s.set_defaults(fn=cmd_bewerte)
 
     a = p.parse_args()
     a.fn(a)

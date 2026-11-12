@@ -425,5 +425,111 @@ class Threads(unittest.TestCase):
         self.assertIn("fehlt-uuid", r.stdout)
 
 
+class Import(Basis):
+    """import liest fertige Subagenten aus den Transkripten, bewerte trägt Urteile gebündelt nach."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = os.path.join(self.d, "home")
+        self.sub = os.path.join(self.home, ".claude", "projects", "p", "s1", "subagents")
+        os.makedirs(self.sub)
+        open(os.path.join(self.home, ".claude", "projects", "p", "s1.jsonl"), "w").close()
+
+    def agent(self, aid, beschr, typ="sonnet-xhigh", fertig=True, aufrufe=None, coordinator=0):
+        with open(os.path.join(self.sub, f"agent-{aid}.meta.json"), "w", encoding="utf-8") as f:
+            json.dump({"agentType": typ, "description": beschr, "model": "sonnet", "finished": fertig}, f)
+        aufrufe = aufrufe or [("2026-11-10T10:00:00Z", {"input_tokens": 2, "cache_read_input_tokens": 1000,
+                                                          "cache_creation_input_tokens": 98, "output_tokens": 50}, 2)]
+        with open(os.path.join(self.sub, f"agent-{aid}.jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"type": "user", "timestamp": aufrufe[0][0], "message": {"content": "Auftrag"}}) + "\n")
+            for i, (ts, u, werkzeuge) in enumerate(aufrufe):
+                inhalt = [{"type": "tool_use", "id": f"{aid}-{i}-{k}"} for k in range(werkzeuge)]
+                # gestreamt: dieselbe Message-ID steht zweimal im Transkript
+                for _ in range(2):
+                    f.write(json.dumps({"type": "assistant", "timestamp": ts, "message": {
+                        "id": f"{aid}-m{i}", "model": "claude-sonnet-5-5", "usage": u, "content": inhalt}}) + "\n")
+            for k in range(coordinator):
+                f.write(json.dumps({"type": "user", "timestamp": aufrufe[-1][0], "isMeta": True,
+                                    "origin": {"kind": "coordinator"}, "message": {"content": "Fix"}}) + "\n")
+
+    def importiere(self):
+        r = lauf("import", self.datei, "s1", "--kopf", "Repo: x", home=self.home, stand="gs@abc (2026-11-12 10:00, main)")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r
+
+    def test_zeile_aus_transkript(self):
+        self.agent("a1", "TF2 Spec-Review R1", typ="opus-xhigh", coordinator=1, aufrufe=[
+            ("2026-11-10T10:00:00Z", {"input_tokens": 1, "cache_read_input_tokens": 500, "output_tokens": 9}, 1),
+            ("2026-11-10T10:05:00Z", {"input_tokens": 2, "cache_read_input_tokens": 1000,
+                                      "cache_creation_input_tokens": 98, "output_tokens": 50}, 2)])
+        self.importiere()
+        z = self.zeilen()[1]
+        self.assertEqual(z[2:7], ["TF2", "Spec-Review R1", "opus-xhigh", "opus", "xhigh"])
+        self.assertEqual(z[7:11], ["1150", "1150", "300000", "3"])  # letzter Aufruf, Dauer, 3 Werkzeuge
+        self.assertEqual(z[14], "1")  # eine Fortsetzung per SendMessage
+        self.assertIn("- Repo: x", open(self.datei, encoding="utf-8").read())
+
+    def test_praefix_pr_und_ohne(self):
+        self.agent("a1", "PR12 Review R1 Tests")
+        self.agent("a2", "freie Beschreibung")
+        self.importiere()
+        z = self.zeilen()
+        self.assertEqual({(z[i][2], z[i][3]) for i in z}, {("12", "Review R1 Tests"), ("–", "freie Beschreibung")})
+
+    def test_pausen_zaehlen_nicht_zur_dauer(self):
+        u = {"input_tokens": 1, "output_tokens": 1}
+        self.agent("a1", "TF1 Impl T1", aufrufe=[("2026-11-10T10:00:00Z", u, 0), ("2026-11-10T13:00:00Z", u, 0)])
+        self.importiere()
+        self.assertEqual(self.zeilen()[1][9], "600000")
+
+    def test_idempotent_und_unfertige_spaeter(self):
+        self.agent("a1", "TF1 Impl T1")
+        self.agent("a2", "TF1 Task-Review T1", fertig=False)
+        r = self.importiere()
+        self.assertIn("1 Subagenten noch nicht fertig", r.stderr)
+        self.assertEqual(len(self.zeilen()), 1)
+        self.agent("a2", "TF1 Task-Review T1")
+        self.importiere()
+        r = self.importiere()
+        self.assertIn("Nichts Neues", r.stdout)
+        self.assertEqual([z[3] for z in self.zeilen().values()], ["Impl T1", "Task-Review T1"])
+
+    def test_haengt_an_add_zeilen_an(self):
+        self.add("Eval fixture-web", 1000)
+        self.agent("a1", "TF1 Impl T1")
+        self.importiere()
+        self.assertEqual(sorted(self.zeilen()), [1, 2])
+
+    def test_bewerte_gebuendelt(self):
+        self.agent("a1", "TF2 Spec-Review R1", typ="opus-xhigh")
+        self.agent("a2", "TF3 Spec-Review R1", typ="opus-xhigh")
+        self.importiere()
+        eingabe = "\n".join([json.dumps({"tf": "TF2", "rolle": "Spec-Review R1", "bwk": "1/2/3",
+                                         "angenommen": 3, "betrieb": "1: Leck | Pfad"}),
+                             json.dumps({"nr": 2, "bwk": "0/0/1"})])
+        r = subprocess.run([sys.executable, "-I", SKRIPT, "bewerte", self.datei], input=eingabe,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        z = self.zeilen()
+        self.assertEqual(z[1][11:13], ["1/2/3", "3"])
+        self.assertIn("| 1: Leck \\| Pfad |", open(self.datei, encoding="utf-8").read())  # Strich maskiert
+        self.assertEqual(z[2][11], "0/0/1")
+        r = lauf("summarize", self.datei)
+        self.assertIn("| Spec-Review | opus-xhigh | 2 |", r.stdout)
+        self.assertIn("1/2/4", r.stdout)
+
+    def test_bewerte_mehrdeutig_schreibt_nichts(self):
+        self.agent("a1", "TF2 Spec-Review R1")
+        self.agent("a2", "TF3 Spec-Review R1")
+        self.importiere()
+        vorher = open(self.datei, encoding="utf-8").read()
+        eingabe = json.dumps({"nr": 1, "bwk": "0/0/1"}) + "\n" + json.dumps({"rolle": "Spec-Review R1", "bwk": "1/1/1"})
+        r = subprocess.run([sys.executable, "-I", SKRIPT, "bewerte", self.datei], input=eingabe,
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("2 passende Zeilen", r.stderr)
+        self.assertEqual(open(self.datei, encoding="utf-8").read(), vorher)
+
+
 if __name__ == "__main__":
     unittest.main()
