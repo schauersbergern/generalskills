@@ -295,17 +295,18 @@ Themen in postfaehige Fassungen ausgelegt.
 
 ## Coding-Workflow-Skills (Claude Code)
 
-`pr-review-loop`, `fix-findings`, `auto-feature`, `feature-file` und `security-audit` sind globale Claude-Code-Skills.
+`pr-review-loop`, `fix-findings`, `auto-feature` und `feature-file` sind globale Claude-Code-Skills.
 Sie werden per Symlink eingebunden:
 
 ```bash
-for s in pr-review-loop fix-findings auto-feature feature-file security-audit; do ln -sfn ~/Projects/skillz/nikskills/$s ~/.claude/skills/$s; done
+for s in pr-review-loop fix-findings auto-feature feature-file; do ln -sfn ~/Projects/skillz/nikskills/$s ~/.claude/skills/$s; done
 for a in opus-xhigh sonnet-xhigh sonnet-high; do ln -sfn ~/Projects/skillz/nikskills/agents/$a.md ~/.claude/agents/$a.md; done
 ```
 
 `pr-review-loop`, `auto-feature` und `feature-file` setzen `effort: xhigh` im Frontmatter, `auto-feature` und `feature-file` zusaetzlich `model: opus`; `fix-findings` setzt `effort: high`.
 Die Subagenten bekommen Effort ueber die Agent-Typen `opus-xhigh`/`sonnet-xhigh`/`sonnet-high`; fehlen sie,
 weichen die Skills auf `general-purpose` mit explizitem `model` aus und melden „Effort nicht garantiert“.
+`security-audit` wird **nicht global verlinkt**. Er läuft nur auf ausdrücklichen Bedarf und nie im agentischen Workflow (`auto-feature`, `pr-review-loop`, `fix-findings`). Für ein Audit verlinkst du ihn vorübergehend mit `ln -sfn ~/Projects/skillz/nikskills/security-audit ~/.claude/skills/security-audit` Erst wenn auch die Befundliste per `/fix-findings` abgearbeitet ist, entfernst du ihn wieder mit `unlink ~/.claude/skills/security-audit`, denn `fix-findings` liest auf dem Audit-Weg `scripts/bericht.py` über diesen Link.
 `security-audit` nutzt `opus-xhigh` fuer Reviewer und Pruefer, sonst `general-purpose` mit `model: opus` und „Effort nicht garantiert“.
 
 `security-audit` (nur pruefen, aendert das Repo nie): Kundenrepos frisch klonen. Enthaelt das Repo eigene
