@@ -616,6 +616,79 @@ class Import(Basis):
         self.importiere()
         self.assertEqual(sorted(self.zeilen()), [1, 2])
 
+    def test_fertig_ohne_stop_reason_bei_reiner_textantwort(self):  # R1-4 (Runde 2)
+        u = {"input_tokens": 1, "output_tokens": 1}
+        self.agent("a1", "TF1 Impl T1", fertig=False, still=True, stop=None,
+                   aufrufe=[("2026-11-10T10:00:00Z", u, 2), ("2026-11-10T10:01:00Z", u, 0)])  # letzte Antwort nur Text
+        self.agent("a2", "TF1 Impl T2", fertig=False, still=True, stop=None,
+                   aufrufe=[("2026-11-10T10:00:00Z", u, 2)])  # endet mit tool_use: abgebrochen
+        self.importiere()
+        z = self.zeilen()
+        self.assertEqual([(z[i][3], z[i][15]) for i in sorted(z)], [("Impl T1", "fertig"), ("Impl T2", "abgebrochen")])
+
+    def test_rueckwaerts_laufende_zeitstempel_zaehlen_einmal(self):  # R2-1
+        u = {"input_tokens": 1, "output_tokens": 1}
+        self.agent("a1", "TF1 Impl T1", aufrufe=[("2026-11-10T10:00:00Z", u, 0), ("2026-11-10T10:00:10Z", u, 0),
+                                                 ("2026-11-10T10:00:20Z", u, 0)])
+        pfad = os.path.join(self.sub, "agent-a1.jsonl")
+        zeilen = open(pfad, encoding="utf-8").read().splitlines()
+        zeilen.insert(5, json.dumps({"type": "attachment", "timestamp": "2026-11-10T10:00:07Z"}))  # vor dem Eintrag davor
+        open(pfad, "w", encoding="utf-8").write("\n".join(zeilen) + "\n")
+        self.importiere()
+        self.assertEqual(self.zeilen()[1][9], "20000")
+
+    def test_tf_filter_praefix_variationen_und_hinweis(self):  # R2-2
+        self.agent("a1", "TF2: Spec-Review R1")
+        self.agent("a2", "tf2 Plan-Review R1")
+        self.agent("a3", "Freitext ohne Präfix")
+        r = self.importiere("--tf", "TF2")
+        z = self.zeilen()
+        self.assertEqual(sorted((z[i][2], z[i][3]) for i in z), [("TF2", "Plan-Review R1"), ("TF2", "Spec-Review R1")])
+        self.assertIn("1 Agenten ohne erkanntes Präfix", r.stderr)
+        self.assertIn("Freitext ohne Präfix", r.stderr)
+
+    def test_import_ueberschreibt_keine_fix_runden_von_hand(self):  # R2-3
+        self.agent("a1", "TF2 Impl T1")
+        self.importiere()
+        r = subprocess.run([sys.executable, "-I", SKRIPT, "bewerte", self.datei],
+                           input=json.dumps({"nr": 1, "fix_runden": "2"}), capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)  # Spalte führt der Import, nicht bewerte
+        self.assertIn("unbekannte Felder", r.stderr)
+        self.agent("a1", "TF2 Impl T1", nach=[("2026-11-10T10:30:00Z", "2026-11-10T10:31:00Z", {"input_tokens": 5, "output_tokens": 5}, 0)])
+        self.importiere()
+        self.assertEqual(self.zeilen()[1][14], "1")
+
+    def test_update_ueberschreibt_fremde_zeile_nicht(self):  # R2-4
+        self.agent("a1", "TF1 Impl T1")
+        self.agent("a2", "TF1 Impl T2")
+        self.importiere()
+        text = open(self.datei, encoding="utf-8").read()
+        zeilen = text.splitlines()
+        i = next(k for k, z in enumerate(zeilen) if z.startswith("| 2 |"))
+        del zeilen[i]  # letzte Zeile von Hand gelöscht, Marker bleibt
+        open(self.datei, "w", encoding="utf-8").write("\n".join(zeilen) + "\n")
+        self.agent("a3", "TF1 Impl T3")
+        self.importiere()
+        self.assertEqual(sorted(self.zeilen()), [1, 3])  # #2 wird nicht neu vergeben (a3 → #3)
+        z = open(self.datei, encoding="utf-8").read().replace("| Impl T1 |", "| Fremde Rolle |")
+        open(self.datei, "w", encoding="utf-8").write(z)
+        self.agent("a1", "TF1 Impl T1", nach=[("2026-11-10T10:30:00Z", "2026-11-10T10:31:00Z", {"input_tokens": 5, "output_tokens": 5}, 0)])
+        self.importiere()
+        z = self.zeilen()
+        self.assertEqual(z[1][3], "Fremde Rolle")  # nicht überschrieben
+        self.assertEqual(z[1][14], "–")
+        self.assertEqual(sorted(z), [1, 3, 4])
+        self.assertEqual(z[4][3], "Impl T1")  # stattdessen neue Zeile
+
+    def test_alter_marker_mit_nackter_id_bleibt_uebersprungen(self):  # Hinweis Runde 2
+        self.agent("a1", "TF1 Impl T1")
+        self.importiere()
+        text = open(self.datei, encoding="utf-8").read()
+        text = re.sub(r"<!-- agent-stats:importiert .*? -->", "<!-- agent-stats:importiert a1 -->", text)
+        open(self.datei, "w", encoding="utf-8").write(text)
+        self.agent("a1", "TF1 Impl T1", nach=[("2026-11-10T10:30:00Z", "2026-11-10T10:31:00Z", {"input_tokens": 5, "output_tokens": 5}, 0)])
+        self.assertIn("Nichts Neues", self.importiere().stdout)
+
     def test_bewerte_gebuendelt(self):
         self.agent("a1", "TF2 Spec-Review R1", typ="opus-xhigh")
         self.agent("a2", "TF3 Spec-Review R1", typ="opus-xhigh")

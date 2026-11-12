@@ -531,7 +531,7 @@ def cmd_threads(a):
 
 IMPORTIERT = re.compile(r"^<!-- agent-stats:importiert(.*?)-->$")
 # Präfix der Agent-Beschreibung: „TF2 Spec-Review R1“, „FF Builder-Check“, „PR12 Review R1 Tests“, „audit Fix R1“.
-PRAEFIX = re.compile(r"^(TF\d+\w*|FF|audit|PR ?#?(\d+))\s+(.+)$")
+PRAEFIX = re.compile(r"^(TF\d+\w*|FF|audit|PR ?#?(\d+))[\s:]+(.+)$", re.I)
 # Wartezeiten über 10 min innerhalb eines Laufs (Hintergrundarbeit) und die Zeit zwischen Abschluss und
 # Fortsetzung zählen nicht zur Dauer: nur die Arbeitssegmente, wie sie auch <usage> je Aufruf meldet.
 PAUSE_MS = 600_000
@@ -573,16 +573,22 @@ def subagent_werte(pfad):
         if e.get("type") != "assistant" or not isinstance(m, dict) or m.get("model") == "<synthetic>":
             continue
         if isinstance(m.get("usage"), dict):
-            je_msg[m.get("id") or e.get("uuid")] = (m["usage"], m.get("stop_reason"))
+            # Die Blöcke einer gestreamten Antwort stehen als eigene Einträge mit derselben Message-ID:
+            # Usage und stop_reason vom letzten, „Werkzeugaufruf dabei“ über alle.
+            mid = m.get("id") or e.get("uuid")
+            je_msg[mid] = (m["usage"], m.get("stop_reason"), je_msg.get(mid, (0, 0, False))[2])
         for b in m.get("content") or []:
             if isinstance(b, dict) and b.get("type") == "tool_use":
                 werkzeuge.add(b.get("id"))
+                if isinstance(m.get("usage"), dict):
+                    je_msg[mid] = (*je_msg[mid][:2], True)
     if not je_msg:
         return None
-    u, stop = list(je_msg.values())[-1]
+    u, stop, mit_werkzeug = list(je_msg.values())[-1]
     tokens = sum(u.get(k) or 0 for k in ("input_tokens", "cache_creation_input_tokens",
                                          "cache_read_input_tokens", "output_tokens"))
     dauer = 0.0
+    zeiten.sort(key=lambda x: x[0])  # attachment-Einträge tragen teils frühere Zeiten als der vorige Eintrag
     for (a, _), (b, koord) in zip(zeiten, zeiten[1:]):
         luecke = (b - a).total_seconds() * 1000
         # Lücke vor einer Nachricht der Hauptsession (Warten auf die Fortsetzung) und Pausen über der
@@ -591,7 +597,7 @@ def subagent_werte(pfad):
             dauer += luecke
     ende = zeiten[-1][0].astimezone().strftime("%Y-%m-%d %H:%M") if zeiten else "n/a"
     return {"tokens": tokens, "tool_uses": len(werkzeuge), "dauer": int(dauer), "ende": ende,
-            "forts": forts, "stop": stop}
+            "forts": forts, "beendet": stop == "end_turn" or not mit_werkzeug}
 
 
 def lies_marke(zeilen):
@@ -619,7 +625,7 @@ def cmd_import(a):
     _, bekannt = lies_marke(zeilen)
     nur_tf = {tf_norm(t) for t in a.tf}
 
-    neu, geaendert, offen, geschachtelt = [], [], 0, 0
+    neu, geaendert, offen, geschachtelt, ohne_praefix = [], [], 0, 0, []
     for p in sorted(glob.glob(os.path.join(ordner, "agent-*.jsonl")), key=os.path.getmtime):
         aid = os.path.basename(p)[len("agent-"):-len(".jsonl")]
         groesse = os.path.getsize(p)
@@ -634,7 +640,11 @@ def cmd_import(a):
         beschr = einzeilig((meta.get("description") or aid).strip())
         m = PRAEFIX.match(beschr)
         tf, rolle = ((m.group(2) or m.group(1)), m.group(3)) if m else ("–", beschr)
+        if m and not tf.isdigit():
+            tf = "audit" if tf.lower() == "audit" else tf.upper()
         if nur_tf and tf_norm(tf) not in nur_tf:
+            if not m:
+                ohne_praefix.append(beschr)
             continue
         w = subagent_werte(p)
         if w is None:
@@ -645,19 +655,24 @@ def cmd_import(a):
             offen += 1  # Transkript wächst noch: läuft, beim nächsten Import
             continue
         else:  # nie `finished` gesetzt und still: regulär beendet (end_turn) oder abgebrochen (TaskStop, Absturz)
-            status = "fertig" if w["stop"] == "end_turn" else "abgebrochen"
+            status = "fertig" if w["beendet"] else "abgebrochen"
         typ = meta.get("agentType") or "?"
         modell, effort = TYPEN.get(typ, (meta.get("model") or "?", "n/a"))
         werte = [w["ende"], tf, rolle, typ, modell, effort, w["tokens"], w["tokens"], w["dauer"],
                  w["tool_uses"], "–", "–", "–", w["forts"] or "–", status]
+        # Die Zeile gehört dem Agenten nur, wenn TF und Rolle noch passen (von Hand gelöscht oder ersetzt: neue Zeile).
         zeile = next((i for i, z in enumerate(zeilen)
-                      if alt and ist_datenzeile(z) and zellen(z)[0] == str(alt[0])), None)
+                      if alt and ist_datenzeile(z) and zellen(z)[0] == str(alt[0])
+                      and zellen(z)[2:4] == [str(tf), rolle]), None)
         if zeile is not None:
             geaendert.append((aid, groesse, zeile, werte))
         else:
             neu.append((aid, groesse, werte))
     if offen:
         print(f"{offen} Subagenten noch nicht fertig, nicht importiert.", file=sys.stderr)
+    if ohne_praefix:  # mit --tf nie stumm verwerfen, was sich keinem TF zuordnen lässt
+        print(f"{len(ohne_praefix)} Agenten ohne erkanntes Präfix (TF<n>, PR<n>, FF, audit) übersprungen: "
+              + "; ".join(ohne_praefix[:5]) + (" …" if len(ohne_praefix) > 5 else ""), file=sys.stderr)
     if geschachtelt:
         print(f"{geschachtelt} verschachtelte Subagenten übersprungen (laufen unter einem Subagenten).",
               file=sys.stderr)
@@ -678,7 +693,8 @@ def cmd_import(a):
         print(f"#{c[0]} aktualisiert: {c[2]} {c[3]} · {c[4]} · {c[7]} tokens")
 
     daten = [zellen(z) for z in zeilen if ist_datenzeile(z)]
-    nr = max([int(z[0]) for z in daten], default=0)
+    # Auch Nummern aus dem Marker zählen: eine von Hand gelöschte letzte Zeile wird nicht neu vergeben.
+    nr = max([int(z[0]) for z in daten] + [v[0] for v in ids.values() if v], default=0)
     if neu:
         stand = skills_stand()
         tabelle = [zeile_md([nr + i + 1, *werte]) for i, (_, _, werte) in enumerate(neu)]
@@ -711,7 +727,8 @@ def cmd_import(a):
 
 # ---------- bewerte ----------
 
-BEWERTBAR = {"bwk": 11, "angenommen": 12, "betrieb": 13, "fix_runden": 14, "status": 15}
+# „Fix-Runden“ fehlt hier: Die Spalte führt `import` aus den Fortsetzungen im Transkript (bei Handeinträgen `add --fix-runden`).
+BEWERTBAR = {"bwk": 11, "angenommen": 12, "betrieb": 13, "status": 15}
 
 
 def cmd_bewerte(a):
