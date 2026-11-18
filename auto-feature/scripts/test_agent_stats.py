@@ -161,6 +161,35 @@ class Auswertung(Basis):
         for nr in ("#2", "#3", "#4"):
             self.assertNotIn(nr, warnung)
 
+    def test_warnt_vor_jeder_pruefrolle(self):  # R1-9
+        rollen = ["Spec-Review R1", "Plan-Review R1", "Task-Review T1", "Task-Review-M T2", "Re-Review T1 R1",
+                  "Review R1 Korrektheit", "Delta-Review R2", "Härtung", "Builder-Check"]
+        for rolle in rollen:
+            self.add(rolle, 1000)
+        self.add("Impl T1", 1000)
+        r = lauf("summarize", self.datei)
+        warnung = next(z for z in r.stderr.splitlines() if "ohne bewerte" in z)
+        self.assertIn(f"{len(rollen)} Prüfläufe", warnung)
+        self.assertNotIn(f"#{len(rollen) + 1}", warnung)
+
+    def test_messphasen_review_bildet_eigene_gruppe(self):  # R1-1
+        self.add("Task-Review T1", 1000, "--bwk", "0/1/0")
+        self.add("Task-Review-M T2", 1000, "--bwk", "0/0/1")
+        r = lauf("summarize", self.datei)
+        zeilen = [z for z in r.stdout.splitlines() if z.startswith("| Task-Review")]
+        self.assertEqual(len(zeilen), 2)
+        self.assertTrue(any(z.startswith("| Task-Review-M |") for z in zeilen))
+        self.assertTrue(any(z.startswith("| Task-Review |") for z in zeilen))
+
+    def test_abgebrochene_pruefzeile_wird_nicht_gewarnt(self):  # R1-6
+        self.add("Task-Review T1", 1000, "--status", "abgebrochen")  # #1
+        self.add("Task-Review T2", 1000)                              # #2 unbewertet
+        r = lauf("summarize", self.datei)
+        warnung = next(z for z in r.stderr.splitlines() if "ohne bewerte" in z)
+        self.assertIn("#2", warnung)
+        self.assertNotIn("#1", warnung)
+        self.assertIn("1 Prüfläufe", warnung)
+
     def test_warnt_ohne_threads_abschnitt(self):
         self.add("Impl T1", 1000)
         r = lauf("summarize", self.datei)
@@ -169,6 +198,20 @@ class Auswertung(Basis):
             f.write("\n## Threads\n\n| Thread | x |\n")
         r = lauf("summarize", self.datei)
         self.assertNotIn("## Threads", r.stderr)
+
+    def test_threads_abschnitt_mit_zusatz_in_der_ueberschrift(self):  # R1-5
+        self.add("Impl T1", 1000)
+        with open(self.datei, "a", encoding="utf-8") as f:
+            f.write("\n## Threads (Stand 11.11.2026, vor PR TF2)\n\n| Thread | x |\n")
+        r = lauf("summarize", self.datei)
+        self.assertNotIn("## Threads", r.stderr)
+
+    def test_andere_ueberschrift_gilt_nicht_als_threads(self):  # R1-5
+        self.add("Impl T1", 1000)
+        with open(self.datei, "a", encoding="utf-8") as f:
+            f.write("\n## Threadsammlung\n\n## Notizen zu Threads\n")
+        r = lauf("summarize", self.datei)
+        self.assertIn("## Threads", r.stderr)
 
     def test_uebersprungene_zeilen_werden_genannt(self):  # R1-16e
         self.add("A", 1000)
