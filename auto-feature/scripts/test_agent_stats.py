@@ -147,6 +147,29 @@ class Auswertung(Basis):
         self.assertIn("1,00 (1 von 2)", zeile)
         self.assertNotIn("0,50", zeile)
 
+    def test_warnt_vor_unbewerteten_prueflaeufen(self):
+        self.add("Task-Review T1", 1000)                      # #1 Prüfrolle, unbewertet
+        self.add("Impl T1", 1000)                             # #2 keine Prüfrolle
+        self.add("Härtung", 1000, "--betrieb", "1: x")        # #3 bewertet
+        self.add("Review R1 Korrektheit", 1000, "--bwk", "0/0/1")  # #4 bewertet
+        self.add("Delta-Review R2", 1000)                     # #5 Prüfrolle, unbewertet
+        r = lauf("summarize", self.datei)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        warnung = next(z for z in r.stderr.splitlines() if "ohne bewerte" in z)
+        self.assertIn("#1", warnung)
+        self.assertIn("#5", warnung)
+        for nr in ("#2", "#3", "#4"):
+            self.assertNotIn(nr, warnung)
+
+    def test_warnt_ohne_threads_abschnitt(self):
+        self.add("Impl T1", 1000)
+        r = lauf("summarize", self.datei)
+        self.assertIn("## Threads", r.stderr)
+        with open(self.datei, "a", encoding="utf-8") as f:
+            f.write("\n## Threads\n\n| Thread | x |\n")
+        r = lauf("summarize", self.datei)
+        self.assertNotIn("## Threads", r.stderr)
+
     def test_uebersprungene_zeilen_werden_genannt(self):  # R1-16e
         self.add("A", 1000)
         self.add("B", "n/a")
