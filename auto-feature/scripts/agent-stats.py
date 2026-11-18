@@ -279,6 +279,10 @@ def gruppe(rolle):
     return r.split()[0] if r else "?"
 
 
+PRUEFROLLEN = ("Spec-Review", "Plan-Review", "Task-Review", "Re-Review", "Review", "Delta-Review",
+               "Härtung", "Builder-Check")
+
+
 def lies_zeilen(pfad, uebersprungen=None):
     """Datenzeilen mit Δ als Zahl; die übrigen landen als „#n“ in uebersprungen."""
     out = []
@@ -294,7 +298,8 @@ def lies_zeilen(pfad, uebersprungen=None):
             betr = re.match(r"\s*(\d+)", c[13])  # „–“ = nicht erhoben
             out.append({"nr": int(c[0]), "gruppe": gruppe(c[3]), "typ": c[4], "delta": delta,
                         "ms": zahl(c[9]), "bwk": tuple(map(int, bwk.groups())) if bwk else None,
-                        "betr": int(betr.group(1)) if betr else None})
+                        "betr": int(betr.group(1)) if betr else None,
+                        "abgebrochen": c[15].strip().lower().startswith("abgebrochen")})
     return out
 
 
@@ -336,6 +341,18 @@ def cmd_summarize(a):
         print(f"Nicht ausgewertet: {', '.join(weg)}", file=sys.stderr)
     if not rows:
         sys.exit("Keine auswertbaren Zeilen (Spalten wie im Format, Δ tokens als Zahl).")
+    # Unbewertete Prüfläufe verzerren die Raten je 100k (Cockpit-Lauf 2026-11-13: 44 von 60
+    # Task-Reviews ohne Urteil); fehlende Threads machen Kostenaussagen unmöglich.
+    offen = [f"#{r['nr']}" for r in rows
+             if r["gruppe"].startswith(PRUEFROLLEN) and r["bwk"] is None and r["betr"] is None
+             and not r["abgebrochen"]]  # ein abgebrochener Lauf hat kein Urteil und braucht keins
+    if offen:
+        print(f"{len(offen)} Prüfläufe ohne bewerte (B/W/K und betriebsrelevant leer): "
+              f"{', '.join(offen)}", file=sys.stderr)
+    # Zusätze in der Überschrift sind erlaubt („## Threads (Stand …)“), andere Wörter nicht.
+    if not any(re.match(r"##\s+Threads\b", z.strip()) for z in open(pfad, encoding="utf-8")):
+        print("Abschnitt „## Threads“ fehlt: threads … --subagents --md nachtragen, bevor "
+              "Threads archiviert werden.", file=sys.stderr)
     tabelle = auswertung(rows)
     if not a.write:
         print("\n".join(tabelle))
