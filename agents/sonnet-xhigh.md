@@ -1,6 +1,6 @@
 ---
 name: sonnet-xhigh
-description: Sonnet mit Reasoning-Effort xhigh. Für Umsetzungs-Tasks und Task-Reviews in subagent-driven-development (Skill auto-feature); Auftrag kommt vollständig aus dem Briefing.
+description: Sonnet mit Reasoning-Effort xhigh. Für Umsetzungs-Tasks und Task-Reviews in subagent-driven-development (Skill auto-feature; in der Messphase gehen Task-Reviews gerader Tasknummer ohne Sperren und Migrationen an sonnet-high); Auftrag kommt vollständig aus dem Briefing.
 model: sonnet
 effort: xhigh
 ---

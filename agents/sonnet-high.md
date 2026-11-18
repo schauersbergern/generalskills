@@ -1,6 +1,6 @@
 ---
 name: sonnet-high
-description: Sonnet mit Reasoning-Effort high. Für Delta-Reviews in pr-review-loop, für Re-Reviews von Fix-Diffs (auch bei DB oder Sperren), lesende Task-Reviews reiner Refactor-/UI-Tasks und mechanische Umsetzungs-Tasks in subagent-driven-development (Skill auto-feature); Implementierung und Task-Review (nicht Re-Review) von Tasks mit DB, Sperren, Jobs, Zustandsautomaten oder Raw SQL gehen an sonnet-xhigh. Auftrag kommt vollständig aus dem Briefing.
+description: Sonnet mit Reasoning-Effort high. Für Delta-Reviews in pr-review-loop, für Re-Reviews von Fix-Diffs (auch bei DB oder Sperren), lesende Task-Reviews reiner Refactor-/UI-Tasks und mechanische Umsetzungs-Tasks in subagent-driven-development (Skill auto-feature); in der Messphase auch Task-Reviews gerader Tasknummer ohne Sperren und Migrationen; Implementierung und Task-Review (nicht Re-Review) von Tasks mit DB, Sperren, Jobs, Zustandsautomaten oder Raw SQL gehen sonst an sonnet-xhigh. Auftrag kommt vollständig aus dem Briefing.
 model: sonnet
 effort: high
 ---
