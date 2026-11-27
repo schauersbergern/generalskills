@@ -15,7 +15,8 @@ Erzeugt wird es mit dem Skill `feature-file` (Interview, Recherche, Builder-Chec
 4. **DoD-Punkte mit ID und Nachweis.**
    - ID `TF<n>-D<m>`. IDs werden nie umnummeriert, ein gestrichener Punkt bleibt als „gestrichen“ stehen. Spec, Plan, Tests und PR-Haken verweisen auf diese IDs.
    - Jeder Punkt beschreibt beobachtbares Verhalten oder Ergebnis von außen: Antwort, DB-Zustand, Datei, Anzeige, Rechte. „Test X ist grün“ ist kein DoD-Punkt, denn den kann man durch Abschwächen des Tests erfüllen.
-   - Jeder Punkt nennt seinen Nachweis: `[Test]` (automatisiert), `[Durchklick]` (bleibt beim User und kommt als Checkliste in den PR) oder `[Ops]` (Schritt außerhalb des Codes, mit dem prüfbaren Zustand danach).
+   - Jeder Punkt nennt seinen Nachweis: `[Test]` (automatisiert), `[Code]` (der Review liest es am Diff ab, kein eigener Test), `[Durchklick]` (bleibt beim User und kommt als Checkliste in den PR) oder `[Ops]` (Schritt außerhalb des Codes, mit dem prüfbaren Zustand danach).
+   - `[Test]` nur, wenn sich ein Laufzeitfehler benennen lässt, den weder der Compiler noch ein Blick in den Code zeigt: Grenzwerte, Fehlerpfade, Eingaben von außen, fremde Org, Nebenläufigkeit, DB- und andere Außenränder. Was man direkt im Code sieht (fester Wert, Text, Feldliste, Konfiguration), ist `[Code]`, außer der Wert ist eine Zusage nach außen. Im Zweifel `[Code]`. Maßstab: `auto-feature`, Abschnitt „Was einen Test bekommt“.
    - Keine Wörter wie „sauber“, „robust“ oder „schnell“ ohne Schwelle.
    - Fehlerpfade und Grenzfälle sind eigene Punkte: falsche Eingabe, fremde Org, fehlende Rechte, doppelte Auslösung, alter Client.
    - Given/When/Then nur, wenn ein Ausgangszustand das Verhalten bestimmt. Keine User Stories.
@@ -62,10 +63,11 @@ bindend, bei „Default“ darf die Spec mit Begründung abweichen.
 - <Vorschlag> (offen: <Frage, die niemand beantwortet hat>)
 
 **DoD:**
-- **TF1-D1** [Test] <beobachtbares Verhalten>
+- **TF1-D1** [Test] <Verhalten, das zur Laufzeit schiefgehen kann>
 - **TF1-D2** [Test] <Fehlerpfad oder Grenzfall>
-- **TF1-D3** [Durchklick] <was der User am Gerät prüft>
-- **TF1-D4** [Ops] <Schritt außerhalb des Codes> → <prüfbarer Zustand danach>
+- **TF1-D3** [Code] <Verhalten, das man am Diff abliest>
+- **TF1-D4** [Durchklick] <was der User am Gerät prüft>
+- **TF1-D5** [Ops] <Schritt außerhalb des Codes> → <prüfbarer Zustand danach>
 
 ## 2. Reihenfolge und Abhängigkeiten
 

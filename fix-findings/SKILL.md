@@ -69,6 +69,7 @@ Die teuersten Fixer-Threads von Haas Runde 2 (#174, #176) kamen auf 150 bzw. 192
      3. gezielte Tests grün
      4. eigener Commit mit Befund-ID in der Message, z. B. `fix(sync): Lease vor dem Schreiben erneuern (Review R2-4)`, auf dem Audit-Weg `(Audit S-<n>)`
    - **Ohne Test:** Prosa-Befunde (Kommentar, Docstring, Doku) und reine Benennung.
+   - **Befund „Test fehlt“** ohne echtes Fehlverhalten: annehmen nur, wenn er den Schaden im Betrieb benennt und der beim Lesen des Codes nicht auffiele; sonst abgelehnt mit Verweis auf `auto-feature`, Abschnitt „Was einen Test bekommt“. **Befund „Test überflüssig“:** die genannten Tests streichen, ohne Ersatz.
    - **Steht in `CLAUDE.md` eine Teststrategie,** schränkt sie ein, welche Verhaltens-Befunde einen Test bekommen.
    - **Prosa: streichen statt umformulieren**, das verhindert Folgebefunde.
    - **Probe-Änderungen nie per `git checkout -- <datei>` oder `git restore` zurücknehmen**, solange eigene Fixes in derselben Datei uncommittet sind. Das löscht den Fix mit (so geschehen im Bundle-Lauf Passwort-Login). Erst den Fix committen, dann proben, oder die Probe von Hand zurücknehmen.

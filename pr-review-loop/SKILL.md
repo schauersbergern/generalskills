@@ -101,7 +101,7 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
 2. **Runde starten.** Zahl der Reviewer nach der Stufe aus „Prüftiefe nach PR-Art“. Doku- und Ops-PRs: **ein** Reviewer mit dem Auftrag „nur sachliche Fehler“, ohne Mutationsproben. Code-PRs: die Reviewer **parallel** in einer Nachricht, jeder mit eigenem Fokus:
    - **Korrektheit:** Nebenläufigkeit, Absturzfenster, Grenzfälle
    - **Verträge:** Konsumenten außerhalb des Diffs, Sicherheit und Mandantengrenze; sachliche Fehler in Prosa immer, Formulierungsbefunde nur, solange das Prosa-Budget reicht (Versandregel)
-   - **Tests** (nur „Code mit Risiko“, nicht bei PRs aus `auto-feature`): vakuume Assertions, fehlende Invarianten-Tests, systematische Mutationsproben
+   - **Tests** (nur „Code mit Risiko“, nicht bei PRs aus `auto-feature`): vakuume Assertions, Mutationsproben an den Risikostellen, fehlende Tests nur mit benanntem Schaden im Betrieb, überflüssige Tests (Maßstab für beides: `auto-feature`, Abschnitt „Was einen Test bekommt“)
    - „Code klein“ und „Code (auto-feature)“: ein Reviewer mit Korrektheit und Verträgen zusammen.
    - Ohne eigenen Tests-Fokus belegt jeder Reviewer seine 1–3 wichtigsten Behauptungen über Tests („Zweig X ist abgedeckt“, „Invariante Y hält“) selbst per Mutation. Eine flächendeckende Mutationsrunde macht er nicht.
 
@@ -173,7 +173,7 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
 
 **Schweregrade:**
 - **P1** blockiert den Merge: Datenverlust, Sicherheit/Mandantengrenze, falsches Verhalten in einem Pfad, der im Normalbetrieb erreichbar ist.
-- **P2** ist ein echter Defekt in einem seltenen Pfad oder eine ungetestete Invariante.
+- **P2** ist ein echter Defekt in einem seltenen Pfad, eine ungetestete Invariante, deren Bruch im Betrieb schadet und beim Lesen nicht auffiele, oder ein Satz neuer Tests, die keinen Laufzeitfehler fangen (alle überflüssigen Tests eines PRs zusammen ein Befund).
 - **P3** ist klein oder Prosa.
 - Reine Stil- und Benennungs-Nits verwirfst du, die regelt der Linter.
 
@@ -189,7 +189,8 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
    - fachlicher Kontext in 2–3 Sätzen
 3. **Dein Fokus** (siehe Schritt 2) mit gezielten Prüfpunkten:
    - Behauptet Code oder Text etwas, das er nicht hält?
-   - Bleibt ein Test grün, wenn man die geprüfte Logik entfernt? Belege das per Mutation in deinem Worktree `<pfad>` und setz sie danach zurück. Lauf nur die betroffenen Testdateien, nicht die ganze Suite. (Entfällt bei Doku-/Ops-PRs.)
+   - Bleibt ein Test grün, wenn man die geprüfte Logik entfernt? Belege das per Mutation in deinem Worktree `<pfad>` und setz sie danach zurück. Lauf nur die betroffenen Testdateien, nicht die ganze Suite. Bleibt er grün, ist das nur mit benanntem Schaden im Betrieb ein Befund, der beim Lesen des Codes nicht auffiele. (Entfällt bei Doku-/Ops-PRs.)
+   - Fängt jeder neue Test einen Laufzeitfehler, den weder der Compiler noch ein Blick in den Code zeigt? Tests ohne Antwort meldest du zusammen als einen Befund mit Testnamen. (Entfällt bei Doku-/Ops-PRs.)
    - Gibt es Konsumenten außerhalb des Diffs?
 4. **Verbote:**
    - keine Edits außerhalb deines Worktrees, außer im eigenen Wegwerf-Repo (Punkt „Wegwerf-Repos“)
