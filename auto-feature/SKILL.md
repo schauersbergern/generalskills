@@ -23,7 +23,8 @@ Feature-File: `$ARGUMENTS`
 
 0. **Fortsetzung?** Liegt zum Feature-File schon eine Stand-Datei (siehe „Kontext der Hauptsession“), setzt du den Lauf fort: Stand-Datei, Feature-File, `CLAUDE.md` und Spec/Plan des offenen TF lesen, dann beim dort genannten nächsten Schritt weitermachen. Die übrigen Start-Schritte entfallen. Vorher für jede dort geführte frühere Session-ID die noch nicht eingetragenen Agenten nachtragen: `agent-stats.py import <datei> <alte-ID> --tf TF<n>` je betroffenem TF (`import … self` liest nur die Subagenten der laufenden Session, die der alten fehlen sonst dauerhaft).
 1. Das Feature-File und `CLAUDE.md` vollständig lesen. Format und Regeln des Feature-Files: `~/.claude/skills/auto-feature/references/feature-file.md`. In Teilfeatures (TF) zerlegen. Reihenfolge und Abhängigkeiten aus dem File übernehmen. Ein TF ergibt einen PR.
-   - **DoD-IDs und Nachweis-Art:** Hat das File keine `TF<n>-D<m>`-IDs oder keine Nachweis-Art (ältere Files), vergibt die Spec beides: IDs in der Reihenfolge des Files, Nachweis-Art je Punkt, im Zweifel `[Test]`. Das steht im Abschlussbericht.
+   - **DoD-IDs und Nachweis-Art:** Hat das File keine `TF<n>-D<m>`-IDs oder keine Nachweis-Art (ältere Files), vergibt die Spec beides: IDs in der Reihenfolge des Files, Nachweis-Art je Punkt nach „Was einen Test bekommt“, im Zweifel `[Code]`. Das steht im Abschlussbericht.
+   - **Vorrang `[Test]` gegen „Test überflüssig“:** Lässt sich für einen `[Test]`-Punkt (etwa aus einem älteren File, das pauschal `[Test]` vergibt) kein Laufzeitfehler benennen, stuft die Spec ihn mit Begründung unter „Entscheidungen/Annahmen“ auf `[Code]` um; die Umstufung steht im Abschlussbericht. Ein Test, der einen verbleibenden `[Test]`-Punkt belegt, ist nie „überflüssig“.
    - **Schreibgeschützt:** Das Feature-File bleibt im Lauf unverändert, auch ein vorhandener Abschnitt „Offene Review-Punkte“ (parallele TF-Branches würden sonst kollidieren). Abweichungen und offene Punkte stehen in Spec, Plan, PR-Body und Abschlussbericht.
 2. Voraussetzungen prüfen:
    - `gh auth status` und ein Remote vorhanden.
@@ -43,9 +44,9 @@ Feature-File: `$ARGUMENTS`
 |---|---|---|
 | A Spec | Hauptsession (**Opus 5.5**) · `superpowers:brainstorming` im Autonom-Modus | Repo-Konvention, sonst `docs/superpowers/specs/<YYYY-MM-DD>-<tf>-design.md` (Ordner ggf. anlegen); Ziel, Andockpunkte mit Pfaden, Abnahmekriterien = DoD-Punkte mit ihren IDs; „Entschieden“ ist bindend, von „Default“ nur mit Begründung unter „Entscheidungen/Annahmen“ abweichen; Commit auf dem TF-Branch |
 | B Spec-Review | frischer `opus-xhigh`-Subagent je Runde | **max. 2 Runden** |
-| C Plan | Hauptsession (**Opus 5.5**) · `superpowers:writing-plans` | Repo-Konvention, sonst `docs/superpowers/plans/<YYYY-MM-DD>-<tf>.md`; TDD-Tasks mit exakten Pfaden; Abschnitt „Review Focus“ mit fester Checkliste (siehe „Plan (C)“); Commit auf dem TF-Branch |
+| C Plan | Hauptsession (**Opus 5.5**) · `superpowers:writing-plans` | Repo-Konvention, sonst `docs/superpowers/plans/<YYYY-MM-DD>-<tf>.md`; Tasks mit exakten Pfaden und je einer Zeile `Tests:`; Abschnitt „Review Focus“ mit fester Checkliste (siehe „Plan (C)“); Commit auf dem TF-Branch |
 | D Plan-Review | frischer `opus-xhigh`-Subagent je Runde | **max. 2 Runden** |
-| E Umsetzung | nur Sonnet-Subagenten (**Sonnet 5.5**) · `superpowers:subagent-driven-development`, TDD | ein Implementierer je Plan-Task; Task-Reviews ebenfalls Sonnet; `sonnet-xhigh` oder `sonnet-high` nach der Effort-Regel |
+| E Umsetzung | nur Sonnet-Subagenten (**Sonnet 5.5**) · `superpowers:subagent-driven-development`, TDD für die Tests der Zeile `Tests:` | ein Implementierer je Plan-Task; Task-Reviews ebenfalls Sonnet; `sonnet-xhigh` oder `sonnet-high` nach der Effort-Regel |
 | E2 Härtung | Hauptsession verantwortet und prüft; Durchsicht samt Test und Fix an `sonnet-xhigh`-Subagenten | immer durchgehen; ausführlich bei Storage, Zuständen, Jobs, Nebenläufigkeit |
 | Verifikation | Hauptsession | Prüfbefehle aus `CLAUDE.md`, Output zeigen (`superpowers:verification-before-completion`) |
 | F PR | Hauptsession | pushen ohne Rückfrage, `gh pr create`, **nie Draft** |
@@ -54,7 +55,7 @@ Feature-File: `$ARGUMENTS`
 
 **Autonom-Modus:** Wo ein Skill den Nutzer fragt oder auf Approval wartet, antwortest du dir aus dem Feature-File und machst weiter:
 - `brainstorming`: Die User-Review-Schritte entfallen, das Review machen die Opus-Subagenten in Phase B.
-- `writing-plans`: Die Frage nach der Ausführungsart lautet immer subagent-driven.
+- `writing-plans`: Die Frage nach der Ausführungsart lautet immer subagent-driven. Die Testschritte der Vorlage (je Task „Write the failing test“, ein Test je Review-Focus-Zeile, „the spec's exact values“) gelten nur für Tests aus der Zeile `Tests:` des Tasks. Ein Task mit `Tests: keine` bekommt keinen Testschritt, Werte aus der Spec werden nur bei Zusagen nach außen wörtlich geprüft.
 - `finishing-a-development-branch`: Die Antwort ist immer „PR öffnen“.
 
 ## Kontext der Hauptsession
@@ -67,16 +68,32 @@ Jeder API-Aufruf der Hauptsession liest ihren ganzen Kontext neu. Im Lauf securi
 - **Edit statt Neuschreiben:** Review-Befunde arbeitet die Hauptsession per Edit in Spec und Plan ein, nicht durch Neuschreiben des ganzen Dokuments.
 - **Statistik nur je TF** (Abschnitt „Agent-Statistik“), nicht nach jeder Notification.
 
+## Was einen Test bekommt
+
+Tests sichern das Minimum ab, das für die Qualität nötig ist, nie eine Abdeckung. Für jeden neuen Test im Lauf (Spec, Plan, Implementierer, Reviews, Härtung) gilt die Frage:
+
+> **Welchen Laufzeitfehler fängt dieser Test, den weder der Compiler noch ein Blick in den Code zeigt?**
+
+Die Antwort ist ein Satz. Ohne Antwort gibt es keinen Test. Was die Antwort trägt:
+- **Standardumfang je Einheit mit Logik:** Happy Case, Unter- und Obergrenzen, der Beweis, dass die Fehlerbehandlung greift. Ungültige Eingaben dort, wo sie von außen ankommen (Route, Formular, Job-Payload, LLM-Antwort, Datei), nicht an internen, typisierten Funktionen.
+- **Darüber hinaus, was man an keiner einzelnen Codestelle sieht:** Nebenläufigkeit und Sperren, fremde Org oder fremder Besitzer, DB-Constraints und Migrationen, Außenränder (LLM, Browser-Speicher, fremde Systeme). Je Risiko ein Test, keine Matrix aller Kombinationen. Jedes mögliche Deadlock-Opfer (Review Focus 5) ist ein eigenes Risiko.
+- **Wörtliche Werte** (Zahl, Text, Feldliste) nur, wenn sie eine Zusage nach außen sind: eine Frist aus dem Löschkonzept, ein Vertrag mit einem anderen System oder einer anderen, getrennt gepflegten Stelle. „Steht so in der Spec“ ist keine Zusage nach außen.
+- **Engere Regeln** aus der Teststrategie in `CLAUDE.md` gehen vor.
+
+Ein Test ohne Antwort ist ein Befund vom selben Rang wie ein fehlender Test mit Antwort, in Plan-Review, Task-Review, Härtung und PR-Review. Grund: In einem Repo mit zwei Monaten `auto-feature` stammten gut 80 % aller Testdateien aus diesen Läufen, zuletzt kamen 2,7 Zeilen Test auf jede Zeile Code. Ein Review fand nur 0,3 % sinnlose Tests; die Masse war Übertestung sinnvoller Dinge, erzeugt von der früheren Mechanik (Nachweis im Zweifel `[Test]`, Tests in jedem Task, „Test fehlt“ nach jeder grünen Mutation).
+
 ## Plan (C): Review Focus
 
-**DoD-Abdeckung:** Jeder DoD-Punkt mit Nachweis `[Test]` steht im Plan mit Task und Test (`TF1-D2 → Task 3, Test <Name>`). `[Durchklick]`- und `[Ops]`-Punkte kommen in die PR-Checkliste. Ein `[Test]`-Punkt ohne Task und Test ist ein Plan-Fehler.
+**DoD-Abdeckung:** Jeder DoD-Punkt mit Nachweis `[Test]` steht im Plan mit Task und Test (`TF1-D2 → Task 3, Test <Name>`), jeder `[Code]`-Punkt mit seinem Task (`TF1-D3 → Task 2, Code`); den belegt der Task-Review am Diff. `[Durchklick]`- und `[Ops]`-Punkte kommen in die PR-Checkliste. Ein `[Test]`-Punkt ohne Task und Test ist ein Plan-Fehler; war er nicht benennbar, ist er nach Start-Schritt 1 schon auf `[Code]` umgestuft.
+
+**Tests je Task:** Jeder Task hat eine Zeile `Tests:`. Sie nennt je Test den Namen und den Laufzeitfehler, den er fängt (`Tests: „lehnt fremde Org ab“ – fehlender Scope-Filter gibt fremde Einträge heraus`), oder lautet `Tests: keine – <ein Satz Grund>`. Ein Task ohne diese Zeile oder ein Test ohne benannten Laufzeitfehler (außer einem, der einen `[Test]`-Punkt belegt) ist ein Plan-Fehler. Der Plan-Review prüft beide Richtungen: fehlt ein Test für ein benanntes Risiko, und fängt jeder geplante Test wirklich etwas?
 
 **Task-Größe:** Ein Task berührt höchstens einen Risikobereich (Sperre, Job, Zustandsautomat, Migration, Raw SQL) und bringt höchstens etwa 300 Zeilen Produktivcode. Größere Tasks teilt der Plan, kleine hängt er weiterhin an einen benachbarten Task an. Der Plan-Review prüft das mit. Grund: Im Cockpit-Lauf (2026-11-13, Sonnet zusammen 560 M Input-Äquivalent) trugen die Implementierer 56 % der Kosten. Der Median lag bei 4 M je Task, die sechs größten Tasks kosteten 11–22 M, und der größte (ein Broker mit Sperren, Protokoll und Aufräumlauf) brauchte 341 API-Aufrufe.
 
-Jeder Plan hat einen Abschnitt **„Review Focus“**. Er beginnt mit der folgenden festen Checkliste wiederkehrender Fehlerklassen, danach folgen TF-spezifische Punkte. Je Punkt steht im Plan entweder „trifft zu → Task <n>, Test <Name>“ oder „trifft nicht zu“ mit einem Satz Begründung. Ein zutreffender Punkt ohne Task und Test ist ein Plan-Fehler.
+Jeder Plan hat einen Abschnitt **„Review Focus“**. Er beginnt mit der folgenden festen Checkliste wiederkehrender Fehlerklassen, danach folgen TF-spezifische Punkte. Je Punkt steht im Plan entweder „trifft zu → Task <n>“ oder „trifft nicht zu“ mit einem Satz Begründung. Punkte 1, 2 und 4 nennen beim Zutreffen zusätzlich den Test (`Test <Name>`); Punkte 3, 5 und 6 belegt der Code, der Task-Review liest sie. Ein zutreffender Punkt ohne Task, bei 1, 2 und 4 ohne Test, ist ein Plan-Fehler.
 
 1. **Sperren mit deterministischem Wartenachweis:** Jede neue Sperre (Advisory Lock, `SELECT … FOR UPDATE`, Lease-Spalte, Mutex) bekommt einen Test, der nachweist, dass der zweite Aufrufer tatsächlich wartet bzw. abgewiesen wird: über Barriere oder Latch im ersten Halter oder Abfrage des Sperrzustands (`pg_locks`), nicht über `sleep` oder Timing.
-2. **Werte, die die App-Validierung bestehen, aber an Prisma/PostgreSQL scheitern oder still verfälscht werden:** je Eingabefeld, das in die DB geht, Grenzwerte gegen die echte DB prüfen:
+2. **Werte, die die App-Validierung bestehen, aber an Prisma/PostgreSQL scheitern oder still verfälscht werden:** je Feldart, die von außen kommt und in die DB geht (Datum, Freitext), ein Grenzwert-Test gegen die echte DB, nicht je Feld:
    - Datumsbereiche: `Invalid Date` (lehnt schon der Prisma-Client ab), Jahr 0 (gibt es in PostgreSQL nicht, z. B. scheitert `0000-…` als `::date`), Jahre außerhalb des PostgreSQL-Bereichs
    - Steuerzeichen: `\u0000` in `text`/`jsonb`
    - Surrogate: ungepaarte UTF-16-Surrogate (`\uD800`) scheitern je nach Pfad in der Prisma-Engine oder werden still zu U+FFFD
@@ -94,7 +111,7 @@ Jeder Plan hat einen Abschnitt **„Review Focus“**. Er beginnt mit der folgen
 - Pro Runde ein **neuer** `Agent(subagent_type: "opus-xhigh", model: "opus")`, ohne Wissen aus der Vorrunde. **`model: "opus"` explizit setzen.**
 - **Briefing:**
   - Pfad der Spec bzw. des Plans, Feature-File, Hinweis auf `CLAUDE.md`
-  - Auftrag „als Design prüfen“: fehlende Anforderungen, Widersprüche, falsche Datei-/Typ-Annahmen gegen den echten Code, Sicherheits- und Betriebsrisiken, Testbarkeit; beim Plan zusätzlich: deckt er die Spec und jeden DoD-Punkt per ID vollständig ab, hält jeder Task die Task-Größe ein (höchstens ein Risikobereich, etwa 300 Zeilen Produktivcode), und ist jeder Punkt der „Review Focus“-Checkliste gegen den echten Code richtig als zutreffend/nicht zutreffend eingestuft und mit Task und Test hinterlegt?
+  - Auftrag „als Design prüfen“: fehlende Anforderungen, Widersprüche, falsche Datei-/Typ-Annahmen gegen den echten Code, Sicherheits- und Betriebsrisiken, Testbarkeit; beim Plan zusätzlich: deckt er die Spec und jeden DoD-Punkt per ID vollständig ab, hält jeder Task die Task-Größe ein (höchstens ein Risikobereich, etwa 300 Zeilen Produktivcode), ist jeder Punkt der „Review Focus“-Checkliste gegen den echten Code richtig als zutreffend/nicht zutreffend eingestuft und mit Task (und wo verlangt Test) hinterlegt, und besteht jede Zeile `Tests:` die Frage aus „Was einen Test bekommt“, in beide Richtungen?
   - Ausgabe Blocker / Wichtig / Klein mit Datei-/Zeilenbeleg
   - **ändert nichts** im Repo, kein `git checkout`/`switch`/`stash`/`reset`, keine Subagenten (im eigenen Wegwerf-Repo, nächster Punkt, sind Edits und git-Befehle erlaubt)
   - Wegwerf-Repos und Messskripte nur in einem frischen Temp-Verzeichnis: `d=$(mktemp -d) && cd "$d" || exit 1`, alle weiteren Befehle in derselben `&&`-Kette oder mit absoluten Pfaden unter `$d`. `$d` gilt nur im selben Bash-Aufruf, in Folgeaufrufen den ausgegebenen Pfad wörtlich einsetzen (`git -C /…/tmp.XXXX …`), nie `$d` (`cd ""` gelingt und bleibt im Repo). Nie `rm` als ersten Schritt einer Kette, nie ein Skript ohne geprüftes `cd`.
@@ -105,6 +122,8 @@ Jeder Plan hat einen Abschnitt **„Review Focus“**. Er beginnt mit der folgen
 ## Umsetzung (E)
 
 Die Hauptsession schreibt **weder Produktiv- noch Testcode**, auch keine 4-Zeilen-Config. Jeder Plan-Task geht an `Agent(subagent_type: "sonnet-xhigh" | "sonnet-high", model: "sonnet")` nach der Effort-Regel, kleine Tasks hängst du an einen benachbarten Task an. Die Konventionen aus `CLAUDE.md` gelten strikt.
+
+**Tests im Implementierer-Briefing:** Das Briefing enthält die Zeile `Tests:` des Tasks und die Frage aus „Was einen Test bekommt“. Der Implementierer schreibt genau diese Tests, testgetrieben. Hält er einen weiteren Test für nötig, schreibt er ihn nur mit benanntem Laufzeitfehler und nennt ihn im Bericht; das gilt auch bei `Tests: keine`. Ohne Zeile `Tests:` und ohne solchen Fund schreibt er keinen Test. Die Testschritte je Task stammen sonst aus der Plan-Vorlage (siehe Autonom-Modus), nicht aus dem `subagent-driven-development`-Template.
 
 ### Effort-Regel
 
@@ -122,6 +141,7 @@ Die Hauptsession legt den Agent-Typ je Implementierung und je Review beim Dispat
   - **Vergleichsgruppe** ist `Task-Review` mit `sonnet-xhigh`. Sie enthält auch die ausgenommenen Sperr- und Migrations-Tasks, die schwerer sind; das gehört in jede Auswertung als Einschränkung.
   - **Ende der Messphase:** je 20 bewertete Zeilen `Task-Review-M` (`sonnet-high`) und `Task-Review` (`sonnet-xhigh`), gezählt über alle Läufe und Skill-Stände, also ohne `--nach-version`. Gezählt wird das n aus „(n von m)“ in der Spalte „B+W je 100k (erhoben)“ der Zeile der Rolle; die Spalte „Läufe“ enthält auch unbewertete Zeilen und zählt zu viel. Dann entscheidet der User über die Regel.
   - **Wer zählt:** Die Hauptsession nennt im Abschlussbericht jedes Laufs die Zahl der bewerteten `Task-Review-M`-Zeilen und der `Task-Review`-Zeilen mit `sonnet-xhigh` des eigenen Repos, aus `summarize-all --root <Ordner mit den Statistik-Dateien des Repos>` (`auto-feature` legt sie unter `docs/superpowers/runs/` ab, sonst nach Repo-Konvention, nicht unter dem Standard `~/.claude/agent-stats`; `--root` durchsucht den Ordner rekursiv). Die Summe über mehrere Repos führt der User.
+  - **Bruch ab Stand nach generalskills PR #21** (Tests nach Bedarf): Eine grüne Mutation ist nur mit benanntem Schaden ein Befund, und überflüssige Tests zählen als Befund. Das trifft `Task-Review-M` und `Task-Review` gleich, der Vergleich zwischen beiden bleibt also gültig. Absolute Ausbeuten vor und nach dem Bruch nicht vergleichen; dafür `summarize-all --root <Ordner mit den Statistik-Dateien des Repos> --nach-version` (ohne `--root` liest es nur `~/.claude/agent-stats`).
   - **Grund:** Im Lauf zentraler MCP (2026-11-12) brachten Task-Reviews mit `sonnet-xhigh` 2,1 Blocker+Wichtig je Million Input-Äquivalent und solche mit `sonnet-high` 2,2, bei einem Viertel der Kosten je Review. Das waren aber nur 6 Reviews mit `sonnet-high`.
 - **Fix-Runden** laufen als Fortsetzung desselben Implementierers (`SendMessage`), also mit dessen Typ, solange dessen Kontext klein ist: Die Task-Notification meldet `subagent_tokens` (Endkontext), und bis etwa **250k** spart die Fortsetzung die Einarbeitung. **Darüber** schreibt ein frischer Fixer (`TF<n> Fix T<k>`, Typ nach dieser Regel) die Korrektur. Sein Briefing: Plan-Task, Commit-Bereich des Tasks, betroffene Dateien, die Befundliste wörtlich, Testumfang und Berichtsgrenze wie bei Implementierern. Grund: Jeder Aufruf einer Fortsetzung liest den ganzen Kontext des Implementierers erneut. Im Cockpit-Lauf hatten 50 von 56 Implementierern mindestens eine Fix-Runde; ein Implementierer samt Fix-Runden kostete im Schnitt 5,4 M Input-Äquivalent (Median 4,1 M), ein frischer Fixer unter 1 M. Ausnahme: Bringt ein Fix neue Logik (Verzweigung, Invariante, Abfrage) oder einen der `sonnet-xhigh`-Bereiche in einen `sonnet-high`-Task, schreibt ihn ein frischer `sonnet-xhigh`-Implementierer. Statt des Re-Reviews folgt dann ein volles `sonnet-xhigh`-Task-Review mit Mutationsproben, unabhängig von der Tasknummer (die Messphase gilt hier nicht, Rolle `Task-Review T<n>`).
 - **Unverändert bleiben** die Opus-Reviews (B/D) und die Härtungs-Subagenten (E2, `sonnet-xhigh`). Begründung: Alle 28 Blocker des Referenzlaufs kamen aus Opus-Reviews, und die Härtung fand in jedem TF echte Lücken.
@@ -139,12 +159,16 @@ Das steht ausdrücklich im Briefing, denn die Templates von `subagent-driven-dev
 
 **Task-Reviews mit Logik führen Mutationsproben durch.** Logik heißt: neue Verzweigung, Invariante, Validierung, Abfrage oder ein neuer Zustandsübergang. Rein lesend geprüft werden nur reine Refactor-/UI-Tasks ohne neue Logik. Im Referenzlauf fanden Reviews mit Mutationsproben echte Laufzeitfehler (Cursor-Tag → 500, „Mehr laden“ hängt bei Geräteuhr 1970, Reconcile ohne Verfügbarkeitsprüfung, ungetestete Sperren).
 
-Ins Review-Briefing gehört:
+Ins Review-Briefing **jedes** Task-Reviews gehört, auch des rein lesenden:
+- **Plan-Zuordnung:** die `[Code]`-DoD-Punkte des Tasks mit ihrer Zuordnung aus dem Plan (`TF1-D3 → Task 2, Code`) und die ihm zugeordneten Review-Focus-Punkte 3, 5 und 6; der Review belegt sie am Diff.
+- **Gegenrichtung:** Je neuem Test des Tasks die Frage aus „Was einen Test bekommt“. Tests ohne Antwort sind zusammen ein Befund Wichtig „Test überflüssig“ mit der Liste der Testnamen und je einem Satz. Das gilt auch für Refactor-/UI-Tasks (Render- und Snapshot-Tests).
+
+Zusätzlich in das Briefing eines Reviews mit Mutationsproben:
 - **Vorrang vor dem Template:** Die Reviewer-Templates von `subagent-driven-development` (`task-reviewer-prompt.md`, `re-review-prompt.md`) verlangen ein rein lesendes Review, Tests nur bei konkretem Zweifel und keine git-Befehle. Das Briefing sagt ausdrücklich, dass alle drei Vorgaben für dieses Review aufgehoben sind und stattdessen gilt: Arbeitsbaum nur temporär ändern, Endstand = Ausgangsstand, nur die betroffenen Testdateien laufen lassen, `git status`/`git diff` nur zur Kontrolle des Endstands, sonst keine git-Befehle im Repo (im eigenen Wegwerf-Repo, siehe unten, sind sie erlaubt). Das gilt auch für Re-Reviews, die mutieren.
 - Je neuer Verzweigung bzw. Invariante eine Mutation (Zweig entfernen, Bedingung umdrehen, Sperre oder Scope-Filter weglassen) und nur die betroffenen Testdateien laufen lassen, nicht die ganze Suite.
 - Die Mutation danach von Hand zurücknehmen. Am Ende muss `git status` den Stand vor dem Review zeigen. Kein `git checkout`/`stash`/`reset`, keine Commits im Repo.
 - Wegwerf-Repos und Messskripte nur in einem frischen Temp-Verzeichnis: `d=$(mktemp -d) && cd "$d" || exit 1`, alle weiteren Befehle in derselben `&&`-Kette oder mit absoluten Pfaden unter `$d`. `$d` gilt nur im selben Bash-Aufruf, in Folgeaufrufen den ausgegebenen Pfad wörtlich einsetzen (`git -C /…/tmp.XXXX …`), nie `$d` (`cd ""` gelingt und bleibt im Repo). Nie `rm` als ersten Schritt einer Kette, nie ein Skript ohne geprüftes `cd`.
-- Ergebnis je Probe im Review: „Mutation → Test <Name> rot“ oder „kein Test rot → Befund Wichtig: Test fehlt“.
+- Ergebnis je Probe im Review: „Mutation → Test <Name> rot“, oder bei „kein Test rot“ der Schaden im Betrieb, den die Mutation anrichten würde (Datenverlust oder -leck, falsche Anzeige, Absturz, Hänger). Ein Befund Wichtig „Test fehlt“ entsteht nur, wenn dieser Schaden benannt ist und beim Lesen des Codes nicht auffiele (Maßstab: „Was einen Test bekommt“). Sonst steht eine Zeile „kein Test rot, kein eigener Test nötig: <ein Satz>“ ohne Befund.
 - Re-Reviews mutieren nur, wenn der Fix-Diff selbst Logik ändert, und dann nur dort.
 - Reviews mit Mutationsprobe (auch Re-Reviews) erst dispatchen, wenn kein anderer Subagent im selben Worktree arbeitet, und bis zu ihrem Ende keinen weiteren dort starten. Warten statt auslassen.
 
@@ -152,7 +176,7 @@ Ins Review-Briefing gehört:
 
 Die Task-Reviews von `subagent-driven-development` (Spec-Treue und Codequalität je Task) bleiben, sie sind kein PR-Review-Loop.
 - **Grenze:** Je Task gibt es nach der Erstumsetzung höchstens 2 Korrekturdurchläufe.
-- **Kein Re-Review für reine Kleinigkeiten:** Behebt eine Fix-Runde nur Befunde der Stufe Klein und ändert keine Logik (keine neue Verzweigung, Invariante oder Abfrage), entfällt der Re-Review. Der Fixer meldet Commit und Testzahl, die Hauptsession prüft nur `git diff --stat` gegen die Befundliste. Grund: `sonnet-high`-Re-Reviews fanden im Cockpit-Lauf 0/1/13 (14 von 56 bewertet) und in den Läufen zentraler MCP und Beitrags-Ansicht zusammen 0/1/13 in 9.
+- **Kein Re-Review für reine Kleinigkeiten:** Behebt eine Fix-Runde nur Befunde der Stufe Klein und/oder streicht sie nur Tests („Test überflüssig“) und ändert keine Logik (keine neue Verzweigung, Invariante oder Abfrage), entfällt der Re-Review. Der Fixer meldet Commit und Testzahl, die Hauptsession prüft nur `git diff --stat` gegen die Befundliste. Grund: `sonnet-high`-Re-Reviews fanden im Cockpit-Lauf 0/1/13 (14 von 56 bewertet) und in den Läufen zentraler MCP und Beitrags-Ansicht zusammen 0/1/13 in 9.
 - **Danach offene Qualitätsbefunde** kommen unter „Offene Review-Punkte“ in den PR-Body.
 - **Sind danach Tests rot oder ist der Build kaputt:** kein PR für dieses TF. Branch pushen, Stand und Ursache im Abschlussbericht melden, mit den unabhängigen TFs weitermachen.
 
@@ -160,7 +184,7 @@ Die Task-Reviews von `subagent-driven-development` (Spec-Treue und Codequalität
 
 Die Hauptsession verantwortet den Durchgang. Die Durchsicht samt Test und Fix gibt sie an einen oder mehrere `sonnet-xhigh`-Subagenten (bei großen TFs getrennt, z. B. Server und Client). Mehrere laufen nacheinander oder in getrennten Worktrees, weil sie mutieren und fixen. Ins Briefing gehört die Temp-Verzeichnis-Regel für Wegwerf-Repos und Messskripte aus „Mutationsproben im Task-Review“. Die Hauptsession prüft deren Antworten und gefundene Lücken selbst und fordert Fehlendes nach.
 
-**Durchsicht und Fix trennen, sobald der Kontext wächst:** Das Briefing sagt dem Härtungs-Subagenten, dass er die acht Fragen erst vollständig beantwortet und dann die Lücken schließt. Liegt sein Kontext dabei über etwa 250k (er sieht das am Umfang des Gelesenen, im Zweifel nach etwa 60 Werkzeugaufrufen), schließt er die laufende Lücke ab und meldet die übrigen als Liste: Frage, Stelle, failing test, falls schon geschrieben. Diese Lücken schließt ein frischer `sonnet-xhigh`-Fixer (`TF<n> Fix Härtung`); für ihn gilt die Regel „Klasse statt Instanz“ unverändert. Grund: Härtungs-Subagenten kosteten im Cockpit-Lauf 2,3–16,4 M Input-Äquivalent je Agent (Ø 7,9 M) und brauchten im Lauf zentraler MCP bis zu 102 Aufrufe, weil Durchsicht und alle Fixes in einem Kontext liefen. Die Aufteilung nach Bereichen bleibt, weil sie in allen drei Läufen betriebsrelevante Lücken fand (0,76–1,42 je 100k). Die Kosten des Fixers `TF<n> Fix Härtung` landen in der Auswertung in der Gruppe `Fix`, nicht in `Härtung`.
+**Durchsicht und Fix trennen, sobald der Kontext wächst:** Das Briefing sagt dem Härtungs-Subagenten, dass er die acht Fragen erst vollständig beantwortet und dann die Lücken schließt. Liegt sein Kontext dabei über etwa 250k (er sieht das am Umfang des Gelesenen, im Zweifel nach etwa 60 Werkzeugaufrufen), schließt er die laufende Lücke ab und meldet die übrigen als Liste: Frage, Stelle, failing test, falls schon geschrieben; dazu die Tests, die nach Frage 8 zu streichen sind. Diese Lücken schließt und diese Tests streicht ein frischer `sonnet-xhigh`-Fixer (`TF<n> Fix Härtung`); für ihn gilt die Regel „Klasse statt Instanz“ unverändert. Grund: Härtungs-Subagenten kosteten im Cockpit-Lauf 2,3–16,4 M Input-Äquivalent je Agent (Ø 7,9 M) und brauchten im Lauf zentraler MCP bis zu 102 Aufrufe, weil Durchsicht und alle Fixes in einem Kontext liefen. Die Aufteilung nach Bereichen bleibt, weil sie in allen drei Läufen betriebsrelevante Lücken fand (0,76–1,42 je 100k). Die Kosten des Fixers `TF<n> Fix Härtung` landen in der Auswertung in der Gruppe `Fix`, nicht in `Härtung`.
 
 Vor dem PR den gebauten Code systematisch durchgehen und diese acht Fragen **schriftlich mit vollständiger Aufzählung** beantworten. Trifft keine zu, genügt ein Satz.
 
@@ -171,10 +195,13 @@ Vor dem PR den gebauten Code systematisch durchgehen und diese acht Fragen **sch
 5. **Stille Fallbacks:** jedes `catch`, `?? default`, jedes Überspringen. Wäre ein sichtbarer Fehler besser?
 6. **Zwei Worker/Geräte gleichzeitig:** Was passiert, wenn einer enteignet wird, während er noch schreibt?
 7. **Endgültigkeitszusagen:** jede Stelle, die etwas als dauerhaft, nicht wiederholbar, endgültig oder „immer/nie“ markiert, in Code (Statuswerte, Sperren, Retry-Verbote) und in Texten (Meldungen, Kommentare). Gilt die Zusage für **jeden** Weg, der dort ankommt, oder auch für Fälle, in denen ein neuer Versuch gelingen kann?
-8. **Wirksamkeit der Tests:** für jede neue Verzweigung bzw. Invariante eine Mutationsprobe (Zweig entfernen oder Bedingung umdrehen) gegen die betroffenen Testdateien, nicht die ganze Suite. Wird ein Test rot? Wenn nicht, fehlt der Test.
+8. **Wirksamkeit der Tests, in beide Richtungen:** für jede neue Verzweigung bzw. Invariante eine Mutationsprobe (Zweig entfernen oder Bedingung umdrehen) gegen die betroffenen Testdateien, nicht die ganze Suite. Wird kein Test rot, nennt die Antwort den Schaden im Betrieb; ein Test fehlt nur, wenn dieser Schaden beim Lesen des Codes nicht auffiele. Umgekehrt: Welche neuen Tests des TF fangen keinen Laufzeitfehler (Frage aus „Was einen Test bekommt“)? Die werden gestrichen.
 
 - **Klasse statt Instanz:** Braucht eine Stelle Behandlung, behandelst du im selben Durchgang alle Stellen derselben Klasse.
-- **Lücken schließen:** Jede Lücke wird zu failing test → Fix → grün. Test und Fix schreibt ein `sonnet-xhigh`-Subagent.
+- **Lücken schließen:** Test, Fix und Streichung schreibt ein `sonnet-xhigh`-Subagent (bei geteilter Härtung der Fixer, siehe oben).
+  - **Echtes Fehlverhalten (Fragen 1–7):** failing test → Fix → grün; dieser Regressionstest besteht die Frage aus „Was einen Test bekommt“ schon durch den Fund. Betrifft ein Fund aus Frage 7 nur Text (Meldung, Kommentar), ist er Prosa: Text ändern, kein Test.
+  - **Fehlender Test (Frage 8):** nur mit dem Schaden aus Frage 8 (benannt, beim Lesen nicht aufgefallen). Es gibt nichts zu fixen: Der Subagent schreibt den Test, der die Mutation rot macht.
+  - **Überflüssige Tests (Frage 8):** werden gestrichen, ohne Ersatz.
 - **Zweiter Fund = Design-Pass**, kein weiterer Flicken. Das gilt, wenn dieselbe Eigenschaft im selben Modul ein zweites Mal auffällt, egal ob in Spec-/Plan-Review, Task-Review oder Härtung:
   - Die Hauptsession überarbeitet den betroffenen Abschnitt in Spec und Plan, ohne neue Review-Runde.
   - Sonnet setzt die Änderung um.
@@ -194,9 +221,12 @@ Vor dem PR den gebauten Code systematisch durchgehen und diese acht Fragen **sch
   - Härtungsdurchgang
   - Offene Review-Punkte
   - Verifikations-Output
+  - **Tests im Diff:** die Ausgabe des Befehls unten, ohne Grenzwert. Liegt das Verhältnis über etwa 1,5, steht ein Satz dazu, welche Risiken den Umfang tragen.
   - lauf-spezifische Zusätze aus dem Feature-File
   - Merge-Hinweise: Überschneidungen, Basis, Reihenfolge
   - „Reasoning-Weg“: der TF-Teil des Abschlussberichts (siehe unten), damit er auch nach dem Chat erhalten bleibt
+- **Befehl für „Tests im Diff“** (nach `git fetch`, Basis = PR-Basis; zählt hinzugefügte Zeilen von Code-Dateien. Testhilfen und Test-Setup gelten als Test. Doku, Config (`*.config.*`), Daten, Lockfiles und Binärdateien zählen nicht; Umbenennungen zählen als neue Datei. Bei Code +0 steht „Verhältnis –“):
+  `git -c core.quotePath=false diff --numstat --no-renames origin/<basis>...HEAD | awk -F'\t' '$1=="-"{next} $3 ~ /\.config\.[^\/]+$/ {next} $3 !~ /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py|go|rb|java|kt|rs|cs|php|swift)$/ {next} $3 ~ /(^|\/)(tests?|__tests__|testing|__mocks__|__fixtures__|fixtures)\// || $3 ~ /test-(helpers|fixtures|utils)|(^|\/)conftest\.py$|[._-](test|spec|testdaten|setup)\.[^\/]+$|_test\.(go|py)$|(^|\/)test_[^\/]*\.py$/ {t+=$1; next} {c+=$1} END {printf "Test +%d · Code +%d · Verhältnis %s\n", t, c, (c ? sprintf("%.1f", t/c) : "–")}'`
 - **Abhängiges TF:** gestapelt branchen, PR-Basis = Vorgänger-Branch. Binär-Check und Reviews laufen gegen diesen Branch. Ins PR-Body gehört der Hinweis „nach Merge von #<vorgänger> auf `main` retargeten“.
 - **Unabhängiges TF:** gegen `main`.
 - **Branch-Namen ohne die Zeichenfolge „-f“.** Manche lokalen git-Wrapper halten das sonst für einen Force-Push.
@@ -215,6 +245,7 @@ Der **Abschlussbericht** ist die Grundlage für die Prüfung durch den User. Er 
 - **Umsetzung:** Abweichungen vom Plan, Task-Korrekturen, Design-Passes und warum
 - **Härtungsdurchgang:** Ergebnis in Kurzform, gefundene Lücken
 - **Verifikation:** Befehle und Ergebnis
+- **Tests im Diff:** Verhältnis wie im PR-Body, über etwa 1,5 mit dem Satz dazu
 - **Offene Fragen und Entscheidungen** für den User, inklusive Abweichungen von repo-eigenen Workflow-Dokumenten und „Effort nicht garantiert“, falls zutreffend
 - **Nötige Ops-Schritte:** Migrationen, Env, Resync
 - **Agent-Statistik:** Pfad und die Auswertung je Rolle
@@ -265,6 +296,9 @@ Letzte Zeile: „Stopp. Bitte prüfen; danach `/pr-review-loop <PR>` je PR.“
 | „Die Tabelle tippe ich schneller von Hand“ | Handtabellen drifteten (eigene Spalten, fehlendes Δ, fehlende Uhrzeiten) und fielen aus der Auswertung über alle Läufe. |
 | „Tests grün, also PR“ | Grüne Tests finden keine Absturzfenster. Erst kommt die Härtung. |
 | „Die Tests decken den neuen Zweig ab, steht ja im Namen“ | Erst eine Mutation zeigt, ob ein Test rot wird. Ohne Probe bleibt die Lücke bis zum Review. |
+| „Mutation blieb grün, also fehlt ein Test“ | Erst den Schaden im Betrieb benennen. Fällt er beim Lesen auf oder gibt es keinen, ist es kein Befund. |
+| „Im Zweifel lieber ein Test mehr, schadet ja nicht“ | Jeder Test kostet Laufzeit, Pflege und Review. Im Zweifel `[Code]` bzw. `Tests: keine`; ein Test ohne benannten Laufzeitfehler ist ein Befund. |
+| „Die Spec nennt den Wert, also pinne ich ihn im Test“ | Wörtliche Werte nur bei einer Zusage nach außen. Was in Spec und Code gleich steht, prüft der Review am Diff. |
 | „Der Task ist klein, Review lesend reicht“ | Hat er Logik, wird mutiert. Lesend nur reine Refactor-/UI-Tasks. |
 | „Spart Tokens: Plan-Review mit Sonnet oder Effort high“ | Alle Blocker des Referenzlaufs kamen aus Opus-xhigh-Reviews. Der Abschlag gilt nur in Phase E nach der Effort-Regel. |
 | „Der Task fasst nur kurz die DB an, `sonnet-high` reicht“ | DB, Sperren, Jobs, Zustandsautomaten oder Raw SQL bedeuten `sonnet-xhigh` für die Implementierung und, bis auf die Messphase (gerade Tasknummer, ohne Sperren und Migrationen), für den Task-Review. Das Re-Review des Fix-Diffs geht an `sonnet-high`, außer erst der Fix bringt einen dieser Bereiche in einen `sonnet-high`-Task: Dann folgt ein volles `sonnet-xhigh`-Task-Review. |

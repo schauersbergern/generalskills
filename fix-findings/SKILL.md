@@ -12,11 +12,11 @@ Eingabe: `$ARGUMENTS`
 Die Eingabe ist die Befundliste, eventuell gefolgt von den Befehlswörtern „mergen“ und/oder „deployen“. **Befehlswort** ist nur, was als eigenständiges Wort **außerhalb der Befundzeilen** steht, also am Anfang oder Ende der Argumente oder im eigenen Begleitsatz des Users. „merge conflict“, `deepMerge` oder ein „bitte mergen“ innerhalb eines Befunds zählen nicht.
 
 **Kern:** Jeder Befund ist ein Kandidat, keine Wahrheit, und das gilt auch für den mitgelieferten Fix-Vorschlag.
-- Erst am Code prüfen, dann pro angenommenem Befund Test → Fix → Commit.
+- Erst am Code prüfen, dann pro angenommenem Befund Fix → Commit; bei Verhaltens-Befunden mit failing test davor (siehe Ablauf 4).
 - Danach pushen und eine Tabelle abgeben.
 - Gemergt und deployt wird nur auf Befehlswort (siehe unten).
 
-**REQUIRED SUB-SKILL:** `superpowers:receiving-code-review` (Strenge beim Prüfen), `superpowers:test-driven-development` (pro Befund).
+**REQUIRED SUB-SKILL:** `superpowers:receiving-code-review` (Strenge beim Prüfen), `superpowers:test-driven-development` (pro Verhaltens-Befund).
 
 **Modell und Kontext:** `pr-review-loop` startet Fixer-Threads mit Sonnet und Effort high. Die Befunde sind dort schon reproduziert, und dein Urteil prüft die nächste Runde. Jeder API-Aufruf liest den ganzen Thread-Kontext erneut, deshalb:
 - zusammengehörige Befehle in einem Aufruf bündeln (Typecheck und gezielte Tests in einer `&&`-Kette)
@@ -69,6 +69,8 @@ Die teuersten Fixer-Threads von Haas Runde 2 (#174, #176) kamen auf 150 bzw. 192
      3. gezielte Tests grün
      4. eigener Commit mit Befund-ID in der Message, z. B. `fix(sync): Lease vor dem Schreiben erneuern (Review R2-4)`, auf dem Audit-Weg `(Audit S-<n>)`
    - **Ohne Test:** Prosa-Befunde (Kommentar, Docstring, Doku) und reine Benennung.
+   - **Befund „Test fehlt“** ohne echtes Fehlverhalten: annehmen nur, wenn er den Schaden im Betrieb benennt und der beim Lesen des Codes nicht auffiele; sonst abgelehnt mit Verweis auf `auto-feature`, Abschnitt „Was einen Test bekommt“. Angenommen heißt: den Test schreiben, der die gemeldete Mutation rot macht (kein Fix, rot sehen ist hier die Mutation, nicht der Test vor dem Fix).
+   - **Befund „Test überflüssig“:** die genannten Tests streichen, ohne Ersatz. Geschwister desselben Musters in denselben Testdateien streichst du mit demselben Kriterium (Frage aus „Was einen Test bekommt“) mit und nennst sie unter „Mitbehoben“.
    - **Steht in `CLAUDE.md` eine Teststrategie,** schränkt sie ein, welche Verhaltens-Befunde einen Test bekommen.
    - **Prosa: streichen statt umformulieren**, das verhindert Folgebefunde.
    - **Probe-Änderungen nie per `git checkout -- <datei>` oder `git restore` zurücknehmen**, solange eigene Fixes in derselben Datei uncommittet sind. Das löscht den Fix mit (so geschehen im Bundle-Lauf Passwort-Login). Erst den Fix committen, dann proben, oder die Probe von Hand zurücknehmen.
