@@ -63,7 +63,7 @@ Die Art legst du in Schritt 1 anhand der geänderten Dateien fest und nennst sie
 | **Ops/Config** | Dockerfile, Compose, CI, Env, Config ohne Programmlogik | **1** | keine | wie Doku, plus Fehler, die Build oder Betrieb brechen | **0** |
 | **Code klein** | Programmlogik, höchstens etwa 150 geänderte Zeilen Produktivcode (ohne Tests, Doku, Lockfiles), kein Risikobereich | **1** (Korrektheit und Verträge zusammen) | ja, nur für die 1–3 zentralen Behauptungen | wie unten unter Schweregrade | **2** |
 | **Code** | Programmlogik, kein Risikobereich | **2** (Korrektheit, Verträge; Schritt 2) | ja, jeder Reviewer für seine eigenen Behauptungen | wie unten unter Schweregrade | **2** |
-| **Code mit Risiko** | berührt einen Risikobereich: Schema oder Migration (auch persistente Client-Daten wie IndexedDB), Löschen von Daten (auch Kaskaden), Sperren, Nebenläufigkeit oder Idempotenz, Hintergrundjobs, Zustandsautomaten, Raw SQL, Auth oder Mandantengrenze, eine Invariante aus dem Projekt-`CLAUDE.md`; oder mehr als etwa 800 geänderte Zeilen Produktivcode | **3** (zusätzlich Tests/Mutation) | ja, systematisch im Tests-Fokus | wie unten unter Schweregrade | **2** |
+| **Code mit Risiko** | berührt einen Risikobereich: Schema oder Migration (auch persistente Client-Daten wie IndexedDB), Löschen von Daten (auch Kaskaden), Sperren, Nebenläufigkeit oder Idempotenz, Hintergrundjobs, Zustandsautomaten, Raw SQL, Auth oder Mandantengrenze, eine Invariante aus dem Projekt-`CLAUDE.md`; oder mehr als etwa 800 geänderte Zeilen Produktivcode | **3** (zusätzlich Tests/Mutation) | ja, im Tests-Fokus an den Risikostellen | wie unten unter Schweregrade | **2** |
 
 - **PRs aus `auto-feature`** (Body beginnt mit `Herkunft: auto-feature`; ältere Läufe: Abschnitt „Härtungsdurchgang“ und Links auf Spec und Plan) eine Stufe flacher, weil Opus-Reviews von Spec und Plan, Task-Reviews mit Mutationsproben und die Härtung schon gelaufen sind: „Code mit Risiko“ mit **2** Reviewern (Korrektheit, Verträge), ohne eigenen Tests-Fokus; „Code“ mit **1** (Korrektheit und Verträge zusammen). Mutationsproben macht jeder Reviewer nur für seine eigenen Behauptungen. „Code klein“, Doku und Ops bleiben, wie sie sind. Die Art im Kopf der Befundliste lautet dann z. B. „Code mit Risiko (auto-feature)“.
   Grund: Im Stapel security-audit (#8, #9, #12, #13, #15, Stand 12.11.2026) kostete der Tests-Fokus rund 26 $ zu Listenpreis und brachte einen von 22 betriebsrelevanten Befunden der PR-Phase. Die PR-Phase war mit etwa 6 $ je betriebsrelevantem Befund die teuerste Prüfschicht (Spec-/Plan-Reviews etwa 1 $, Task-Reviews 2 $, Härtung 4 $).
@@ -103,7 +103,7 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
    - **Verträge:** Konsumenten außerhalb des Diffs, Sicherheit und Mandantengrenze; sachliche Fehler in Prosa immer, Formulierungsbefunde nur, solange das Prosa-Budget reicht (Versandregel)
    - **Tests** (nur „Code mit Risiko“, nicht bei PRs aus `auto-feature`): vakuume Assertions, Mutationsproben an den Risikostellen, fehlende Tests nur mit benanntem Schaden im Betrieb, überflüssige Tests (Maßstab für beides: `auto-feature`, Abschnitt „Was einen Test bekommt“)
    - „Code klein“ und „Code (auto-feature)“: ein Reviewer mit Korrektheit und Verträgen zusammen.
-   - Ohne eigenen Tests-Fokus belegt jeder Reviewer seine 1–3 wichtigsten Behauptungen über Tests („Zweig X ist abgedeckt“, „Invariante Y hält“) selbst per Mutation. Eine flächendeckende Mutationsrunde macht er nicht.
+   - Ohne eigenen Tests-Fokus belegt jeder Reviewer seine 1–3 wichtigsten Behauptungen über Tests („Zweig X ist abgedeckt“, „Invariante Y hält“) selbst per Mutation. Mutationsproben an allen Risikostellen macht nur der Tests-Fokus.
 
    Aufruf: `Agent(subagent_type: "opus-xhigh", model: "opus", run_in_background: false, …)`.
    - **`model: "opus"` immer explizit setzen.** Wer stattdessen `prp-core:code-reviewer` nimmt, erbt dessen Frontmatter `model: sonnet` und landet ohne den Parameter still auf Sonnet.
@@ -135,6 +135,7 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
    - Doku- oder Ops-PR
    - die Vorrunde hat nur P3 oder Prosa verschickt, und das Delta ändert keine Logik
    - das Delta hat höchstens etwa 30 geänderte Zeilen ohne neue Verzweigung, Invariante oder Abfrage
+   - das Delta streicht nur Tests („Test überflüssig“) und ändert keine Logik, auch über 30 Zeilen
    - das Delta ist nur ein Merge der Basis, siehe nächster Absatz
 
    Grund: In der Statistik ab 22.10. (Stand 24.10.) fanden 31 Delta-Reviews (17 % der Subagent-Tokens, Median 124k) zusammen zwei betriebsrelevante Befunde, in ai_coworker_construction keinen. Erhoben ist der Wert nur bei 12 der 31, die Zahl ist also eine Untergrenze. Ein selbst geprüftes Delta steht in der Statistik nur in der Rundenzeile des Kopfs („R<r> selbst geprüft“), nicht in der Agenten-Tabelle.
@@ -190,7 +191,7 @@ Jeder PR bekommt seine **eigene Schleife, parallel**. Ein PR wartet nie auf die 
 3. **Dein Fokus** (siehe Schritt 2) mit gezielten Prüfpunkten:
    - Behauptet Code oder Text etwas, das er nicht hält?
    - Bleibt ein Test grün, wenn man die geprüfte Logik entfernt? Belege das per Mutation in deinem Worktree `<pfad>` und setz sie danach zurück. Lauf nur die betroffenen Testdateien, nicht die ganze Suite. Bleibt er grün, ist das nur mit benanntem Schaden im Betrieb ein Befund, der beim Lesen des Codes nicht auffiele. (Entfällt bei Doku-/Ops-PRs.)
-   - Fängt jeder neue Test einen Laufzeitfehler, den weder der Compiler noch ein Blick in den Code zeigt? Tests ohne Antwort meldest du zusammen als einen Befund mit Testnamen. (Entfällt bei Doku-/Ops-PRs.)
+   - Fängt jeder neue Test einen Laufzeitfehler, den weder der Compiler noch ein Blick in den Code zeigt? Tests ohne Antwort meldest du zusammen als einen Befund mit Testnamen. **Zuständig** ist der Tests-Fokus; gibt es ihn nicht („Code klein“, „Code“, PRs aus `auto-feature`), der Reviewer mit Korrektheit bzw. Korrektheit und Verträgen. Der Verträge-Reviewer prüft das nicht. (Entfällt bei Doku-/Ops-PRs.)
    - Gibt es Konsumenten außerhalb des Diffs?
 4. **Verbote:**
    - keine Edits außerhalb deines Worktrees, außer im eigenen Wegwerf-Repo (Punkt „Wegwerf-Repos“)

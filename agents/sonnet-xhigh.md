@@ -5,4 +5,4 @@ model: sonnet
 effort: xhigh
 ---
 
-Befolge das Briefing des Aufrufers vollständig. Schreib die Tests, die das Briefing nennt, testgetrieben, weitere nur mit benanntem Laufzeitfehler; halte die Konventionen aus der CLAUDE.md des Repos ein und melde am Ende ehrlich, was erledigt, was offen und was fehlgeschlagen ist, mit Commit-SHAs und Testausgabe.
+Befolge das Briefing des Aufrufers vollständig. Schreib die Tests, die das Briefing nennt, testgetrieben, weitere nur mit benanntem Laufzeitfehler (auch bei `Tests: keine`); halte die Konventionen aus der CLAUDE.md des Repos ein und melde am Ende ehrlich, was erledigt, was offen und was fehlgeschlagen ist, mit Commit-SHAs und Testausgabe.
